@@ -1,0 +1,26 @@
+{
+    "name": "pangupay-extension",
+    "version": "1.0.0",
+    "description": "PanguPay - 盘古系统 UTXO 钱包浏览器扩展",
+    "type": "module",
+    "scripts": {
+        "dev": "vite build --watch",
+        "build": "vite build",
+        "preview": "vite preview"
+    },
+    "dependencies": {
+        "crypto-js": "^4.2.0",
+        "elliptic": "^6.5.4",
+        "js-sha256": "^0.11.0",
+        "qrcode": "^1.5.3"
+    },
+    "devDependencies": {
+        "@crxjs/vite-plugin": "^2.0.0-beta.23",
+        "@types/chrome": "^0.0.260",
+        "@types/crypto-js": "^4.2.2",
+        "@types/elliptic": "^6.4.18",
+        "@types/qrcode": "^1.5.5",
+        "typescript": "^5.3.3",
+        "vite": "^5.0.12"
+    }
+}

@@ -1,0 +1,53 @@
+{
+    "manifest_version": 3,
+    "name": "PanguPay Wallet",
+    "version": "1.0.0",
+    "description": "盘古系统 UTXO 钱包扩展 - 安全、快速、便捷",
+    "action": {
+        "default_popup": "src/popup/index.html",
+        "default_icon": {
+            "16": "public/icons/icon16.svg",
+            "48": "public/icons/icon48.svg",
+            "128": "public/icons/icon128.svg"
+        }
+    },
+    "background": {
+        "service_worker": "src/background/index.ts",
+        "type": "module"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "<all_urls>"
+            ],
+            "js": [
+                "src/content/index.ts"
+            ],
+            "run_at": "document_start"
+        }
+    ],
+    "permissions": [
+        "storage",
+        "alarms"
+    ],
+    "host_permissions": [
+        "http://47.243.174.71:*/*",
+        "http://127.0.0.1:*/*",
+        "http://localhost:*/*"
+    ],
+    "icons": {
+        "16": "public/icons/icon16.svg",
+        "48": "public/icons/icon48.svg",
+        "128": "public/icons/icon128.svg"
+    },
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "src/content/inject.ts"
+            ],
+            "matches": [
+                "<all_urls>"
+            ]
+        }
+    ]
+}
