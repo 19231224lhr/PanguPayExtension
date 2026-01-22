@@ -628,3 +628,4 @@ window.pangu.on('disconnect', () => {
 > **文档版本**：1.0.0  
 > **最后更新**：2026-01-21  
 > **维护者**：PanguPay Team
+# PanguPayExtension
