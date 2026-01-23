@@ -156,8 +156,13 @@ export interface PanguResponse {
 
 export type PageName =
     | 'unlock'
+    | 'welcome'
+    | 'setPassword'
     | 'create'
     | 'import'
+    | 'walletManager'
+    | 'walletCreate'
+    | 'walletImport'
     | 'home'
     | 'send'
     | 'receive'

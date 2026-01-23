@@ -4,32 +4,17 @@
  * 注入到页面中，提供 window.pangu API 给第三方网站使用
  */
 
-interface PanguWallet {
-    connect(): Promise<{ address: string; accountId: string }>;
-    disconnect(): Promise<void>;
-    getAccount(): Promise<{ address: string; balance: Record<number, number> } | null>;
-    sendTransaction(params: {
-        to: string;
-        amount: number;
-        coinType?: number;
-        isCrossChain?: boolean;
-    }): Promise<{ txId: string; status: string }>;
-    isConnected(): Promise<boolean>;
-    on(event: 'accountChanged' | 'disconnect', callback: (data?: unknown) => void): void;
-    off(event: 'accountChanged' | 'disconnect', callback: (data?: unknown) => void): void;
-}
-
 // 生成唯一请求 ID
-function generateRequestId(): string {
+function generateRequestId() {
     return `pangu_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
 // 发送消息并等待响应
-function sendMessage<T>(type: string, payload?: unknown): Promise<T> {
+function sendMessage(type, payload) {
     return new Promise((resolve, reject) => {
         const requestId = generateRequestId();
 
-        const handler = (event: MessageEvent) => {
+        const handler = (event) => {
             if (event.source !== window) return;
             if (!event.data || event.data.type !== 'PANGU_RESPONSE') return;
             if (event.data.requestId !== requestId) return;
@@ -60,13 +45,13 @@ function sendMessage<T>(type: string, payload?: unknown): Promise<T> {
 }
 
 // 事件监听器
-const eventListeners: Record<string, Array<(data?: unknown) => void>> = {
+const eventListeners = {
     accountChanged: [],
     disconnect: [],
 };
 
 // 创建 PanguPay 钱包对象
-const pangu: PanguWallet = {
+const pangu = {
     async connect() {
         return sendMessage('PANGU_CONNECT');
     },

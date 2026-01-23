@@ -1,10 +1,10 @@
 /**
- * 导入账户页面
+ * 账户登录页面
  */
 
-import { getPublicKeyFromPrivate, generateAddress, getPublicKeyHexFromPrivate } from '../../core/signature';
+import { getPublicKeyFromPrivate, generateAddress, generateAccountIdFromPrivate } from '../../core/signature';
 import { encryptPrivateKey } from '../../core/keyEncryption';
-import { saveAccount, saveEncryptedKey, setActiveAccount, setSessionKey, type UserAccount } from '../../core/storage';
+import { getAccount, getOnboardingStep, saveAccount, saveEncryptedKey, setActiveAccount, setSessionKey, type UserAccount } from '../../core/storage';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
 export function renderImport(): void {
@@ -19,7 +19,7 @@ export function renderImport(): void {
             <path d="M19 12H5M12 19l-7-7 7-7"/>
           </svg>
         </button>
-        <span style="font-weight: 600;">导入钱包</span>
+        <span style="font-weight: 600;">账户登录</span>
         <div style="width: 32px;"></div>
       </header>
       
@@ -28,9 +28,9 @@ export function renderImport(): void {
           <div style="display: flex; align-items: flex-start; gap: 12px;">
             <span style="font-size: 20px;">🔑</span>
             <div>
-              <div style="font-weight: 500; margin-bottom: 4px;">私钥导入</div>
+              <div style="font-weight: 500; margin-bottom: 4px;">私钥登录</div>
               <div style="font-size: 12px; color: var(--text-secondary);">
-                输入 64 字符的十六进制私钥来恢复您的钱包
+                输入账户私钥以恢复账户并设置登录密码
               </div>
             </div>
           </div>
@@ -49,9 +49,11 @@ export function renderImport(): void {
             <div class="input-hint">请确保在安全环境中操作</div>
           </div>
 
-          <div id="addressPreview" style="display: none; margin-bottom: 16px;">
+          <div id="accountPreview" style="display: none; margin-bottom: 16px;">
             <div class="card">
-              <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 4px;">钱包地址预览</div>
+              <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 4px;">账户 ID</div>
+              <div id="previewAccountId" style="font-weight: 600; margin-bottom: 8px;"></div>
+              <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 4px;">账户地址</div>
               <div id="previewAddress" style="font-family: monospace; font-size: 12px; word-break: break-all; color: var(--success);"></div>
             </div>
           </div>
@@ -67,7 +69,7 @@ export function renderImport(): void {
           </div>
 
           <button type="submit" class="btn btn-primary btn-block btn-lg" style="margin-top: 16px;">
-            导入钱包
+            登录账户
           </button>
         </form>
       </div>
@@ -96,16 +98,19 @@ function handlePrivateKeyInput(e: Event): void {
         value = value.slice(2);
     }
 
-    const preview = document.getElementById('addressPreview');
+    const preview = document.getElementById('accountPreview');
+    const previewAccountId = document.getElementById('previewAccountId');
     const previewAddress = document.getElementById('previewAddress');
 
-    if (!preview || !previewAddress) return;
+    if (!preview || !previewAddress || !previewAccountId) return;
 
     // 验证私钥格式
     if (value.length === 64 && /^[0-9a-f]+$/.test(value)) {
         try {
             const publicKey = getPublicKeyFromPrivate(value);
             const address = generateAddress(publicKey);
+            const accountId = generateAccountIdFromPrivate(value);
+            previewAccountId.textContent = accountId;
             previewAddress.textContent = address;
             preview.style.display = 'block';
         } catch {
@@ -148,33 +153,38 @@ async function handleImport(e: Event): Promise<void> {
         // 生成地址
         const publicKey = getPublicKeyFromPrivate(privateKey);
         const address = generateAddress(publicKey);
-        const { x: pubXHex, y: pubYHex } = getPublicKeyHexFromPrivate(privateKey);
-
         // 加密私钥
         const encrypted = await encryptPrivateKey(privateKey, password);
 
         // 生成账户 ID
-        const accountId = Date.now().toString();
+        const accountId = generateAccountIdFromPrivate(privateKey);
 
-        // 创建账户
-        const account: UserAccount = {
-            accountId,
-            mainAddress: address,
-            addresses: {
-                [address]: {
-                    address,
-                    type: 0,
-                    balance: 0,
-                    utxoCount: 0,
-                    txCerCount: 0,
-                    pubXHex,
-                    pubYHex,
-                },
-            },
-            totalBalance: { 0: 0, 1: 0, 2: 0 },
-            createdAt: Date.now(),
-            lastLogin: Date.now(),
-        };
+        const existing = await getAccount(accountId);
+        const cleanedAddresses = existing?.addresses ? { ...existing.addresses } : {};
+        if (address in cleanedAddresses) {
+            delete cleanedAddresses[address];
+        }
+
+        const account: UserAccount = existing
+            ? {
+                ...existing,
+                mainAddress: existing.mainAddress || address,
+                addresses: cleanedAddresses,
+                defaultAddress: existing.defaultAddress && cleanedAddresses[existing.defaultAddress]
+                    ? existing.defaultAddress
+                    : undefined,
+                lastLogin: Date.now(),
+            }
+            : {
+                accountId,
+                mainAddress: address,
+                addresses: {},
+                onboardingComplete: false,
+                onboardingStep: 'wallet',
+                totalBalance: { 0: 0, 1: 0, 2: 0 },
+                createdAt: Date.now(),
+                lastLogin: Date.now(),
+            };
 
         // 保存
         await saveAccount(account);
@@ -187,13 +197,14 @@ async function handleImport(e: Event): Promise<void> {
         await setActiveAccount(accountId);
         setSessionKey(accountId, privateKey);
 
-        (window as any).showToast('钱包导入成功！', 'success');
+        (window as any).showToast('账户登录成功！', 'success');
 
-        setTimeout(() => {
-            (window as any).navigateTo('home');
+        setTimeout(async () => {
+            const step = await getOnboardingStep(accountId);
+            (window as any).navigateTo(step === 'complete' ? 'home' : step === 'organization' ? 'organization' : 'walletManager');
         }, 500);
     } catch (error) {
-        console.error('[导入] 失败:', error);
-        (window as any).showToast('导入失败: ' + (error as Error).message, 'error');
+        console.error('[登录] 失败:', error);
+        (window as any).showToast('登录失败: ' + (error as Error).message, 'error');
     }
 }

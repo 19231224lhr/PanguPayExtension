@@ -83,7 +83,7 @@
 ├── manifest.json           # 配置文件（权限、入口）
 ├── src/background/index.ts # Service Worker 入口（构建后输出）
 ├── src/content/index.ts    # Content Script 入口（构建后输出）
-├── src/content/inject.ts   # 注入网页脚本（web_accessible_resources）
+├── src/content/inject.js   # 注入网页脚本（web_accessible_resources）
 ├── src/popup/              # 弹窗页面（index.html + main.ts + styles）
 └── public/icons/           # 图标资源
 ```
@@ -306,7 +306,7 @@ sequenceDiagram
 | `manifest.json` | 扩展配置 |
 | `background/index.ts` | Service Worker 入口 |
 | `content/index.ts` | Content Script 入口 |
-| `content/inject.ts` | 注入 window.pangu |
+| `content/inject.js` | 注入 window.pangu |
 | `popup/index.html` | 弹窗入口页面 |
 | `popup/main.ts` | 弹窗入口脚本 |
 | `popup/pages/*` | 弹窗页面 |
@@ -336,7 +336,7 @@ PanguPayExtension/
 │   │
 │   ├── content/                 # 注入脚本
 │   │   ├── index.ts             # Content Script 入口
-│   │   └── inject.ts            # 注入 window.pangu
+│   │   └── inject.js            # 注入 window.pangu
 │   │
 │   ├── popup/                   # 弹窗界面
 │   │   ├── index.html           # 入口 HTML
@@ -479,7 +479,7 @@ PanguPayExtension/
 
   "web_accessible_resources": [
     {
-      "resources": ["src/content/inject.ts"],
+      "resources": ["src/content/inject.js"],
       "matches": ["<all_urls>"]
     }
   ]

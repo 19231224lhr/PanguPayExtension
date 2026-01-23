@@ -9,6 +9,7 @@
 
 import {
     getActiveAccount,
+    getDefaultWalletAddress,
     isUnlocked,
     clearSession,
     getOrganization,
@@ -80,12 +81,22 @@ async function handleConnect(requestId: string): Promise<PanguResponse> {
         };
     }
 
+    const walletAddress = getDefaultWalletAddress(account);
+    if (!walletAddress) {
+        return {
+            type: 'PANGU_RESPONSE',
+            requestId,
+            success: false,
+            error: '请先在钱包管理中添加地址',
+        };
+    }
+
     return {
         type: 'PANGU_RESPONSE',
         requestId,
         success: true,
         data: {
-            address: account.mainAddress,
+            address: walletAddress.address,
             accountId: account.accountId,
         },
     };
@@ -112,6 +123,16 @@ async function handleGetAccount(requestId: string): Promise<PanguResponse> {
         };
     }
 
+    const walletAddress = getDefaultWalletAddress(account);
+    if (!walletAddress) {
+        return {
+            type: 'PANGU_RESPONSE',
+            requestId,
+            success: false,
+            error: '请先在钱包管理中添加地址',
+        };
+    }
+
     const org = await getOrganization(account.accountId);
 
     return {
@@ -119,7 +140,7 @@ async function handleGetAccount(requestId: string): Promise<PanguResponse> {
         requestId,
         success: true,
         data: {
-            address: account.mainAddress,
+            address: walletAddress.address,
             accountId: account.accountId,
             balance: account.totalBalance,
             organization: org?.groupName || null,

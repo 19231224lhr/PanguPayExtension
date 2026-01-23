@@ -5,11 +5,15 @@
 import {
     getActiveAccount,
     getAllAccounts,
-    isUnlocked,
     getSessionKey,
+    getOnboardingStep,
 } from '../core/storage';
 import { renderWelcome } from './pages/welcome';
 import { renderUnlock } from './pages/unlock';
+import { renderSetPassword } from './pages/setPassword';
+import { renderWalletManager } from './pages/walletManager';
+import { renderWalletCreate } from './pages/walletCreate';
+import { renderWalletImport } from './pages/walletImport';
 import { renderHome } from './pages/home';
 import { renderSend } from './pages/send';
 import { renderReceive } from './pages/receive';
@@ -24,7 +28,7 @@ import type { PageName } from '../core/types';
 // 路由状态
 // ========================================
 
-let currentPage: PageName = 'unlock';
+let currentPage: PageName | null = null;
 
 type PageRenderer = () => void | Promise<void>;
 
@@ -34,9 +38,13 @@ type PageRenderer = () => void | Promise<void>;
 
 const pageRenderers: Record<PageName, PageRenderer> = {
     unlock: renderUnlock,
+    setPassword: renderSetPassword,
     welcome: renderWelcome,
     create: renderCreate,
     import: renderImport,
+    walletManager: renderWalletManager,
+    walletCreate: renderWalletCreate,
+    walletImport: renderWalletImport,
     home: renderHome,
     send: renderSend,
     receive: renderReceive,
@@ -88,10 +96,52 @@ async function renderWithTransition(renderer: PageRenderer): Promise<void> {
     }
 }
 
+async function resolveTargetPage(page: PageName): Promise<PageName> {
+    const account = await getActiveAccount();
+    if (!account) return page;
+
+    const step = await getOnboardingStep(account.accountId);
+    if (step === 'complete') return page;
+
+    const walletAllowed = new Set<PageName>([
+        'welcome',
+        'create',
+        'import',
+        'unlock',
+        'setPassword',
+        'walletManager',
+        'walletCreate',
+        'walletImport',
+    ]);
+
+    const orgAllowed = new Set<PageName>([
+        'welcome',
+        'create',
+        'import',
+        'unlock',
+        'setPassword',
+        'walletManager',
+        'walletCreate',
+        'walletImport',
+        'organization',
+    ]);
+
+    if (step === 'wallet' && !walletAllowed.has(page)) {
+        return 'walletManager';
+    }
+
+    if (step === 'organization' && !orgAllowed.has(page)) {
+        return 'organization';
+    }
+
+    return page;
+}
+
 export async function navigateTo(page: PageName): Promise<void> {
-    if (page === currentPage) return;
-    currentPage = page;
-    const renderer = pageRenderers[page];
+    const targetPage = await resolveTargetPage(page);
+    if (targetPage === currentPage) return;
+    currentPage = targetPage;
+    const renderer = pageRenderers[targetPage];
     if (renderer) {
         try {
             await renderWithTransition(renderer);
@@ -146,8 +196,8 @@ async function init(): Promise<void> {
         // 检查是否已解锁
         const session = getSessionKey();
         if (session) {
-            // 已解锁，显示首页
-            navigateTo('home');
+            const step = await getOnboardingStep(session.accountId);
+            navigateTo(step === 'complete' ? 'home' : step === 'organization' ? 'organization' : 'walletManager');
         } else {
             // 未解锁，显示解锁页
             navigateTo('unlock');

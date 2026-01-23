@@ -29,12 +29,17 @@ export interface UserAccount {
     accountId: string;
     mainAddress: string;
     addresses: Record<string, AddressInfo>;
+    defaultAddress?: string;
     organizationId?: string;
     organizationName?: string;
+    onboardingComplete?: boolean;
+    onboardingStep?: OnboardingStep;
     totalBalance: Record<number, number>; // coinType -> balance
     createdAt: number;
     lastLogin: number;
 }
+
+export type OnboardingStep = 'wallet' | 'organization' | 'complete';
 
 export interface EncryptedAccount {
     accountId: string;
@@ -144,6 +149,36 @@ export async function getActiveAccount(): Promise<UserAccount | null> {
 }
 
 // ========================================
+// Onboarding
+// ========================================
+
+export async function setOnboardingComplete(accountId: string, complete: boolean): Promise<void> {
+    await setOnboardingStep(accountId, complete ? 'complete' : 'organization');
+}
+
+export async function setOnboardingStep(accountId: string, step: OnboardingStep): Promise<void> {
+    const account = await getAccount(accountId);
+    if (!account) return;
+    account.onboardingStep = step;
+    account.onboardingComplete = step === 'complete';
+    await saveAccount(account);
+}
+
+export async function getOnboardingStep(accountId: string): Promise<OnboardingStep> {
+    const account = await getAccount(accountId);
+    if (!account) return 'complete';
+
+    if (account.onboardingStep) return account.onboardingStep;
+    if (account.onboardingComplete === false) return 'organization';
+
+    return 'complete';
+}
+
+export async function isOnboardingComplete(accountId: string): Promise<boolean> {
+    return (await getOnboardingStep(accountId)) === 'complete';
+}
+
+// ========================================
 // Encrypted Keys
 // ========================================
 
@@ -240,6 +275,11 @@ export async function saveSettings(settings: Partial<ExtensionSettings>): Promis
 
 let sessionPrivateKey: string | null = null;
 let sessionAccountId: string | null = null;
+const sessionAddressKeys = new Map<string, string>();
+
+function normalizeSessionAddressKey(address: string): string {
+    return String(address || '').trim().toLowerCase();
+}
 
 export function setSessionKey(accountId: string, privKey: string): void {
     sessionAccountId = accountId;
@@ -256,8 +296,55 @@ export function getSessionKey(): { accountId: string; privKey: string } | null {
 export function clearSession(): void {
     sessionAccountId = null;
     sessionPrivateKey = null;
+    sessionAddressKeys.clear();
 }
 
 export function isUnlocked(): boolean {
     return sessionPrivateKey !== null;
+}
+
+export function setSessionAddressKey(address: string, privKey: string): void {
+    sessionAddressKeys.set(normalizeSessionAddressKey(address), privKey);
+}
+
+export function hasSessionAddressKey(address: string): boolean {
+    return sessionAddressKeys.has(normalizeSessionAddressKey(address));
+}
+
+export function getSessionAddressKey(address: string): string | null {
+    return sessionAddressKeys.get(normalizeSessionAddressKey(address)) || null;
+}
+
+export function removeSessionAddressKey(address: string): void {
+    sessionAddressKeys.delete(normalizeSessionAddressKey(address));
+}
+
+// ========================================
+// Wallet Address Helpers
+// ========================================
+
+export function getWalletAddresses(account: UserAccount): AddressInfo[] {
+    const list = Object.values(account.addresses || {});
+    return list.filter((item) => item.address !== account.mainAddress);
+}
+
+export function getDefaultWalletAddress(account: UserAccount): AddressInfo | null {
+    const list = getWalletAddresses(account);
+    if (!list.length) return null;
+
+    const preferred = account.defaultAddress ? account.addresses[account.defaultAddress] : null;
+    if (preferred && preferred.address !== account.mainAddress) {
+        return preferred;
+    }
+
+    return list[0];
+}
+
+export async function setDefaultWalletAddress(accountId: string, address: string): Promise<void> {
+    const account = await getAccount(accountId);
+    if (!account) return;
+    if (!account.addresses[address]) return;
+    if (address === account.mainAddress) return;
+    account.defaultAddress = address;
+    await saveAccount(account);
 }

@@ -1,47 +1,44 @@
 /**
- * 创建账户页面
+ * 新建钱包地址页面
  */
 
-import { generateKeyPair, generateAddress, generateAccountIdFromPrivate } from '../../core/signature';
+import { generateKeyPair, generateAddress, getPublicKeyHexFromPrivate } from '../../core/signature';
+import { getActiveAccount, saveAccount, setSessionAddressKey } from '../../core/storage';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
 let generatedPrivateKey: string | null = null;
 let generatedAddress: string | null = null;
-let generatedAccountId: string | null = null;
+let generatedPubXHex: string | null = null;
+let generatedPubYHex: string | null = null;
 
-export function renderCreate(): void {
+export function renderWalletCreate(): void {
     const app = document.getElementById('app');
     if (!app) return;
 
-    // 生成新密钥对
     const { privateKey, publicKey } = generateKeyPair();
     const address = generateAddress(publicKey);
-    const accountId = generateAccountIdFromPrivate(privateKey);
+    const { x: pubXHex, y: pubYHex } = getPublicKeyHexFromPrivate(privateKey);
 
     generatedPrivateKey = privateKey;
     generatedAddress = address;
-    generatedAccountId = accountId;
+    generatedPubXHex = pubXHex;
+    generatedPubYHex = pubYHex;
 
     app.innerHTML = `
     <div class="page">
       <header class="header">
-        <button class="header-btn" onclick="navigateTo('welcome')">
+        <button class="header-btn" onclick="navigateTo('walletManager')">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M19 12H5M12 19l-7-7 7-7"/>
           </svg>
         </button>
-        <span style="font-weight: 600;">创建新账户</span>
+        <span style="font-weight: 600;">新建钱包</span>
         <div style="width: 32px;"></div>
       </header>
-      
+
       <div class="page-content">
         <div class="card" style="margin-bottom: 16px;">
-          <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">账户 ID</div>
-          <div style="font-weight: 600; letter-spacing: 0.5px;">${accountId}</div>
-        </div>
-
-        <div class="card" style="margin-bottom: 16px;">
-          <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">账户地址</div>
+          <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">钱包地址</div>
           <div style="font-family: monospace; font-size: 12px; word-break: break-all; color: var(--primary-light);">
             ${address}
           </div>
@@ -51,9 +48,9 @@ export function renderCreate(): void {
           <div style="display: flex; align-items: flex-start; gap: 12px;">
             <span style="font-size: 20px;">⚠️</span>
             <div>
-              <div style="font-weight: 600; margin-bottom: 4px; color: var(--warning);">请妥善保管账户私钥</div>
+              <div style="font-weight: 600; margin-bottom: 4px; color: var(--warning);">请妥善保管私钥</div>
               <div style="font-size: 12px; color: var(--text-secondary);">
-                私钥是您资产的唯一凭证，丢失将无法找回
+                私钥是该地址资产的唯一凭证，请勿泄露
               </div>
             </div>
           </div>
@@ -69,8 +66,8 @@ export function renderCreate(): void {
         </div>
 
         <div style="margin-top: 24px;">
-          <button class="btn btn-primary btn-block btn-lg" onclick="handleCreateNext()">
-            下一步
+          <button class="btn btn-primary btn-block btn-lg" onclick="handleAddWallet()">
+            添加到钱包
           </button>
         </div>
       </div>
@@ -80,7 +77,7 @@ export function renderCreate(): void {
     bindInlineHandlers(app, {
         navigateTo: (page: string) => (window as any).navigateTo(page),
         togglePrivateKey,
-        handleCreateNext,
+        handleAddWallet,
     });
 }
 
@@ -99,27 +96,53 @@ function togglePrivateKey(): void {
     }
 }
 
-function handleCreateNext(): void {
+async function handleAddWallet(): Promise<void> {
     if (!generatedPrivateKey || !generatedAddress) {
         (window as any).showToast('密钥生成失败', 'error');
         return;
     }
 
     try {
-        (window as any).__pendingAccountData = {
-            accountId: generatedAccountId || Date.now().toString(),
-            address: generatedAddress,
-            privHex: generatedPrivateKey,
-        };
+        const account = await getActiveAccount();
+        if (!account) {
+            (window as any).showToast('账户未找到', 'error');
+            (window as any).navigateTo('welcome');
+            return;
+        }
 
-        // 清理临时变量
+        if (generatedAddress === account.mainAddress) {
+            (window as any).showToast('该私钥为账户私钥，不能作为子钱包', 'error');
+            return;
+        }
+
+        if (!account.addresses[generatedAddress]) {
+            account.addresses[generatedAddress] = {
+                address: generatedAddress,
+                type: 0,
+                balance: 0,
+                utxoCount: 0,
+                txCerCount: 0,
+                pubXHex: generatedPubXHex || '',
+                pubYHex: generatedPubYHex || '',
+            };
+        }
+
+        if (!account.defaultAddress || !account.addresses[account.defaultAddress]) {
+            account.defaultAddress = generatedAddress;
+        }
+
+        await saveAccount(account);
+        setSessionAddressKey(generatedAddress, generatedPrivateKey);
+
         generatedPrivateKey = null;
         generatedAddress = null;
-        generatedAccountId = null;
+        generatedPubXHex = null;
+        generatedPubYHex = null;
 
-        (window as any).navigateTo('setPassword');
+        (window as any).showToast('钱包地址已添加', 'success');
+        (window as any).navigateTo('walletManager');
     } catch (error) {
-        console.error('[创建] 失败:', error);
-        (window as any).showToast('创建失败: ' + (error as Error).message, 'error');
+        console.error('[新建钱包] 失败:', error);
+        (window as any).showToast('添加失败: ' + (error as Error).message, 'error');
     }
 }

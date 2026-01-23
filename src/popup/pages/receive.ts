@@ -2,7 +2,7 @@
  * 接收页面 - 显示收款地址和二维码
  */
 
-import { getActiveAccount } from '../../core/storage';
+import { getActiveAccount, getDefaultWalletAddress } from '../../core/storage';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
 export async function renderReceive(): Promise<void> {
@@ -15,8 +15,15 @@ export async function renderReceive(): Promise<void> {
         return;
     }
 
+    const walletAddress = getDefaultWalletAddress(account);
+    if (!walletAddress) {
+        (window as any).showToast('请先添加钱包地址', 'info');
+        (window as any).navigateTo('walletManager');
+        return;
+    }
+
     // 生成简单的文本二维码占位符（实际可用 QRCode 库生成）
-    const address = account.mainAddress;
+    const address = walletAddress.address;
 
     app.innerHTML = `
     <div class="page">

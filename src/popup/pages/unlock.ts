@@ -2,7 +2,7 @@
  * 解锁页面
  */
 
-import { getActiveAccountId, getEncryptedKey, setSessionKey, getActiveAccount } from '../../core/storage';
+import { getActiveAccountId, getEncryptedKey, setSessionKey, getActiveAccount, getOnboardingStep } from '../../core/storage';
 import { decryptPrivateKey } from '../../core/keyEncryption';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
@@ -101,9 +101,10 @@ async function handleUnlock(e: Event): Promise<void> {
 
         (window as any).showToast('解锁成功', 'success');
 
-        // 跳转到首页
-        setTimeout(() => {
-            (window as any).navigateTo('home');
+        // 跳转到下一步
+        setTimeout(async () => {
+            const step = await getOnboardingStep(accountId);
+            (window as any).navigateTo(step === 'complete' ? 'home' : step === 'organization' ? 'organization' : 'walletManager');
         }, 300);
     } catch (error) {
         console.error('[解锁] 失败:', error);

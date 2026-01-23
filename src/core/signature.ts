@@ -141,7 +141,7 @@ export function getPublicKeyHexFromPrivate(privateKeyHex: string): { x: string; 
 export function generateKeyPair(): { privateKey: string; publicKey: PublicKeyNew } {
     const key = ec.genKeyPair();
     return {
-        privateKey: key.getPrivate('hex'),
+        privateKey: key.getPrivate('hex').padStart(64, '0'),
         publicKey: {
             CurveName: 'P256',
             X: BigInt('0x' + key.getPublic().getX().toString(16)),
@@ -210,4 +210,39 @@ export function convertPublicKeyToHex(publicKey: PublicKeyNew): { x: string; y: 
         x: bigIntToHex(publicKey.X),
         y: bigIntToHex(publicKey.Y)
     };
+}
+
+// ============================================
+// 账户 ID 生成（对齐前端逻辑）
+// ============================================
+
+const CRC32_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+        let c = i;
+        for (let j = 0; j < 8; j++) {
+            c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        }
+        table[i] = c >>> 0;
+    }
+    return table;
+})();
+
+function crc32(bytes: Uint8Array): number {
+    let crc = 0xFFFFFFFF;
+    for (let i = 0; i < bytes.length; i++) {
+        crc = CRC32_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+    }
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+export function generateAccountIdFromPrivate(privateKeyHex: string): string {
+    const normalized = String(privateKeyHex)
+        .replace(/^0x/i, '')
+        .toLowerCase()
+        .replace(/^0+/, '');
+    const bytes = new TextEncoder().encode(normalized);
+    const value = crc32(bytes);
+    const num = (value % 90000000) + 10000000;
+    return String(num).padStart(8, '0');
 }

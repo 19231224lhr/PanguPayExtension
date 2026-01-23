@@ -34,9 +34,12 @@ export async function renderSettings(): Promise<void> {
               <img src="${logoUrl}" alt="PanguPay" />
             </div>
             <div style="flex: 1; min-width: 0;">
-              <div style="font-weight: 600; margin-bottom: 2px;">钱包账户</div>
+              <div style="font-weight: 600; margin-bottom: 2px;">账户 ID</div>
+              <div style="font-size: 12px; color: var(--text-primary);">
+                ${account?.accountId || '未登录'}
+              </div>
               <div style="font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                ${account?.mainAddress || '未登录'}
+                账户地址：${account?.mainAddress || '--'}
               </div>
             </div>
           </div>
@@ -47,6 +50,13 @@ export async function renderSettings(): Promise<void> {
           <div class="list-title">常规设置</div>
           
           <div class="card" style="padding: 0;">
+            <div class="settings-item" onclick="navigateTo('walletManager')">
+              <div class="settings-label">钱包管理</div>
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <span class="settings-arrow">›</span>
+              </div>
+            </div>
+
             <div class="settings-item" onclick="toggleLanguage()">
               <div class="settings-label">语言</div>
               <div style="display: flex; align-items: center; gap: 8px;">

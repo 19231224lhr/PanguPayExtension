@@ -2,7 +2,14 @@
  * 组织管理页面 - 加入/退出担保组织
  */
 
-import { getActiveAccount, getOrganization, saveOrganization, type OrganizationChoice } from '../../core/storage';
+import {
+    getActiveAccount,
+    getOrganization,
+    saveOrganization,
+    getOnboardingStep,
+    setOnboardingStep,
+    type OrganizationChoice,
+} from '../../core/storage';
 import { getGroupList, type GroupInfo } from '../../core/api';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
@@ -37,6 +44,63 @@ export async function renderOrganization(): Promise<void> {
     }
 
     const currentOrg = await getOrganization(account.accountId);
+    const step = await getOnboardingStep(account.accountId);
+    const isOnboarding = step === 'organization';
+    const onboardingBanner = isOnboarding
+        ? `
+        <div class="card onboarding-card" style="margin-bottom: 16px;">
+          <div style="font-weight: 600; margin-bottom: 6px;">步骤 4 / 4 · 选择担保组织</div>
+          <div style="font-size: 12px; color: var(--text-secondary);">
+            加入组织可使用快速转账；也可暂不加入，稍后在设置中修改
+          </div>
+        </div>
+        `
+        : '';
+    const footerBlock = isOnboarding
+        ? `
+      <div class="onboarding-actions">
+        <button class="btn btn-secondary btn-block" onclick="skipOnboarding()">
+          暂不加入
+        </button>
+        <button class="btn btn-primary btn-block" onclick="completeOnboarding()">
+          进入主界面
+        </button>
+      </div>
+      `
+        : `
+      <!-- 底部导航 -->
+      <nav class="bottom-nav">
+        <button class="nav-item" onclick="navigateTo('home')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+            <polyline points="9 22 9 12 15 12 15 22"></polyline>
+          </svg>
+          <span>首页</span>
+        </button>
+        <button class="nav-item" onclick="navigateTo('history')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 6 12 12 16 14"></polyline>
+          </svg>
+          <span>历史</span>
+        </button>
+        <button class="nav-item active" onclick="navigateTo('organization')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+            <circle cx="9" cy="7" r="4"></circle>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"></path>
+          </svg>
+          <span>组织</span>
+        </button>
+        <button class="nav-item" onclick="navigateTo('settings')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
+          </svg>
+          <span>设置</span>
+        </button>
+      </nav>
+      `;
 
     // 尝试获取真实组织列表，失败则使用模拟数据
     let groups = mockGroups;
@@ -52,7 +116,7 @@ export async function renderOrganization(): Promise<void> {
     app.innerHTML = `
     <div class="page">
       <header class="header">
-        <button class="header-btn" onclick="navigateTo('home')">
+        <button class="header-btn" onclick="navigateTo('${isOnboarding ? 'walletManager' : 'home'}')">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M19 12H5M12 19l-7-7 7-7"/>
           </svg>
@@ -62,6 +126,7 @@ export async function renderOrganization(): Promise<void> {
       </header>
       
       <div class="page-content">
+        ${onboardingBanner}
         <!-- 当前组织状态 -->
         <div class="card" style="margin-bottom: 20px;">
           <div style="display: flex; align-items: center; gap: 12px;">
@@ -132,38 +197,7 @@ export async function renderOrganization(): Promise<void> {
         </div>
       </div>
 
-      <!-- 底部导航 -->
-      <nav class="bottom-nav">
-        <button class="nav-item" onclick="navigateTo('home')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
-            <polyline points="9 22 9 12 15 12 15 22"></polyline>
-          </svg>
-          <span>首页</span>
-        </button>
-        <button class="nav-item" onclick="navigateTo('history')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10"></circle>
-            <polyline points="12 6 12 12 16 14"></polyline>
-          </svg>
-          <span>历史</span>
-        </button>
-        <button class="nav-item active" onclick="navigateTo('organization')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
-            <circle cx="9" cy="7" r="4"></circle>
-            <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"></path>
-          </svg>
-          <span>组织</span>
-        </button>
-        <button class="nav-item" onclick="navigateTo('settings')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="3"></circle>
-            <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
-          </svg>
-          <span>设置</span>
-        </button>
-      </nav>
+      ${footerBlock}
     </div>
   `;
 
@@ -171,6 +205,8 @@ export async function renderOrganization(): Promise<void> {
         navigateTo: (page: string) => (window as any).navigateTo(page),
         joinOrganization,
         leaveOrganization,
+        skipOnboarding,
+        completeOnboarding,
     });
 }
 
@@ -183,6 +219,8 @@ async function joinOrganization(
 ) {
     const account = await getActiveAccount();
     if (!account) return;
+    const step = await getOnboardingStep(account.accountId);
+    const wasOnboarding = step === 'organization';
 
     const org: OrganizationChoice = {
         groupId,
@@ -194,6 +232,13 @@ async function joinOrganization(
 
     await saveOrganization(account.accountId, org);
     (window as any).showToast(`已加入 ${groupName}`, 'success');
+
+    if (wasOnboarding) {
+        await setOnboardingStep(account.accountId, 'complete');
+        (window as any).navigateTo('home');
+        return;
+    }
+
     renderOrganization();
 }
 
@@ -212,4 +257,18 @@ async function leaveOrganization(): Promise<void> {
 
     (window as any).showToast('已退出组织', 'info');
     renderOrganization();
+}
+
+async function skipOnboarding(): Promise<void> {
+    const account = await getActiveAccount();
+    if (!account) return;
+    await setOnboardingStep(account.accountId, 'complete');
+    (window as any).navigateTo('home');
+}
+
+async function completeOnboarding(): Promise<void> {
+    const account = await getActiveAccount();
+    if (!account) return;
+    await setOnboardingStep(account.accountId, 'complete');
+    (window as any).navigateTo('home');
 }

@@ -4,10 +4,10 @@
  * 注入到网页中，提供 window.pangu API
  */
 
-// 注入 inject.ts 脚本到页面
+// 注入 inject.js 脚本到页面
 function injectScript() {
     const script = document.createElement('script');
-    script.src = chrome.runtime.getURL('src/content/inject.ts');
+    script.src = chrome.runtime.getURL('src/content/inject.js');
     script.type = 'module';
     (document.head || document.documentElement).appendChild(script);
     script.onload = () => script.remove();

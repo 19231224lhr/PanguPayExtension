@@ -21,10 +21,10 @@ export function renderWelcome(): void {
       </p>
       <div class="welcome-actions">
         <button class="btn btn-primary btn-block btn-lg" onclick="navigateTo('create')">
-          创建新钱包
+          创建新账户
         </button>
         <button class="btn btn-secondary btn-block" onclick="navigateTo('import')">
-          导入已有钱包
+          登录账户
         </button>
       </div>
     </div>
