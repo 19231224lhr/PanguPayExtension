@@ -52,6 +52,13 @@ export function renderSetPassword(): void {
       </header>
       
       <div class="page-content">
+        <div class="card onboarding-card" style="margin-bottom: 16px;">
+          <div style="font-weight: 600; margin-bottom: 6px;">步骤 2 / 4 · 设置密码</div>
+          <div style="font-size: 12px; color: var(--text-secondary);">
+            设置登录密码用于加密私钥
+          </div>
+        </div>
+
         <div class="card" style="margin-bottom: 20px;">
           <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 6px;">即将创建的账户</div>
           <div style="font-weight: 600; margin-bottom: 4px;">账户 ID: ${pending.accountId}</div>

@@ -35,6 +35,13 @@ export function renderCreate(): void {
       </header>
       
       <div class="page-content">
+        <div class="card onboarding-card" style="margin-bottom: 16px;">
+          <div style="font-weight: 600; margin-bottom: 6px;">步骤 1 / 4 · 创建账户</div>
+          <div style="font-size: 12px; color: var(--text-secondary);">
+            生成账户 ID 与私钥，用于后续登录
+          </div>
+        </div>
+
         <div class="card" style="margin-bottom: 16px;">
           <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">账户 ID</div>
           <div style="font-weight: 600; letter-spacing: 0.5px;">${accountId}</div>

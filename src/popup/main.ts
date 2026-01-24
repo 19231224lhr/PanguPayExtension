@@ -160,23 +160,111 @@ export async function navigateTo(page: PageName): Promise<void> {
 // Toast 提示
 // ========================================
 
-export function showToast(message: string, type: 'success' | 'error' | 'info' = 'info'): void {
-    const existing = document.querySelector('.toast');
-    if (existing) {
-        existing.remove();
+type ToastType = 'success' | 'error' | 'info' | 'warning';
+
+const TOAST_DEFAULT_TITLES: Record<ToastType, string> = {
+    success: '成功',
+    error: '失败',
+    info: '提示',
+    warning: '注意',
+};
+
+const MAX_TOASTS = 3;
+
+function getToastContainer(): HTMLElement {
+    let container = document.querySelector<HTMLElement>('.toast-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.className = 'toast-container';
+        document.body.appendChild(container);
     }
-
-    const toast = document.createElement('div');
-    toast.className = `toast ${type}`;
-    toast.textContent = message;
-    document.body.appendChild(toast);
-
-    setTimeout(() => {
-        toast.remove();
-    }, 3000);
+    return container;
 }
 
+function removeToast(toast: HTMLElement): void {
+    if (!toast || toast.classList.contains('toast--exiting')) return;
+    toast.classList.add('toast--exiting');
+    setTimeout(() => {
+        toast.remove();
+    }, 180);
+}
+
+export function showToast(
+    message: string,
+    type: ToastType = 'info',
+    title = '',
+    duration = 3000
+): HTMLElement {
+    const container = getToastContainer();
+
+    const toast = document.createElement('div');
+    toast.className = `toast toast--${type}`;
+    toast.setAttribute('role', 'status');
+    toast.setAttribute('aria-live', 'polite');
+
+    const safeTitle = title || TOAST_DEFAULT_TITLES[type] || TOAST_DEFAULT_TITLES.info;
+
+    toast.innerHTML = `
+      <div class="toast-dot"></div>
+      <div class="toast-body">
+        <div class="toast-title"></div>
+        <div class="toast-message"></div>
+      </div>
+      <button class="toast-close" type="button" aria-label="关闭">x</button>
+    `;
+
+    const titleEl = toast.querySelector<HTMLElement>('.toast-title');
+    if (titleEl) titleEl.textContent = safeTitle;
+    const messageEl = toast.querySelector<HTMLElement>('.toast-message');
+    if (messageEl) messageEl.textContent = message;
+
+    container.appendChild(toast);
+
+    requestAnimationFrame(() => {
+        toast.classList.add('toast--show');
+    });
+
+    const closeBtn = toast.querySelector<HTMLButtonElement>('.toast-close');
+    if (closeBtn) {
+        closeBtn.addEventListener('click', () => removeToast(toast));
+    }
+
+    const active = Array.from(container.querySelectorAll<HTMLElement>('.toast'));
+    if (active.length > MAX_TOASTS) {
+        removeToast(active[0]);
+    }
+
+    if (duration > 0) {
+        setTimeout(() => removeToast(toast), duration);
+    }
+
+    return toast;
+}
+
+export const showSuccessToast = (message: string, title = '', duration = 3000) =>
+    showToast(message, 'success', title, duration);
+export const showErrorToast = (message: string, title = '', duration = 3000) =>
+    showToast(message, 'error', title, duration);
+export const showInfoToast = (message: string, title = '', duration = 3000) =>
+    showToast(message, 'info', title, duration);
+export const showWarningToast = (message: string, title = '', duration = 3000) =>
+    showToast(message, 'warning', title, duration);
+
 (window as any).showToast = showToast;
+(window as any).showSuccessToast = showSuccessToast;
+(window as any).showErrorToast = showErrorToast;
+(window as any).showInfoToast = showInfoToast;
+(window as any).showWarningToast = showWarningToast;
+
+(window as any).PanguPay = (window as any).PanguPay || {};
+(window as any).PanguPay.ui = {
+    ...(window as any).PanguPay.ui,
+    showToast,
+    showSuccessToast,
+    showErrorToast,
+    showInfoToast,
+    showWarningToast,
+};
 
 // ========================================
 // 初始化

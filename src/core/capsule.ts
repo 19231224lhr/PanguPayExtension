@@ -2,9 +2,9 @@
  * Capsule address helper (extension)
  */
 
-import { API_HOST, BOOT_NODE_PORT, buildApiUrl } from './api';
+import { API_BASE_URL, API_ENDPOINTS, buildApiUrl, buildNodeUrl, getComNodeEndpoint } from './api';
 import { getOrganization, getSessionAddressKey, getSessionKey, type OrganizationChoice } from './storage';
-import { getTimestamp, serializeForBackend, signStruct, type EcdsaSignature } from './signature';
+import { getCustomEpochTimestamp, serializeForBackend, signStruct, type EcdsaSignature } from './signature';
 
 interface CapsuleAddressRequest {
     UserID: string;
@@ -19,16 +19,8 @@ interface CapsuleAddressReply {
     ErrorMsg?: string;
 }
 
-interface CommitteeEndpointResponse {
-    endpoint?: string;
-    Endpoint?: string;
-    success?: boolean;
-    data?: { endpoint?: string };
-}
-
 const COMMITTEE_ORG_ID = '00000000';
 const capsuleCache = new Map<string, string>();
-let cachedComNodeUrl: string | null = null;
 
 function normalizeAddress(address: string): string {
     return String(address || '').trim().replace(/^0x/i, '').toLowerCase();
@@ -42,59 +34,9 @@ function buildCacheKey(orgId: string, address: string): string {
     return `${orgId}:${address}`;
 }
 
-function getBaseProtocolHost(): { protocol: string; host: string } {
-    try {
-        const base = new URL(`${API_HOST}:${BOOT_NODE_PORT}`);
-        return { protocol: base.protocol || 'http:', host: base.hostname || 'localhost' };
-    } catch {
-        return { protocol: 'http:', host: 'localhost' };
-    }
-}
-
-function normalizeEndpoint(endpoint: string): string {
-    const raw = String(endpoint || '').trim();
-    if (!raw) return raw;
-
-    const { protocol, host } = getBaseProtocolHost();
-
-    if (raw.startsWith(':')) {
-        return `${protocol}//${host}${raw}`;
-    }
-
-    if (!raw.startsWith('http://') && !raw.startsWith('https://')) {
-        return `${protocol}//${raw}`;
-    }
-
-    return raw;
-}
-
-async function getComNodeEndpoint(): Promise<string> {
-    if (cachedComNodeUrl) {
-        return cachedComNodeUrl;
-    }
-
-    const url = `${API_HOST}:${BOOT_NODE_PORT}/api/v1/committee/endpoint`;
-    const response = await fetch(url, {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' },
-    });
-    if (!response.ok) {
-        throw new Error(`ComNode 获取失败: HTTP ${response.status}`);
-    }
-
-    const data = (await response.json()) as CommitteeEndpointResponse;
-    const endpoint = data.endpoint || data.Endpoint || data.data?.endpoint || '';
-    if (!endpoint) {
-        throw new Error('ComNode 端点为空');
-    }
-
-    cachedComNodeUrl = normalizeEndpoint(endpoint);
-    return cachedComNodeUrl;
-}
-
 function buildAssignCapsuleUrl(org: OrganizationChoice): string {
-    const base = org.assignNodeUrl || `${API_HOST}:${BOOT_NODE_PORT}`;
-    return buildApiUrl(base, `/api/v1/${org.groupId}/assign/capsule/generate`);
+    const base = org.assignNodeUrl ? buildNodeUrl(org.assignNodeUrl) : API_BASE_URL;
+    return buildApiUrl(base, API_ENDPOINTS.ASSIGN_CAPSULE_GENERATE(org.groupId));
 }
 
 export async function requestCapsuleAddress(accountId: string, address: string): Promise<string> {
@@ -113,7 +55,7 @@ export async function requestCapsuleAddress(accountId: string, address: string):
     const requestBody: CapsuleAddressRequest = {
         UserID: inGroup ? accountId : '',
         Address: normalized,
-        Timestamp: getTimestamp(),
+        Timestamp: getCustomEpochTimestamp(),
     };
 
     if (inGroup) {
@@ -132,7 +74,7 @@ export async function requestCapsuleAddress(accountId: string, address: string):
 
     const apiUrl = inGroup
         ? buildAssignCapsuleUrl(org as OrganizationChoice)
-        : buildApiUrl(await getComNodeEndpoint(), '/api/v1/com/capsule/generate');
+        : buildApiUrl(await getComNodeEndpoint(), API_ENDPOINTS.COM_CAPSULE_GENERATE);
 
     const response = await fetch(apiUrl, {
         method: 'POST',

@@ -10,28 +10,29 @@ import {
     setOnboardingStep,
     type OrganizationChoice,
 } from '../../core/storage';
-import { getGroupList, type GroupInfo } from '../../core/api';
+import { buildNodeUrl, getGroupList, type GroupListItem, type GroupListResponse } from '../../core/api';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
-// 模拟组织列表数据
-const mockGroups: GroupInfo[] = [
-    {
-        groupId: '10000000',
-        groupName: '默认担保组织',
-        assignNodeUrl: 'http://127.0.0.1:3002',
-        aggrNodeUrl: 'http://127.0.0.1:3003',
-        pledgeAddress: '5bd548d76dcb3f9db1d213db01464406bef5dd09',
-        memberCount: 156,
-    },
-    {
-        groupId: '20000000',
-        groupName: '高性能担保组',
-        assignNodeUrl: 'http://127.0.0.1:3004',
-        aggrNodeUrl: 'http://127.0.0.1:3005',
-        pledgeAddress: '6cd659e87edc4g0ec2e324ec12575517cef6ee1a',
-        memberCount: 89,
-    },
-];
+interface UiGroup {
+    groupId: string;
+    groupName: string;
+    assignNodeUrl: string;
+    aggrNodeUrl: string;
+    pledgeAddress: string;
+    memberCount: number;
+}
+
+function formatNodeAddress(url: string): string {
+    const raw = String(url || '').trim();
+    if (!raw) return '--';
+    try {
+        const parsed = new URL(raw);
+        const port = parsed.port ? `:${parsed.port}` : '';
+        return `${parsed.hostname}${port}`;
+    } catch {
+        return raw.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    }
+}
 
 export async function renderOrganization(): Promise<void> {
     const app = document.getElementById('app');
@@ -102,15 +103,36 @@ export async function renderOrganization(): Promise<void> {
       </nav>
       `;
 
-    // 尝试获取真实组织列表，失败则使用模拟数据
-    let groups = mockGroups;
+    // 获取真实组织列表
+    let groups: UiGroup[] = [];
+    let groupLoadError = '';
     try {
         const result = await getGroupList();
         if (result.success && result.data) {
-            groups = result.data;
+            const payload = result.data as GroupListResponse | GroupListItem[];
+            const rawGroups = Array.isArray(payload) ? payload : payload.groups || [];
+            groups = rawGroups
+                .map((group) => {
+                    const groupId = (group as GroupListItem).group_id || (group as any).groupId || '';
+                    if (!groupId) return null;
+                    const groupName = (group as any).group_name || (group as any).groupName || groupId;
+                    const assignEndpoint = (group as any).assign_api_endpoint || (group as any).assignNodeUrl || '';
+                    const aggrEndpoint = (group as any).aggr_api_endpoint || (group as any).aggrNodeUrl || '';
+                    return {
+                        groupId,
+                        groupName,
+                        assignNodeUrl: assignEndpoint ? buildNodeUrl(assignEndpoint) : '',
+                        aggrNodeUrl: aggrEndpoint ? buildNodeUrl(aggrEndpoint) : '',
+                        pledgeAddress: (group as any).pledge_address || (group as any).pledgeAddress || '',
+                        memberCount: (group as any).member_count || (group as any).memberCount || 0,
+                    } as UiGroup;
+                })
+                .filter((item): item is UiGroup => !!item);
+        } else {
+            groupLoadError = result.error || '组织列表获取失败，请稍后重试';
         }
     } catch (error) {
-        console.log('[组织] 使用模拟数据');
+        groupLoadError = '组织列表获取失败，请稍后重试';
     }
 
     app.innerHTML = `
@@ -162,7 +184,7 @@ export async function renderOrganization(): Promise<void> {
         <div class="list-section">
           <div class="list-title">可用担保组织</div>
           
-          ${groups.map(group => `
+          ${groups.length ? groups.map(group => `
             <div class="org-card ${currentOrg?.groupId === group.groupId ? 'active' : ''}">
               <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
                 <div>
@@ -178,12 +200,17 @@ export async function renderOrganization(): Promise<void> {
                 </button>
                 ` : ''}
               </div>
-              <div style="display: flex; gap: 16px; font-size: 12px; color: var(--text-muted);">
-                <span>成员: ${group.memberCount}</span>
-                <span>节点: 在线</span>
+              <div class="org-node-meta">
+                <span>Assign 节点IP: ${formatNodeAddress(group.assignNodeUrl)}</span>
+                <span>Aggre 节点IP: ${formatNodeAddress(group.aggrNodeUrl)}</span>
               </div>
             </div>
-          `).join('')}
+          `).join('') : `
+            <div class="empty-state" style="padding: 24px 12px;">
+              <div class="empty-title">暂无组织数据</div>
+              <div class="empty-desc">${groupLoadError || '请检查网络或稍后重试'}</div>
+            </div>
+          `}
         </div>
 
         <!-- 说明 -->

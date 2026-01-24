@@ -31,9 +31,8 @@
         "alarms"
     ],
     "host_permissions": [
-        "http://47.243.174.71:*/*",
-        "http://127.0.0.1:*/*",
-        "http://localhost:*/*"
+        "http://*/*",
+        "https://*/*"
     ],
     "icons": {
         "16": "public/icons/icon16.svg",
