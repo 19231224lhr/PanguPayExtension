@@ -88,26 +88,6 @@ export async function renderSend(): Promise<void> {
                   <span>快速安全的转账体验</span>
                 </div>
               </div>
-              <div class="network-status-widget">
-                <div class="ns-item">
-                  <span class="ns-label">下载</span>
-                  <span class="ns-value">1.2 MB/s</span>
-                </div>
-                <div class="ns-divider"></div>
-                <div class="ns-item">
-                  <span class="ns-label">上传</span>
-                  <span class="ns-value">560 KB/s</span>
-                </div>
-                <div class="ns-divider"></div>
-                <div class="ns-item">
-                  <span class="ns-label">延迟</span>
-                  <span class="ns-value">27 ms</span>
-                </div>
-              </div>
-            </div>
-
-            <div class="network-chart-area">
-              ${renderNetworkChart()}
             </div>
 
             <div class="transfer-mode-tabs" data-active="${modeIndex}">
@@ -149,15 +129,6 @@ export async function renderSend(): Promise<void> {
               <div class="source-summary">
                 <span>已选 <span id="sourceSelectedCount">0</span> / ${coinAddresses.length}</span>
                 <span id="sourceAvailableBalance">${selectedSourceAddresses.size ? `${selectedBalance.toFixed(displayDecimals)} ${COIN_NAMES[selectedCoinType as keyof typeof COIN_NAMES]}` : '--'}</span>
-              </div>
-            </div>
-
-            <div class="transfer-connector">
-              <div class="connector-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <line x1="12" y1="5" x2="12" y2="19"></line>
-                  <polyline points="19 12 12 19 5 12"></polyline>
-                </svg>
               </div>
             </div>
 
@@ -223,20 +194,20 @@ export async function renderSend(): Promise<void> {
                     </div>
 
                     <div class="recipient-actions">
-                      <button type="button" class="recipient-expand-btn" onclick="toggleRecipientAdvanced()">
+                      <button type="button" class="recipient-action-btn recipient-action-btn--ghost" onclick="toggleRecipientAdvanced()">
+                        <span>高级选项</span>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <polyline points="6 9 12 15 18 9"></polyline>
                         </svg>
-                        <span>高级选项</span>
                       </button>
-                      <button type="button" class="recipient-remove-btn" onclick="clearRecipientFields()">
+                      <button type="button" class="recipient-action-btn recipient-action-btn--danger" onclick="clearRecipientFields()">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <path d="M3 6h18"></path>
                           <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
                         </svg>
-                        <span>删除</span>
+                        <span>清空</span>
                       </button>
-                      <button type="button" class="recipient-add-btn" onclick="addRecipient()">
+                      <button type="button" class="recipient-action-btn recipient-action-btn--primary" onclick="addRecipient()">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <line x1="12" y1="5" x2="12" y2="19"></line>
                           <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -341,22 +312,6 @@ export async function renderSend(): Promise<void> {
     });
 
     updateSourceSummary();
-}
-
-function renderNetworkChart(): string {
-    return `
-      <svg class="network-chart-svg" viewBox="0 0 320 90" preserveAspectRatio="none">
-        <defs>
-          <linearGradient id="networkGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" style="stop-color: rgba(255,255,255,0.45)" />
-            <stop offset="100%" style="stop-color: rgba(255,255,255,0)" />
-          </linearGradient>
-        </defs>
-        <path class="network-chart-fill" d="M0 55 L30 40 L60 45 L90 36 L120 38 L150 44 L180 32 L210 40 L240 34 L270 38 L320 30 L320 90 L0 90 Z"></path>
-        <path class="network-chart-line" d="M0 55 L30 40 L60 45 L90 36 L120 38 L150 44 L180 32 L210 40 L240 34 L270 38 L320 30"></path>
-        <circle class="network-chart-dot" cx="320" cy="30" r="3"></circle>
-      </svg>
-    `;
 }
 
 function renderSourceAddressRow(address: string, balance: number, coinType: number): string {

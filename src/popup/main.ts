@@ -24,6 +24,7 @@ import { renderSettings } from './pages/settings';
 import { renderCreate } from './pages/create';
 import { renderImport } from './pages/import';
 import type { PageName } from '../core/types';
+import { applyStoredSettings } from './utils/appSettings';
 
 // ========================================
 // 路由状态
@@ -274,6 +275,8 @@ export const showWarningToast = (message: string, title = '', duration = 3000) =
 
 async function init(): Promise<void> {
     try {
+        await applyStoredSettings();
+
         // 检查是否有账户
         const accounts = await getAllAccounts();
 

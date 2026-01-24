@@ -4,11 +4,59 @@
 
 import { getActiveAccount, getTransactionHistory, type TransactionRecord } from '../../core/storage';
 import { COIN_NAMES } from '../../core/types';
+import { getActiveLanguage } from '../utils/appSettings';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
+
+const TEXT = {
+    'zh-CN': {
+        title: '交易历史',
+        emptyTitle: '暂无交易记录',
+        emptyDesc: '您的交易记录将显示在这里',
+        navHome: '首页',
+        navHistory: '历史',
+        navOrg: '组织',
+        navSettings: '设置',
+        send: '发送',
+        receive: '接收',
+        to: '至',
+        from: '来自',
+        status: {
+            pending: '处理中',
+            success: '成功',
+            failed: '失败',
+        },
+    },
+    en: {
+        title: 'Transaction History',
+        emptyTitle: 'No transactions',
+        emptyDesc: 'Your transactions will appear here',
+        navHome: 'Home',
+        navHistory: 'History',
+        navOrg: 'Org',
+        navSettings: 'Settings',
+        send: 'Send',
+        receive: 'Receive',
+        to: 'to',
+        from: 'from',
+        status: {
+            pending: 'Pending',
+            success: 'Success',
+            failed: 'Failed',
+        },
+    },
+};
+
+type HistoryText = (typeof TEXT)['zh-CN'];
+
+function getText(): HistoryText {
+    return getActiveLanguage() === 'en' ? TEXT.en : TEXT['zh-CN'];
+}
 
 export async function renderHistory(): Promise<void> {
     const app = document.getElementById('app');
     if (!app) return;
+
+    const t = getText();
 
     const account = await getActiveAccount();
     if (!account) {
@@ -26,7 +74,7 @@ export async function renderHistory(): Promise<void> {
             <path d="M19 12H5M12 19l-7-7 7-7"/>
           </svg>
         </button>
-        <span style="font-weight: 600;">交易历史</span>
+        <span style="font-weight: 600;">${t.title}</span>
         <div style="width: 32px;"></div>
       </header>
       
@@ -39,12 +87,12 @@ export async function renderHistory(): Promise<void> {
               <polyline points="12 6 12 12 16 14"></polyline>
             </svg>
           </div>
-          <div class="empty-title">暂无交易记录</div>
-          <div class="empty-desc">您的交易记录将显示在这里</div>
+          <div class="empty-title">${t.emptyTitle}</div>
+          <div class="empty-desc">${t.emptyDesc}</div>
         </div>
         ` : `
         <div class="list-section">
-          ${history.map(tx => renderTransactionItem(tx)).join('')}
+          ${history.map(tx => renderTransactionItem(tx, t)).join('')}
         </div>
         `}
       </div>
@@ -56,14 +104,14 @@ export async function renderHistory(): Promise<void> {
             <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
             <polyline points="9 22 9 12 15 12 15 22"></polyline>
           </svg>
-          <span>首页</span>
+          <span>${t.navHome}</span>
         </button>
         <button class="nav-item active" onclick="navigateTo('history')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10"></circle>
             <polyline points="12 6 12 12 16 14"></polyline>
           </svg>
-          <span>历史</span>
+          <span>${t.navHistory}</span>
         </button>
         <button class="nav-item" onclick="navigateTo('organization')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -71,14 +119,14 @@ export async function renderHistory(): Promise<void> {
             <circle cx="9" cy="7" r="4"></circle>
             <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"></path>
           </svg>
-          <span>组织</span>
+          <span>${t.navOrg}</span>
         </button>
         <button class="nav-item" onclick="navigateTo('settings')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="3"></circle>
-            <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
           </svg>
-          <span>设置</span>
+          <span>${t.navSettings}</span>
         </button>
       </nav>
     </div>
@@ -111,13 +159,9 @@ export async function renderHistory(): Promise<void> {
     (window as any)[listenerKey] = handler;
 }
 
-function renderTransactionItem(tx: TransactionRecord): string {
+function renderTransactionItem(tx: TransactionRecord, t: HistoryText): string {
     const isSend = tx.type === 'send';
-    const statusText = {
-        pending: '处理中',
-        success: '成功',
-        failed: '失败',
-    }[tx.status];
+    const statusText = t.status[tx.status];
     const statusColor = {
         pending: 'var(--warning)',
         success: 'var(--success)',
@@ -147,8 +191,8 @@ function renderTransactionItem(tx: TransactionRecord): string {
         </svg>
       </div>
       <div class="list-item-content">
-        <div class="list-item-title">${isSend ? '发送' : '接收'}</div>
-        <div class="list-item-subtitle">${isSend ? '至' : '来自'} ${shortAddress}</div>
+        <div class="list-item-title">${isSend ? t.send : t.receive}</div>
+        <div class="list-item-subtitle">${isSend ? t.to : t.from} ${shortAddress}</div>
       </div>
       <div class="list-item-value">
         <div class="list-item-amount ${isSend ? 'negative' : 'positive'}">

@@ -2,8 +2,9 @@
  * 新建钱包地址页面
  */
 
+import { createNewAddressOnBackendWithPriv, registerAddressOnComNode } from '../../core/address';
 import { generateKeyPair, generateAddress, getPublicKeyHexFromPrivate } from '../../core/signature';
-import { getActiveAccount, saveAccount, setSessionAddressKey } from '../../core/storage';
+import { getActiveAccount, getOrganization, getSessionKey, saveAccount, setSessionAddressKey } from '../../core/storage';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
 let generatedPrivateKey: string | null = null;
@@ -37,6 +38,15 @@ export function renderWalletCreate(): void {
       </header>
 
       <div class="page-content">
+        <div class="input-group" style="margin-bottom: 16px;">
+          <label class="input-label">币种类型</label>
+          <select id="walletCoinType" class="input recipient-coin-select">
+            <option value="0">PGC</option>
+            <option value="1">BTC</option>
+            <option value="2">ETH</option>
+          </select>
+        </div>
+
         <div class="card" style="margin-bottom: 16px;">
           <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">钱包地址</div>
           <div style="font-family: monospace; font-size: 12px; word-break: break-all; color: var(--primary-light);">
@@ -96,6 +106,12 @@ function togglePrivateKey(): void {
     }
 }
 
+function getSelectedCoinType(): number {
+    const select = document.getElementById('walletCoinType') as HTMLSelectElement | null;
+    const parsed = Number.parseInt(select?.value || '0', 10);
+    return [0, 1, 2].includes(parsed) ? parsed : 0;
+}
+
 async function handleAddWallet(): Promise<void> {
     if (!generatedPrivateKey || !generatedAddress) {
         (window as any).showToast('密钥生成失败', 'error');
@@ -110,15 +126,44 @@ async function handleAddWallet(): Promise<void> {
             return;
         }
 
-        if (generatedAddress === account.mainAddress) {
+        const normalizedAddress = generatedAddress.toLowerCase();
+        const normalizedMain = account.mainAddress.toLowerCase();
+        const coinType = getSelectedCoinType();
+
+        if (normalizedAddress === normalizedMain) {
             (window as any).showToast('该私钥为账户私钥，不能作为子钱包', 'error');
             return;
         }
 
-        if (!account.addresses[generatedAddress]) {
-            account.addresses[generatedAddress] = {
-                address: generatedAddress,
-                type: 0,
+        const org = await getOrganization(account.accountId);
+        const inOrg = !!org?.groupId;
+        if (inOrg) {
+            const session = getSessionKey();
+            if (!session || session.accountId !== account.accountId) {
+                (window as any).showToast('请先解锁账户私钥', 'error');
+                return;
+            }
+
+            const result = await createNewAddressOnBackendWithPriv(
+                account.accountId,
+                normalizedAddress,
+                generatedPubXHex || '',
+                generatedPubYHex || '',
+                coinType,
+                session.privKey,
+                org
+            );
+
+            if (!result.success) {
+                (window as any).showToast(result.error || '创建地址失败', 'error');
+                return;
+            }
+        }
+
+        if (!account.addresses[normalizedAddress]) {
+            account.addresses[normalizedAddress] = {
+                address: normalizedAddress,
+                type: coinType,
                 balance: 0,
                 utxoCount: 0,
                 txCerCount: 0,
@@ -132,11 +177,24 @@ async function handleAddWallet(): Promise<void> {
         }
 
         if (!account.defaultAddress || !account.addresses[account.defaultAddress]) {
-            account.defaultAddress = generatedAddress;
+            account.defaultAddress = normalizedAddress;
         }
 
         await saveAccount(account);
-        setSessionAddressKey(generatedAddress, generatedPrivateKey);
+        setSessionAddressKey(normalizedAddress, generatedPrivateKey);
+
+        if (!inOrg) {
+            const registerResult = await registerAddressOnComNode(
+                normalizedAddress,
+                generatedPubXHex || '',
+                generatedPubYHex || '',
+                generatedPrivateKey,
+                coinType
+            );
+            if (!registerResult.success) {
+                (window as any).showToast(registerResult.error || '地址注册失败', 'error');
+            }
+        }
 
         generatedPrivateKey = null;
         generatedAddress = null;

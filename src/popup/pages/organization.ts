@@ -14,6 +14,7 @@ import {
 import { buildNodeUrl, getGroupList, type GroupListItem, type GroupListResponse } from '../../core/api';
 import { joinGuarantorGroup, leaveGuarantorGroup } from '../../core/group';
 import { startTxStatusSync, stopTxStatusSync } from '../../core/txStatus';
+import { getActiveLanguage } from '../utils/appSettings';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
 interface UiGroup {
@@ -23,6 +24,81 @@ interface UiGroup {
     aggrNodeUrl: string;
     pledgeAddress: string;
     memberCount: number;
+}
+
+const TEXT = {
+    'zh-CN': {
+        header: '担保组织',
+        stepTitle: '步骤 4 / 4 · 选择担保组织',
+        stepDesc: '加入组织可使用快速转账；也可暂不加入，稍后在设置中修改',
+        skip: '暂不加入',
+        enter: '进入主界面',
+        navHome: '首页',
+        navHistory: '历史',
+        navOrg: '组织',
+        navSettings: '设置',
+        notJoined: '未加入组织',
+        joinedDesc: '享受快速转账服务',
+        notJoinedDesc: '加入组织以启用快速转账',
+        leave: '退出',
+        available: '可用担保组织',
+        joined: '已加入',
+        join: '加入',
+        assignIp: 'Assign 节点IP',
+        aggrIp: 'Aggre 节点IP',
+        emptyTitle: '暂无组织数据',
+        emptyDesc: '请检查网络或稍后重试',
+        infoTitle: '💡 关于担保组织',
+        info1: '加入担保组织后可使用快速转账',
+        info2: '转账即时到账，无需等待区块确认',
+        info3: '组织会收取少量服务费',
+        groupLoadError: '组织列表获取失败，请稍后重试',
+        toastJoin: '正在加入担保组织...',
+        toastJoinFail: '加入担保组织失败',
+        toastJoined: (name: string) => `已加入 ${name}`,
+        toastLeave: '正在退出担保组织...',
+        toastLeaveFail: '退出担保组织失败',
+        toastLeft: '已退出组织',
+    },
+    en: {
+        header: 'Guarantor Organization',
+        stepTitle: 'Step 4 / 4 · Choose Organization',
+        stepDesc: 'Join to enable fast transfers; you can skip and change later in settings',
+        skip: 'Skip for now',
+        enter: 'Enter Home',
+        navHome: 'Home',
+        navHistory: 'History',
+        navOrg: 'Org',
+        navSettings: 'Settings',
+        notJoined: 'Not in organization',
+        joinedDesc: 'Fast transfers enabled',
+        notJoinedDesc: 'Join to enable fast transfers',
+        leave: 'Leave',
+        available: 'Available Organizations',
+        joined: 'Joined',
+        join: 'Join',
+        assignIp: 'Assign Node IP',
+        aggrIp: 'Aggr Node IP',
+        emptyTitle: 'No organization data',
+        emptyDesc: 'Check network or try again later',
+        infoTitle: '💡 About guarantor organizations',
+        info1: 'Join to use fast transfers',
+        info2: 'Transfers settle instantly without block confirmation',
+        info3: 'A small service fee may apply',
+        groupLoadError: 'Failed to load organizations, please try again',
+        toastJoin: 'Joining organization...',
+        toastJoinFail: 'Failed to join organization',
+        toastJoined: (name: string) => `Joined ${name}`,
+        toastLeave: 'Leaving organization...',
+        toastLeaveFail: 'Failed to leave organization',
+        toastLeft: 'Left organization',
+    },
+};
+
+type OrgText = (typeof TEXT)['zh-CN'];
+
+function getText(): OrgText {
+    return getActiveLanguage() === 'en' ? TEXT.en : TEXT['zh-CN'];
 }
 
 function formatNodeAddress(url: string): string {
@@ -41,6 +117,8 @@ export async function renderOrganization(): Promise<void> {
     const app = document.getElementById('app');
     if (!app) return;
 
+    const t = getText();
+
     const account = await getActiveAccount();
     if (!account) {
         (window as any).navigateTo('home');
@@ -53,9 +131,9 @@ export async function renderOrganization(): Promise<void> {
     const onboardingBanner = isOnboarding
         ? `
         <div class="card onboarding-card" style="margin-bottom: 16px;">
-          <div style="font-weight: 600; margin-bottom: 6px;">步骤 4 / 4 · 选择担保组织</div>
+          <div style="font-weight: 600; margin-bottom: 6px;">${t.stepTitle}</div>
           <div style="font-size: 12px; color: var(--text-secondary);">
-            加入组织可使用快速转账；也可暂不加入，稍后在设置中修改
+            ${t.stepDesc}
           </div>
         </div>
         `
@@ -64,10 +142,10 @@ export async function renderOrganization(): Promise<void> {
         ? `
       <div class="onboarding-actions">
         <button class="btn btn-secondary btn-block" onclick="skipOnboarding()">
-          暂不加入
+          ${t.skip}
         </button>
         <button class="btn btn-primary btn-block" onclick="completeOnboarding()">
-          进入主界面
+          ${t.enter}
         </button>
       </div>
       `
@@ -79,14 +157,14 @@ export async function renderOrganization(): Promise<void> {
             <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
             <polyline points="9 22 9 12 15 12 15 22"></polyline>
           </svg>
-          <span>首页</span>
+          <span>${t.navHome}</span>
         </button>
         <button class="nav-item" onclick="navigateTo('history')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10"></circle>
             <polyline points="12 6 12 12 16 14"></polyline>
           </svg>
-          <span>历史</span>
+          <span>${t.navHistory}</span>
         </button>
         <button class="nav-item active" onclick="navigateTo('organization')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -94,14 +172,14 @@ export async function renderOrganization(): Promise<void> {
             <circle cx="9" cy="7" r="4"></circle>
             <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"></path>
           </svg>
-          <span>组织</span>
+          <span>${t.navOrg}</span>
         </button>
         <button class="nav-item" onclick="navigateTo('settings')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="3"></circle>
-            <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
           </svg>
-          <span>设置</span>
+          <span>${t.navSettings}</span>
         </button>
       </nav>
       `;
@@ -132,10 +210,10 @@ export async function renderOrganization(): Promise<void> {
                 })
                 .filter((item): item is UiGroup => !!item);
         } else {
-            groupLoadError = result.error || '组织列表获取失败，请稍后重试';
+            groupLoadError = result.error || t.groupLoadError;
         }
     } catch (error) {
-        groupLoadError = '组织列表获取失败，请稍后重试';
+        groupLoadError = t.groupLoadError;
     }
 
     app.innerHTML = `
@@ -146,7 +224,7 @@ export async function renderOrganization(): Promise<void> {
             <path d="M19 12H5M12 19l-7-7 7-7"/>
           </svg>
         </button>
-        <span style="font-weight: 600;">担保组织</span>
+        <span style="font-weight: 600;">${t.header}</span>
         <div style="width: 32px;"></div>
       </header>
       
@@ -169,15 +247,15 @@ export async function renderOrganization(): Promise<void> {
             </div>
             <div style="flex: 1;">
               <div style="font-weight: 600; margin-bottom: 2px;">
-                ${currentOrg ? currentOrg.groupName : '未加入组织'}
+                ${currentOrg ? currentOrg.groupName : t.notJoined}
               </div>
               <div style="font-size: 12px; color: var(--text-muted);">
-                ${currentOrg ? '享受快速转账服务' : '加入组织以启用快速转账'}
+                ${currentOrg ? t.joinedDesc : t.notJoinedDesc}
               </div>
             </div>
             ${currentOrg ? `
             <button class="btn btn-ghost btn-sm" onclick="leaveOrganization()" style="color: var(--error);">
-              退出
+              ${t.leave}
             </button>
             ` : ''}
           </div>
@@ -185,7 +263,7 @@ export async function renderOrganization(): Promise<void> {
 
         <!-- 组织列表 -->
         <div class="list-section">
-          <div class="list-title">可用担保组织</div>
+          <div class="list-title">${t.available}</div>
           
           ${groups.length ? groups.map(group => `
             <div class="org-card ${currentOrg?.groupId === group.groupId ? 'active' : ''}">
@@ -193,36 +271,36 @@ export async function renderOrganization(): Promise<void> {
                 <div>
                   <div class="org-name">
                     ${group.groupName}
-                    ${currentOrg?.groupId === group.groupId ? '<span class="org-badge">已加入</span>' : ''}
+                    ${currentOrg?.groupId === group.groupId ? `<span class="org-badge">${t.joined}</span>` : ''}
                   </div>
                   <div class="org-info">ID: ${group.groupId}</div>
                 </div>
                 ${currentOrg?.groupId !== group.groupId ? `
                 <button class="btn btn-primary btn-sm" onclick="joinOrganization('${group.groupId}', '${group.groupName}', '${group.assignNodeUrl}', '${group.aggrNodeUrl}', '${group.pledgeAddress}')">
-                  加入
+                  ${t.join}
                 </button>
                 ` : ''}
               </div>
               <div class="org-node-meta">
-                <span>Assign 节点IP: ${formatNodeAddress(group.assignNodeUrl)}</span>
-                <span>Aggre 节点IP: ${formatNodeAddress(group.aggrNodeUrl)}</span>
+                <span>${t.assignIp}: ${formatNodeAddress(group.assignNodeUrl)}</span>
+                <span>${t.aggrIp}: ${formatNodeAddress(group.aggrNodeUrl)}</span>
               </div>
             </div>
           `).join('') : `
             <div class="empty-state" style="padding: 24px 12px;">
-              <div class="empty-title">暂无组织数据</div>
-              <div class="empty-desc">${groupLoadError || '请检查网络或稍后重试'}</div>
+              <div class="empty-title">${t.emptyTitle}</div>
+              <div class="empty-desc">${groupLoadError || t.emptyDesc}</div>
             </div>
           `}
         </div>
 
         <!-- 说明 -->
         <div class="card" style="margin-top: 16px;">
-          <div style="font-size: 13px; font-weight: 500; margin-bottom: 8px;">💡 关于担保组织</div>
+          <div style="font-size: 13px; font-weight: 500; margin-bottom: 8px;">${t.infoTitle}</div>
           <ul style="font-size: 12px; color: var(--text-secondary); padding-left: 16px; margin: 0;">
-            <li style="margin-bottom: 4px;">加入担保组织后可使用快速转账</li>
-            <li style="margin-bottom: 4px;">转账即时到账，无需等待区块确认</li>
-            <li>组织会收取少量服务费</li>
+            <li style="margin-bottom: 4px;">${t.info1}</li>
+            <li style="margin-bottom: 4px;">${t.info2}</li>
+            <li>${t.info3}</li>
           </ul>
         </div>
       </div>
@@ -247,6 +325,7 @@ async function joinOrganization(
     aggrNodeUrl: string,
     pledgeAddress: string
 ) {
+    const t = getText();
     const account = await getActiveAccount();
     if (!account) return;
     const step = await getOnboardingStep(account.accountId);
@@ -260,16 +339,16 @@ async function joinOrganization(
         pledgeAddress,
     };
 
-    (window as any).showToast('正在加入担保组织...', 'info');
+    (window as any).showToast(t.toastJoin, 'info');
     const result = await joinGuarantorGroup(account, org);
     if (!result.success) {
-        (window as any).showToast(result.error || '加入担保组织失败', 'error');
+        (window as any).showToast(result.error || t.toastJoinFail, 'error');
         return;
     }
 
     const finalOrg = result.org || org;
     await saveOrganization(account.accountId, finalOrg);
-    (window as any).showToast(`已加入 ${finalOrg.groupName || groupName}`, 'success');
+    (window as any).showToast(t.toastJoined(finalOrg.groupName || groupName), 'success');
     void startTxStatusSync(account.accountId);
 
     if (wasOnboarding) {
@@ -282,22 +361,23 @@ async function joinOrganization(
 }
 
 async function leaveOrganization(): Promise<void> {
+    const t = getText();
     const account = await getActiveAccount();
     if (!account) return;
 
     const currentOrg = await getOrganization(account.accountId);
     if (!currentOrg) return;
 
-    (window as any).showToast('正在退出担保组织...', 'info');
+    (window as any).showToast(t.toastLeave, 'info');
     const result = await leaveGuarantorGroup(account, currentOrg);
     if (!result.success) {
-        (window as any).showToast(result.error || '退出担保组织失败', 'error');
+        (window as any).showToast(result.error || t.toastLeaveFail, 'error');
         return;
     }
 
     await clearOrganization(account.accountId);
     stopTxStatusSync();
-    (window as any).showToast('已退出组织', 'info');
+    (window as any).showToast(t.toastLeft, 'info');
     renderOrganization();
 }
 

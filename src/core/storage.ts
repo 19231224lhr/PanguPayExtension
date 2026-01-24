@@ -150,6 +150,10 @@ export async function getActiveAccountId(): Promise<string | null> {
     return await getStorageData<string>(STORAGE_KEYS.ACTIVE_ACCOUNT);
 }
 
+export async function clearActiveAccount(): Promise<void> {
+    await removeStorageData(STORAGE_KEYS.ACTIVE_ACCOUNT);
+}
+
 export async function getActiveAccount(): Promise<UserAccount | null> {
     const accountId = await getActiveAccountId();
     if (!accountId) return null;
@@ -226,6 +230,15 @@ export async function saveTransaction(accountId: string, tx: TransactionRecord):
 export async function getTransactionHistory(accountId: string): Promise<TransactionRecord[]> {
     const history = await getStorageData<Record<string, TransactionRecord[]>>(STORAGE_KEYS.TX_HISTORY);
     return history?.[accountId] || [];
+}
+
+export async function clearTransactionHistory(accountId: string): Promise<void> {
+    if (!accountId) return;
+    const history = await getStorageData<Record<string, TransactionRecord[]>>(STORAGE_KEYS.TX_HISTORY) || {};
+    if (history[accountId]) {
+        delete history[accountId];
+        await setStorageData(STORAGE_KEYS.TX_HISTORY, history);
+    }
 }
 
 export async function updateTransactionStatus(

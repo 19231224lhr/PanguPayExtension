@@ -2,8 +2,14 @@
  * 导入钱包地址页面
  */
 
+import {
+    createNewAddressOnBackendWithPriv,
+    isInGuarGroup,
+    queryAddressGroupInfo,
+    registerAddressOnComNode,
+} from '../../core/address';
 import { getPublicKeyFromPrivate, generateAddress, getPublicKeyHexFromPrivate } from '../../core/signature';
-import { getActiveAccount, saveAccount, setSessionAddressKey } from '../../core/storage';
+import { getActiveAccount, getOrganization, getSessionKey, saveAccount, setSessionAddressKey } from '../../core/storage';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
 export function renderWalletImport(): void {
@@ -124,17 +130,88 @@ async function handleImport(e: Event): Promise<void> {
         const publicKey = getPublicKeyFromPrivate(privateKey);
         const address = generateAddress(publicKey);
         const { x: pubXHex, y: pubYHex } = getPublicKeyHexFromPrivate(privateKey);
+        const normalizedAddress = address.toLowerCase();
 
-        if (address === account.mainAddress) {
+        const groupResult = await queryAddressGroupInfo(normalizedAddress);
+        if (!groupResult.success) {
+            (window as any).showToast(groupResult.error || '查询失败', 'error');
+            return;
+        }
+
+        const groupId = groupResult.data?.groupId || '0';
+        const addressType = groupResult.data?.type ?? 0;
+
+        const org = await getOrganization(account.accountId);
+        const inOrg = !!org?.groupId;
+
+        if (isInGuarGroup(groupId)) {
+            if (!inOrg) {
+                (window as any).showToast(`该地址归属于担保组织 ${groupId}，请先加入组织后导入`, 'error');
+                return;
+            }
+            if (org?.groupId !== groupId) {
+                (window as any).showToast(`该地址归属于担保组织 ${groupId}，当前组织为 ${org?.groupId || '未知'}`, 'error');
+                return;
+            }
+        }
+
+        if (normalizedAddress === account.mainAddress.toLowerCase()) {
             (window as any).showToast('该私钥为账户私钥，不能作为子钱包', 'error');
             return;
         }
 
-        const exists = !!account.addresses[address];
+        const exists = !!account.addresses[normalizedAddress];
+
+        if (inOrg && !exists) {
+            const session = getSessionKey();
+            if (!session || session.accountId !== account.accountId) {
+                (window as any).showToast('请先解锁账户私钥', 'error');
+                return;
+            }
+
+            const syncResult = await createNewAddressOnBackendWithPriv(
+                account.accountId,
+                normalizedAddress,
+                pubXHex,
+                pubYHex,
+                addressType,
+                session.privKey,
+                org
+            );
+
+            if (!syncResult.success) {
+                const msg = syncResult.error || '导入失败';
+                if (!/already|exists/i.test(msg)) {
+                    (window as any).showToast(msg, 'error');
+                    return;
+                }
+            }
+        }
+
+        if (!inOrg && !exists) {
+            const registerResult = await registerAddressOnComNode(
+                normalizedAddress,
+                pubXHex,
+                pubYHex,
+                privateKey,
+                addressType
+            );
+            if (!registerResult.success) {
+                const msg = registerResult.error || '导入失败';
+                const boundMatch = msg.match(/address already bound to guarantor group (\d+)/i);
+                if (boundMatch && boundMatch[1]) {
+                    (window as any).showToast(`该地址已绑定担保组织 ${boundMatch[1]}，请先加入组织后导入`, 'error');
+                } else {
+                    (window as any).showToast(msg, 'error');
+                }
+                return;
+            }
+        }
+
         if (!exists) {
-            account.addresses[address] = {
-                address,
-                type: 0,
+            account.addresses[normalizedAddress] = {
+                address: normalizedAddress,
+                type: addressType,
                 balance: 0,
                 utxoCount: 0,
                 txCerCount: 0,
@@ -146,19 +223,20 @@ async function handleImport(e: Event): Promise<void> {
                 estInterest: 0,
             };
         } else {
-            account.addresses[address] = {
-                ...account.addresses[address],
+            account.addresses[normalizedAddress] = {
+                ...account.addresses[normalizedAddress],
                 pubXHex,
                 pubYHex,
+                type: addressType,
             };
         }
 
         if (!account.defaultAddress || !account.addresses[account.defaultAddress]) {
-            account.defaultAddress = address;
+            account.defaultAddress = normalizedAddress;
         }
 
         await saveAccount(account);
-        setSessionAddressKey(address, privateKey);
+        setSessionAddressKey(normalizedAddress, privateKey);
 
         (window as any).showToast(exists ? '地址已解锁' : '钱包导入成功', 'success');
         (window as any).navigateTo('walletManager');
