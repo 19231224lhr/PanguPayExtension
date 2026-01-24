@@ -298,6 +298,10 @@ export async function getGroupInfo(groupId: string): Promise<ApiResponse<unknown
 
 let cachedComNodeUrl: string | null = null;
 
+export function clearComNodeCache(): void {
+    cachedComNodeUrl = null;
+}
+
 export async function getComNodeEndpoint(forceRefresh: boolean = false): Promise<string> {
     if (!forceRefresh && cachedComNodeUrl) {
         return cachedComNodeUrl;

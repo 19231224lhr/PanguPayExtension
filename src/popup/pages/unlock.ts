@@ -3,6 +3,7 @@
  */
 
 import { getActiveAccountId, getEncryptedKey, setSessionKey, getActiveAccount, getOnboardingStep } from '../../core/storage';
+import { startTxStatusSync } from '../../core/txStatus';
 import { decryptPrivateKey } from '../../core/keyEncryption';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
@@ -92,6 +93,7 @@ async function handleUnlock(e: Event): Promise<void> {
 
         // 设置会话
         setSessionKey(accountId, privateKey);
+        void startTxStatusSync(accountId);
 
         // 更新最后登录时间
         const account = await getActiveAccount();

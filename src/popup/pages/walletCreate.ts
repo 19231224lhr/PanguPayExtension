@@ -124,6 +124,10 @@ async function handleAddWallet(): Promise<void> {
                 txCerCount: 0,
                 pubXHex: generatedPubXHex || '',
                 pubYHex: generatedPubYHex || '',
+                utxos: {},
+                txCers: {},
+                value: { totalValue: 0, utxoValue: 0, txCerValue: 0 },
+                estInterest: 0,
             };
         }
 

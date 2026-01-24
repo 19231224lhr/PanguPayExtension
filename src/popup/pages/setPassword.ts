@@ -10,6 +10,7 @@ import {
     setSessionKey,
     type UserAccount,
 } from '../../core/storage';
+import { startTxStatusSync } from '../../core/txStatus';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
 interface PendingAccountData {
@@ -138,6 +139,7 @@ async function handleSetPassword(e: Event): Promise<void> {
         });
         await setActiveAccount(pending.accountId);
         setSessionKey(pending.accountId, pending.privHex);
+        void startTxStatusSync(pending.accountId);
 
         clearPendingAccountData();
 

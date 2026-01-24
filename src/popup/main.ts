@@ -8,6 +8,7 @@ import {
     getSessionKey,
     getOnboardingStep,
 } from '../core/storage';
+import { startTxStatusSync } from '../core/txStatus';
 import { renderWelcome } from './pages/welcome';
 import { renderUnlock } from './pages/unlock';
 import { renderSetPassword } from './pages/setPassword';
@@ -141,6 +142,7 @@ export async function navigateTo(page: PageName): Promise<void> {
     const targetPage = await resolveTargetPage(page);
     if (targetPage === currentPage) return;
     currentPage = targetPage;
+    (window as any).__currentPage = currentPage;
     const renderer = pageRenderers[targetPage];
     if (renderer) {
         try {
@@ -284,6 +286,7 @@ async function init(): Promise<void> {
         // 检查是否已解锁
         const session = getSessionKey();
         if (session) {
+            void startTxStatusSync(session.accountId);
             const step = await getOnboardingStep(session.accountId);
             navigateTo(step === 'complete' ? 'home' : step === 'organization' ? 'organization' : 'walletManager');
         } else {

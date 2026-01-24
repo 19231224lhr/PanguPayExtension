@@ -87,6 +87,28 @@ export async function renderHistory(): Promise<void> {
     bindInlineHandlers(app, {
         navigateTo: (page: string) => (window as any).navigateTo(page),
     });
+
+    const listenerKey = '__pangu_history_listener';
+    const refreshKey = '__pangu_history_refreshing';
+    const existing = (window as any)[listenerKey] as EventListener | undefined;
+    if (existing) {
+        window.removeEventListener('pangu_tx_history_updated', existing);
+    }
+
+    const handler = () => {
+        if ((window as any).__currentPage !== 'history') return;
+        if ((window as any)[refreshKey]) return;
+        (window as any)[refreshKey] = true;
+        setTimeout(() => {
+            (window as any)[refreshKey] = false;
+            renderHistory().catch((error) => {
+                console.error('[History] 刷新失败:', error);
+            });
+        }, 60);
+    };
+
+    window.addEventListener('pangu_tx_history_updated', handler);
+    (window as any)[listenerKey] = handler;
 }
 
 function renderTransactionItem(tx: TransactionRecord): string {

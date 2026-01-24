@@ -140,6 +140,10 @@ async function handleImport(e: Event): Promise<void> {
                 txCerCount: 0,
                 pubXHex,
                 pubYHex,
+                utxos: {},
+                txCers: {},
+                value: { totalValue: 0, utxoValue: 0, txCerValue: 0 },
+                estInterest: 0,
             };
         } else {
             account.addresses[address] = {

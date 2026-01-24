@@ -1,8 +1,10 @@
 /**
  * Chrome Storage 适配层
- * 
+ *
  * 将 localStorage 操作替换为 chrome.storage.local
  */
+
+import type { UTXOData } from './blockchain';
 
 // ========================================
 // 类型定义
@@ -23,6 +25,12 @@ export interface AddressInfo {
     privHex?: string;
     pubXHex?: string;
     pubYHex?: string;
+    utxos?: Record<string, UTXOData>;
+    txCers?: Record<string, number>;
+    value?: { totalValue: number; utxoValue: number; txCerValue: number };
+    estInterest?: number;
+    publicKeyNew?: { CurveName: string; X: number | string; Y: number | string };
+    locked?: boolean;
 }
 
 export interface UserAccount {
@@ -220,6 +228,38 @@ export async function getTransactionHistory(accountId: string): Promise<Transact
     return history?.[accountId] || [];
 }
 
+export async function updateTransactionStatus(
+    accountId: string,
+    txHash: string,
+    status: TransactionRecord['status'],
+    options: { blockNumber?: number } = {}
+): Promise<boolean> {
+    if (!accountId || !txHash) return false;
+    const history = await getStorageData<Record<string, TransactionRecord[]>>(STORAGE_KEYS.TX_HISTORY) || {};
+    const list = history[accountId] || [];
+    let changed = false;
+
+    for (const item of list) {
+        if (item.txHash === txHash) {
+            if (item.status !== status) {
+                item.status = status;
+                changed = true;
+            }
+            if (options.blockNumber && item.blockNumber !== options.blockNumber) {
+                item.blockNumber = options.blockNumber;
+                changed = true;
+            }
+        }
+    }
+
+    if (changed) {
+        history[accountId] = list;
+        await setStorageData(STORAGE_KEYS.TX_HISTORY, history);
+    }
+
+    return changed;
+}
+
 // ========================================
 // Organization
 // ========================================
@@ -241,6 +281,12 @@ export async function saveOrganization(accountId: string, org: OrganizationChoic
 export async function getOrganization(accountId: string): Promise<OrganizationChoice | null> {
     const orgs = await getStorageData<Record<string, OrganizationChoice>>(STORAGE_KEYS.ORGANIZATION);
     return orgs?.[accountId] || null;
+}
+
+export async function clearOrganization(accountId: string): Promise<void> {
+    const orgs = await getStorageData<Record<string, OrganizationChoice>>(STORAGE_KEYS.ORGANIZATION) || {};
+    delete orgs[accountId];
+    await setStorageData(STORAGE_KEYS.ORGANIZATION, orgs);
 }
 
 // ========================================

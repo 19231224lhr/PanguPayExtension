@@ -7,11 +7,11 @@ import {
     getDefaultWalletAddress,
     getOrganization,
     getWalletAddresses,
-    saveTransaction,
     type AddressInfo,
-    type TransactionRecord,
 } from '../../core/storage';
 import { COIN_NAMES } from '../../core/types';
+import { buildAndSubmitTransfer } from '../../core/transfer';
+import { watchSubmittedTransaction } from '../../core/txStatus';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
 let selectedCoinType = 0; // 默认 PGC
@@ -411,11 +411,15 @@ async function handleSend(e: Event): Promise<void> {
 
     const amountEl = document.getElementById('amount') as HTMLInputElement | null;
     const toEl = document.getElementById('toAddress') as HTMLInputElement | null;
-    const memoEl = document.getElementById('memo') as HTMLInputElement | null;
-
     const amount = amountEl ? parseFloat(amountEl.value) : 0;
     const toAddress = toEl ? toEl.value.trim() : '';
-    const memo = memoEl ? memoEl.value.trim() : '';
+    const extraGasEl = document.getElementById('extraGasPGC') as HTMLInputElement | null;
+    const txGasEl = document.getElementById('txGasInput') as HTMLInputElement | null;
+    const pubEl = document.getElementById('recipientPubKey') as HTMLInputElement | null;
+    const orgEl = document.getElementById('recipientOrgId') as HTMLInputElement | null;
+    const changePGC = document.getElementById('chAddrPGC') as HTMLSelectElement | null;
+    const changeBTC = document.getElementById('chAddrBTC') as HTMLSelectElement | null;
+    const changeETH = document.getElementById('chAddrETH') as HTMLSelectElement | null;
 
     const selectedAddresses = getSelectedAddresses();
     if (selectedAddresses.length === 0) {
@@ -433,6 +437,18 @@ async function handleSend(e: Event): Promise<void> {
         return;
     }
 
+    const recipientPubKey = pubEl?.value?.trim() || '';
+    if (selectedTransferMode !== 'cross' && !recipientPubKey) {
+        (window as any).showToast('请输入收款方公钥', 'error');
+        return;
+    }
+
+    const recipientOrgId = orgEl?.value?.trim() || '';
+    if (recipientOrgId && !/^\d{8}$/.test(recipientOrgId)) {
+        (window as any).showToast('担保组织ID格式错误', 'error');
+        return;
+    }
+
     const account = await getActiveAccount();
     if (!account) {
         (window as any).showToast('账户未找到', 'error');
@@ -446,25 +462,52 @@ async function handleSend(e: Event): Promise<void> {
     }
 
     try {
-        const txRecord: TransactionRecord = {
-            id: Date.now().toString(),
-            type: 'send',
-            status: 'pending',
-            amount,
-            coinType: selectedCoinType,
-            from: selectedAddresses[0]?.address || account.mainAddress,
-            to: toAddress,
-            timestamp: Date.now(),
-            txHash: 'tx_' + Date.now().toString(16),
+        if (selectedTransferMode === 'cross' && selectedCoinType !== 0) {
+            (window as any).showToast('跨链转账仅支持 PGC', 'error');
+            return;
+        }
+
+        if (selectedTransferMode === 'cross' && selectedAddresses.length !== 1) {
+            (window as any).showToast('跨链转账仅支持单一来源地址', 'error');
+            return;
+        }
+
+        const changeAddresses: Record<number, string> = {
+            0: changePGC?.value || '',
+            1: changeBTC?.value || '',
+            2: changeETH?.value || '',
         };
 
-        await saveTransaction(account.accountId, txRecord);
+        if (!changeAddresses[selectedCoinType]) {
+            (window as any).showToast('请选择找零地址', 'error');
+            return;
+        }
+
+        const result = await buildAndSubmitTransfer({
+            account,
+            fromAddresses: selectedAddresses.map((addr) => addr.address),
+            toAddress,
+            amount,
+            coinType: selectedCoinType,
+            transferMode: selectedTransferMode,
+            recipientPublicKey,
+            recipientOrgId,
+            gas: Number(txGasEl?.value || 1),
+            extraGas: Number(extraGasEl?.value || 0),
+            changeAddresses,
+        });
+
+        if (!result.success) {
+            throw new Error(result.error || '交易发送失败');
+        }
 
         (window as any).showToast('交易已提交', 'success');
-
+        if (result.txId) {
+            void watchSubmittedTransaction(account.accountId, result.txId);
+        }
         setTimeout(() => {
             (window as any).navigateTo('history');
-        }, 1000);
+        }, 800);
     } catch (error) {
         console.error('[发送] 失败:', error);
         (window as any).showToast('发送失败: ' + (error as Error).message, 'error');

@@ -5,6 +5,7 @@
 import { getPublicKeyFromPrivate, generateAddress, generateAccountIdFromPrivate } from '../../core/signature';
 import { encryptPrivateKey } from '../../core/keyEncryption';
 import { getAccount, getOnboardingStep, saveAccount, saveEncryptedKey, setActiveAccount, setSessionKey, type UserAccount } from '../../core/storage';
+import { startTxStatusSync } from '../../core/txStatus';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
 export function renderImport(): void {
@@ -196,6 +197,7 @@ async function handleImport(e: Event): Promise<void> {
         });
         await setActiveAccount(accountId);
         setSessionKey(accountId, privateKey);
+        void startTxStatusSync(accountId);
 
         (window as any).showToast('账户登录成功！', 'success');
 

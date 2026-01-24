@@ -13,6 +13,7 @@ import {
     saveAccount,
     type AddressInfo,
 } from '../../core/storage';
+import { stopTxStatusSync } from '../../core/txStatus';
 import { COIN_NAMES } from '../../core/types';
 import { requestCapsuleAddress } from '../../core/capsule';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
@@ -372,6 +373,7 @@ function copyAddress(address: string): void {
 
 function handleLock(): void {
     clearSession();
+    stopTxStatusSync();
     (window as any).showToast('钱包已锁定', 'info');
     (window as any).navigateTo('unlock');
 }

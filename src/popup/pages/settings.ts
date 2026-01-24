@@ -3,6 +3,7 @@
  */
 
 import { getActiveAccount, deleteAccount, clearSession, getSettings, saveSettings, type ExtensionSettings } from '../../core/storage';
+import { stopTxStatusSync } from '../../core/txStatus';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
 export async function renderSettings(): Promise<void> {
@@ -194,6 +195,7 @@ async function toggleTheme(): Promise<void> {
 
 function handleLockWallet(): void {
     clearSession();
+    stopTxStatusSync();
     (window as any).showToast('钱包已锁定', 'info');
     (window as any).navigateTo('unlock');
 }
@@ -213,6 +215,7 @@ async function confirmDeleteAccount(): Promise<void> {
     try {
         await deleteAccount(account.accountId);
         clearSession();
+        stopTxStatusSync();
         (window as any).showToast('钱包已删除', 'success');
         (window as any).navigateTo('welcome');
     } catch (error) {

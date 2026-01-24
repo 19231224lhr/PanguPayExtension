@@ -5,12 +5,15 @@
 import {
     getActiveAccount,
     getOrganization,
+    clearOrganization,
     saveOrganization,
     getOnboardingStep,
     setOnboardingStep,
     type OrganizationChoice,
 } from '../../core/storage';
 import { buildNodeUrl, getGroupList, type GroupListItem, type GroupListResponse } from '../../core/api';
+import { joinGuarantorGroup, leaveGuarantorGroup } from '../../core/group';
+import { startTxStatusSync, stopTxStatusSync } from '../../core/txStatus';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
 interface UiGroup {
@@ -257,8 +260,17 @@ async function joinOrganization(
         pledgeAddress,
     };
 
-    await saveOrganization(account.accountId, org);
-    (window as any).showToast(`已加入 ${groupName}`, 'success');
+    (window as any).showToast('正在加入担保组织...', 'info');
+    const result = await joinGuarantorGroup(account, org);
+    if (!result.success) {
+        (window as any).showToast(result.error || '加入担保组织失败', 'error');
+        return;
+    }
+
+    const finalOrg = result.org || org;
+    await saveOrganization(account.accountId, finalOrg);
+    (window as any).showToast(`已加入 ${finalOrg.groupName || groupName}`, 'success');
+    void startTxStatusSync(account.accountId);
 
     if (wasOnboarding) {
         await setOnboardingStep(account.accountId, 'complete');
@@ -273,15 +285,18 @@ async function leaveOrganization(): Promise<void> {
     const account = await getActiveAccount();
     if (!account) return;
 
-    // 清除组织信息（通过保存空组织）
-    await saveOrganization(account.accountId, {
-        groupId: '',
-        groupName: '',
-        assignNodeUrl: '',
-        aggrNodeUrl: '',
-        pledgeAddress: '',
-    });
+    const currentOrg = await getOrganization(account.accountId);
+    if (!currentOrg) return;
 
+    (window as any).showToast('正在退出担保组织...', 'info');
+    const result = await leaveGuarantorGroup(account, currentOrg);
+    if (!result.success) {
+        (window as any).showToast(result.error || '退出担保组织失败', 'error');
+        return;
+    }
+
+    await clearOrganization(account.accountId);
+    stopTxStatusSync();
     (window as any).showToast('已退出组织', 'info');
     renderOrganization();
 }
