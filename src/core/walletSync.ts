@@ -115,7 +115,7 @@ export function buildTxUserFromAccount(account: UserAccount): User {
         },
         wallet: {
             addressMsg,
-            totalTXCers: {},
+            totalTXCers: account.txCerStore || {},
             totalValue: account.totalBalance?.[0] || 0,
             valueDivision: account.totalBalance || { 0: 0, 1: 0, 2: 0 },
             updateTime: Date.now(),

@@ -130,11 +130,9 @@ export async function renderOrganization(): Promise<void> {
     const isOnboarding = step === 'organization';
     const onboardingBanner = isOnboarding
         ? `
-        <div class="card onboarding-card" style="margin-bottom: 16px;">
-          <div style="font-weight: 600; margin-bottom: 6px;">${t.stepTitle}</div>
-          <div style="font-size: 12px; color: var(--text-secondary);">
-            ${t.stepDesc}
-          </div>
+        <div class="card onboarding-card org-onboarding">
+          <div class="org-onboarding-title">${t.stepTitle}</div>
+          <div class="org-onboarding-desc">${t.stepDesc}</div>
         </div>
         `
         : '';
@@ -230,60 +228,53 @@ export async function renderOrganization(): Promise<void> {
       
       <div class="page-content">
         ${onboardingBanner}
-        <!-- 当前组织状态 -->
-        <div class="card" style="margin-bottom: 20px;">
-          <div style="display: flex; align-items: center; gap: 12px;">
-            <div style="
-              width: 48px;
-              height: 48px;
-              background: ${currentOrg ? 'linear-gradient(135deg, var(--success), #34d399)' : 'var(--bg-input)'};
-              border-radius: 12px;
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              font-size: 24px;
-            ">
-              ${currentOrg ? '✓' : '👥'}
+        <div class="org-status-card">
+          <div class="org-status-main">
+            <div class="org-status-icon ${currentOrg ? 'org-status-icon--joined' : 'org-status-icon--empty'}">
+              ${currentOrg ? '✓' : 'ORG'}
             </div>
-            <div style="flex: 1;">
-              <div style="font-weight: 600; margin-bottom: 2px;">
-                ${currentOrg ? currentOrg.groupName : t.notJoined}
-              </div>
-              <div style="font-size: 12px; color: var(--text-muted);">
-                ${currentOrg ? t.joinedDesc : t.notJoinedDesc}
-              </div>
+            <div class="org-status-text">
+              <div class="org-status-title">${currentOrg ? currentOrg.groupName : t.notJoined}</div>
+              <div class="org-status-desc">${currentOrg ? t.joinedDesc : t.notJoinedDesc}</div>
             </div>
-            ${currentOrg ? `
-            <button class="btn btn-ghost btn-sm" onclick="leaveOrganization()" style="color: var(--error);">
-              ${t.leave}
-            </button>
-            ` : ''}
           </div>
+          ${currentOrg ? `
+          <button class="btn btn-ghost btn-sm org-status-action" onclick="leaveOrganization()">
+            ${t.leave}
+          </button>
+          ` : ''}
         </div>
 
-        <!-- 组织列表 -->
-        <div class="list-section">
-          <div class="list-title">${t.available}</div>
+        <div class="list-section org-list-section">
+          <div class="org-section-title">${t.available}</div>
           
           ${groups.length ? groups.map(group => `
             <div class="org-card ${currentOrg?.groupId === group.groupId ? 'active' : ''}">
-              <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
-                <div>
+              <div class="org-card-top">
+                <div class="org-card-info">
                   <div class="org-name">
                     ${group.groupName}
                     ${currentOrg?.groupId === group.groupId ? `<span class="org-badge">${t.joined}</span>` : ''}
                   </div>
-                  <div class="org-info">ID: ${group.groupId}</div>
+                  <div class="org-id">ID ${group.groupId}</div>
                 </div>
-                ${currentOrg?.groupId !== group.groupId ? `
-                <button class="btn btn-primary btn-sm" onclick="joinOrganization('${group.groupId}', '${group.groupName}', '${group.assignNodeUrl}', '${group.aggrNodeUrl}', '${group.pledgeAddress}')">
-                  ${t.join}
-                </button>
-                ` : ''}
+                <div class="org-card-actions">
+                  ${currentOrg?.groupId !== group.groupId ? `
+                  <button class="btn btn-primary btn-sm" onclick="joinOrganization('${group.groupId}', '${group.groupName}', '${group.assignNodeUrl}', '${group.aggrNodeUrl}', '${group.pledgeAddress}')">
+                    ${t.join}
+                  </button>
+                  ` : ''}
+                </div>
               </div>
-              <div class="org-node-meta">
-                <span>${t.assignIp}: ${formatNodeAddress(group.assignNodeUrl)}</span>
-                <span>${t.aggrIp}: ${formatNodeAddress(group.aggrNodeUrl)}</span>
+              <div class="org-node-list">
+                <div class="org-node-item">
+                  <span class="org-node-label">${t.assignIp}</span>
+                  <span class="org-node-value">${formatNodeAddress(group.assignNodeUrl)}</span>
+                </div>
+                <div class="org-node-item">
+                  <span class="org-node-label">${t.aggrIp}</span>
+                  <span class="org-node-value">${formatNodeAddress(group.aggrNodeUrl)}</span>
+                </div>
               </div>
             </div>
           `).join('') : `
@@ -294,12 +285,11 @@ export async function renderOrganization(): Promise<void> {
           `}
         </div>
 
-        <!-- 说明 -->
-        <div class="card" style="margin-top: 16px;">
-          <div style="font-size: 13px; font-weight: 500; margin-bottom: 8px;">${t.infoTitle}</div>
-          <ul style="font-size: 12px; color: var(--text-secondary); padding-left: 16px; margin: 0;">
-            <li style="margin-bottom: 4px;">${t.info1}</li>
-            <li style="margin-bottom: 4px;">${t.info2}</li>
+        <div class="org-info-card">
+          <div class="org-info-title">${t.infoTitle}</div>
+          <ul class="org-info-list">
+            <li>${t.info1}</li>
+            <li>${t.info2}</li>
             <li>${t.info3}</li>
           </ul>
         </div>

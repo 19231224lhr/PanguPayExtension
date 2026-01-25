@@ -10,9 +10,11 @@ import {
     type AddressInfo,
 } from '../../core/storage';
 import { COIN_NAMES } from '../../core/types';
-import { buildAndSubmitTransfer } from '../../core/transfer';
+import { GROUP_ID_NOT_EXIST, queryAddressGroupInfo } from '../../core/address';
+import { buildAndSubmitTransfer, type TransferMode } from '../../core/transfer';
 import { watchSubmittedTransaction } from '../../core/txStatus';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
+import { enhanceCustomSelects } from '../utils/customSelect';
 
 let selectedCoinType = 0; // 默认 PGC
 let selectedTransferMode: 'quick' | 'cross' | 'pledge' = 'quick';
@@ -22,6 +24,8 @@ let lastCoinType = selectedCoinType;
 let currentCoinAddresses: Array<{ address: string; balance: number; type: number }> = [];
 let recipientAdvancedOpen = false;
 let optionsOpen = false;
+const MAX_AMOUNT_DECIMALS = 8;
+const recipientTypeCache = new Map<string, { exists: boolean; type: number }>();
 
 export async function renderSend(): Promise<void> {
     const app = document.getElementById('app');
@@ -59,6 +63,7 @@ export async function renderSend(): Promise<void> {
     const selectedBalance = getSelectedBalance();
     const displayDecimals = selectedCoinType === 0 ? 2 : selectedCoinType === 1 ? 8 : 6;
     const modeIndex = selectedTransferMode === 'quick' ? 0 : selectedTransferMode === 'cross' ? 1 : 2;
+    const quickLabel = hasOrg ? '快速转账' : '普通转账';
 
     app.innerHTML = `
     <div class="page send-page">
@@ -92,19 +97,19 @@ export async function renderSend(): Promise<void> {
 
             <div class="transfer-mode-tabs" data-active="${modeIndex}">
               <button class="transfer-mode-tab ${selectedTransferMode === 'quick' ? 'active' : ''}" onclick="setTransferMode('quick')">
-                快速转账
+                ${quickLabel}
               </button>
-              <button class="transfer-mode-tab ${selectedTransferMode === 'cross' ? 'active' : ''}" onclick="setTransferMode('cross')">
+              <button class="transfer-mode-tab ${selectedTransferMode === 'cross' ? 'active' : ''}" onclick="setTransferMode('cross')" ${hasOrg ? '' : 'disabled'}>
                 跨链转账
               </button>
-              <button class="transfer-mode-tab ${selectedTransferMode === 'pledge' ? 'active' : ''}" onclick="setTransferMode('pledge')">
+              <button class="transfer-mode-tab ${selectedTransferMode === 'pledge' ? 'active' : ''}" onclick="setTransferMode('pledge')" ${hasOrg ? '' : 'disabled'}>
                 质押交易
               </button>
             </div>
 
             ${!hasOrg ? `
             <div class="transfer-warning">
-              未加入担保组织，快速/跨链功能将受限
+              未加入担保组织，仅支持普通转账
             </div>
             ` : ''}
           </div>
@@ -302,6 +307,8 @@ export async function renderSend(): Promise<void> {
         verifyRecipientAddress,
     });
 
+    enhanceCustomSelects(app);
+
     const form = document.getElementById('sendForm') as HTMLFormElement;
     form.addEventListener('submit', handleSend);
 
@@ -366,12 +373,13 @@ async function handleSend(e: Event): Promise<void> {
 
     const amountEl = document.getElementById('amount') as HTMLInputElement | null;
     const toEl = document.getElementById('toAddress') as HTMLInputElement | null;
-    const amount = amountEl ? parseFloat(amountEl.value) : 0;
+    const amountRaw = amountEl ? amountEl.value.trim() : '';
     const toAddress = toEl ? toEl.value.trim() : '';
     const extraGasEl = document.getElementById('extraGasPGC') as HTMLInputElement | null;
     const txGasEl = document.getElementById('txGasInput') as HTMLInputElement | null;
     const pubEl = document.getElementById('recipientPubKey') as HTMLInputElement | null;
     const orgEl = document.getElementById('recipientOrgId') as HTMLInputElement | null;
+    const recipientGasEl = document.getElementById('recipientGas') as HTMLInputElement | null;
     const changePGC = document.getElementById('chAddrPGC') as HTMLSelectElement | null;
     const changeBTC = document.getElementById('chAddrBTC') as HTMLSelectElement | null;
     const changeETH = document.getElementById('chAddrETH') as HTMLSelectElement | null;
@@ -382,48 +390,119 @@ async function handleSend(e: Event): Promise<void> {
         return;
     }
 
-    if (!amount || amount <= 0) {
-        (window as any).showToast('请输入有效金额', 'error');
-        return;
-    }
-
-    if (!toAddress || toAddress.replace(/^0x/i, '').length !== 40) {
-        (window as any).showToast('请输入有效的收款地址', 'error');
-        return;
-    }
-
-    const recipientPubKey = pubEl?.value?.trim() || '';
-    if (selectedTransferMode !== 'cross' && !recipientPubKey) {
-        (window as any).showToast('请输入收款方公钥', 'error');
-        return;
-    }
-
-    const recipientOrgId = orgEl?.value?.trim() || '';
-    if (recipientOrgId && !/^\d{8}$/.test(recipientOrgId)) {
-        (window as any).showToast('担保组织ID格式错误', 'error');
-        return;
-    }
-
-    const account = await getActiveAccount();
-    if (!account) {
-        (window as any).showToast('账户未找到', 'error');
-        return;
-    }
-
-    const balance = getSelectedBalance();
-    if (amount > balance) {
-        (window as any).showToast('余额不足', 'error');
-        return;
-    }
-
     try {
-        if (selectedTransferMode === 'cross' && selectedCoinType !== 0) {
+        const amountCheck = validateAmountInput(amountRaw);
+        if (!amountCheck.ok) {
+            (window as any).showToast(amountCheck.error || '请输入有效金额', 'error');
+            return;
+        }
+
+        const account = await getActiveAccount();
+        if (!account) {
+            (window as any).showToast('账户未找到', 'error');
+            return;
+        }
+
+        const org = await getOrganization(account.accountId);
+        const hasOrg = !!(org && org.groupId);
+        if (selectedTransferMode === 'pledge') {
+            (window as any).showToast('质押交易功能暂未开放', 'info');
+            return;
+        }
+        if (!hasOrg && selectedTransferMode !== 'quick') {
+            (window as any).showToast('散户模式仅支持普通转账', 'error');
+            return;
+        }
+
+        const transferMode: TransferMode = hasOrg && selectedTransferMode === 'cross' ? 'cross' : 'quick';
+        const isCross = transferMode === 'cross';
+
+        const addressCheck = validateRecipientAddressFormat(toAddress, isCross);
+        if (!addressCheck.ok) {
+            (window as any).showToast(addressCheck.error || '请输入有效的收款地址', 'error');
+            return;
+        }
+
+        const recipientPubKey = pubEl?.value?.trim() || '';
+        if (!isCross) {
+            if (!recipientPubKey) {
+                (window as any).showToast('请输入收款方公钥', 'error');
+                return;
+            }
+            const pubCheck = parseRecipientPublicKey(recipientPubKey);
+            if (!pubCheck.ok) {
+                (window as any).showToast('收款方公钥格式不正确', 'error');
+                return;
+            }
+        }
+
+        const recipientOrgId = orgEl?.value?.trim() || '';
+        if (recipientOrgId && !isValidOrgId(recipientOrgId)) {
+            (window as any).showToast('担保组织ID格式错误', 'error');
+            return;
+        }
+
+        if (!isCross) {
+            const typeOk = await ensureRecipientTypeMatches(addressCheck.normalized, selectedCoinType);
+            if (!typeOk) {
+                return;
+            }
+        }
+
+        const recipientGas = Number(recipientGasEl?.value || 0);
+        if (!Number.isFinite(recipientGas) || recipientGas < 0) {
+            (window as any).showToast('转移Gas必须为非负数', 'error');
+            return;
+        }
+
+        const txGas = Number(txGasEl?.value || 1);
+        if (!Number.isFinite(txGas) || txGas < 0) {
+            (window as any).showToast('交易Gas必须为非负数', 'error');
+            return;
+        }
+
+        const extraGas = Number(extraGasEl?.value || 0);
+        if (!Number.isFinite(extraGas) || extraGas < 0) {
+            (window as any).showToast('额外Gas必须为非负数', 'error');
+            return;
+        }
+
+        if (extraGas > 0 && selectedCoinType !== 0) {
+            (window as any).showToast('额外Gas仅支持 PGC 地址', 'error');
+            return;
+        }
+
+        const amount = amountCheck.value;
+        const balance = getSelectedBalance();
+        const requiredAmount = selectedCoinType === 0 ? amount + extraGas : amount;
+        if (requiredAmount > balance) {
+            (window as any).showToast('余额不足', 'error');
+            return;
+        }
+
+        if (isCross && selectedCoinType !== 0) {
             (window as any).showToast('跨链转账仅支持 PGC', 'error');
             return;
         }
 
-        if (selectedTransferMode === 'cross' && selectedAddresses.length !== 1) {
+        if (isCross && selectedAddresses.length !== 1) {
             (window as any).showToast('跨链转账仅支持单一来源地址', 'error');
+            return;
+        }
+
+        if (isCross && !Number.isInteger(amount)) {
+            (window as any).showToast('跨链转账金额必须为整数', 'error');
+            return;
+        }
+
+        const availableGas = selectedAddresses.reduce((sum, addr) => {
+            const info = account.addresses?.[addr.address];
+            return sum + (info?.estInterest || 0);
+        }, 0);
+        const totalGasNeed = txGas + (isCross ? 0 : recipientGas);
+        const totalGasBudget = availableGas + extraGas;
+        if (totalGasNeed > totalGasBudget + 1e-8) {
+            (window as any).showToast('Gas 不足，请调整转移Gas或额外Gas', 'error');
             return;
         }
 
@@ -444,11 +523,12 @@ async function handleSend(e: Event): Promise<void> {
             toAddress,
             amount,
             coinType: selectedCoinType,
-            transferMode: selectedTransferMode,
+            transferMode,
+            transferGas: isCross ? 0 : recipientGas,
             recipientPublicKey,
             recipientOrgId,
-            gas: Number(txGasEl?.value || 1),
-            extraGas: Number(extraGasEl?.value || 0),
+            gas: txGas,
+            extraGas,
             changeAddresses,
         });
 
@@ -586,7 +666,7 @@ function addRecipient(): void {
     (window as any).showToast('当前仅支持单个收款人', 'info');
 }
 
-function verifyRecipientAddress(): void {
+async function verifyRecipientAddress(): Promise<void> {
     const input = document.getElementById('toAddress') as HTMLInputElement | null;
     if (!input) return;
     const raw = input.value.trim();
@@ -595,19 +675,15 @@ function verifyRecipientAddress(): void {
         return;
     }
 
-    if (selectedTransferMode === 'cross') {
-        if (!/^0x[a-fA-F0-9]{40}$/.test(raw)) {
-            (window as any).showToast('跨链地址需为 0x 开头的 40 位地址', 'error');
-            return;
-        }
-        (window as any).showToast('地址格式已验证', 'success');
+    const addressCheck = validateRecipientAddressFormat(raw, selectedTransferMode === 'cross');
+    if (!addressCheck.ok) {
+        (window as any).showToast(addressCheck.error || '地址格式不正确', 'error');
         return;
     }
 
-    const normalized = raw.replace(/^0x/i, '');
-    if (!/^[0-9a-fA-F]{40}$/.test(normalized)) {
-        (window as any).showToast('地址格式不正确', 'error');
-        return;
+    if (selectedTransferMode !== 'cross') {
+        const typeOk = await ensureRecipientTypeMatches(addressCheck.normalized, selectedCoinType);
+        if (!typeOk) return;
     }
 
     (window as any).showToast('地址格式已验证', 'success');
@@ -625,4 +701,117 @@ function renderChangeAddressOptions(addresses: AddressInfo[], coinType: number):
     return filtered
         .map((item) => `<option value="${item.address}">${item.address.slice(0, 10)}...${item.address.slice(-6)}</option>`)
         .join('');
+}
+
+function normalizeAddressInput(address: string): string {
+    return address.trim().replace(/^0x/i, '').toLowerCase();
+}
+
+function validateRecipientAddressFormat(
+    raw: string,
+    isCross: boolean
+): { ok: boolean; normalized: string; error?: string } {
+    if (!raw) {
+        return { ok: false, normalized: '', error: '请输入收款地址' };
+    }
+
+    if (isCross) {
+        if (!/^0x[a-fA-F0-9]{40}$/.test(raw)) {
+            return { ok: false, normalized: '', error: '跨链地址需为 0x 开头的 40 位地址' };
+        }
+        return { ok: true, normalized: normalizeAddressInput(raw) };
+    }
+
+    const normalized = normalizeAddressInput(raw);
+    if (!/^[0-9a-fA-F]{40}$/.test(normalized)) {
+        return { ok: false, normalized, error: '地址格式不正确' };
+    }
+
+    return { ok: true, normalized };
+}
+
+function parseRecipientPublicKey(input: string): { ok: boolean; xHex: string; yHex: string } {
+    const trimmed = input.trim().replace(/^0x/i, '');
+    if (!trimmed) {
+        return { ok: false, xHex: '', yHex: '' };
+    }
+
+    if (trimmed.startsWith('04') && trimmed.length >= 130) {
+        const body = trimmed.slice(2);
+        const xHex = body.slice(0, 64);
+        const yHex = body.slice(64, 128);
+        if (/^[0-9a-fA-F]{64}$/.test(xHex) && /^[0-9a-fA-F]{64}$/.test(yHex)) {
+            return { ok: true, xHex, yHex };
+        }
+    }
+
+    const parts = trimmed.split(/[\s,]+/).filter(Boolean);
+    if (parts.length >= 2 && /^[0-9a-fA-F]{64}$/.test(parts[0]) && /^[0-9a-fA-F]{64}$/.test(parts[1])) {
+        return { ok: true, xHex: parts[0], yHex: parts[1] };
+    }
+
+    return { ok: false, xHex: '', yHex: '' };
+}
+
+function validateAmountInput(raw: string): { ok: boolean; value: number; error?: string } {
+    if (!raw) {
+        return { ok: false, value: 0, error: '请输入有效金额' };
+    }
+
+    const value = Number(raw);
+    if (!Number.isFinite(value)) {
+        return { ok: false, value: 0, error: '金额格式不正确' };
+    }
+    if (value <= 0) {
+        return { ok: false, value: 0, error: '金额必须大于0' };
+    }
+
+    const decimalPart = raw.split('.')[1];
+    if (decimalPart && decimalPart.length > MAX_AMOUNT_DECIMALS) {
+        return { ok: false, value: 0, error: `金额最多支持 ${MAX_AMOUNT_DECIMALS} 位小数` };
+    }
+
+    return { ok: true, value };
+}
+
+function isValidOrgId(orgId: string): boolean {
+    return /^\d{8}$/.test(orgId.trim());
+}
+
+function getCoinLabel(type: number): string {
+    return COIN_NAMES[type as keyof typeof COIN_NAMES] || 'PGC';
+}
+
+async function ensureRecipientTypeMatches(address: string, coinType: number): Promise<boolean> {
+    const normalized = normalizeAddressInput(address);
+    const cached = recipientTypeCache.get(normalized);
+    if (cached) {
+        if (cached.exists && cached.type !== coinType) {
+            const expected = getCoinLabel(cached.type);
+            const selected = getCoinLabel(coinType);
+            (window as any).showToast(`收款地址币种为 ${expected}，当前选择 ${selected}`, 'error');
+            return false;
+        }
+        return true;
+    }
+
+    const result = await queryAddressGroupInfo(normalized);
+    if (!result.success || !result.data) {
+        const errMsg = result.error ? `地址币种校验失败: ${result.error}` : '地址币种校验失败';
+        (window as any).showToast(errMsg, 'error');
+        return false;
+    }
+
+    const exists = result.data.groupId !== GROUP_ID_NOT_EXIST;
+    const type = Number(result.data.type ?? coinType);
+    recipientTypeCache.set(normalized, { exists, type });
+
+    if (exists && type !== coinType) {
+        const expected = getCoinLabel(type);
+        const selected = getCoinLabel(coinType);
+        (window as any).showToast(`收款地址币种为 ${expected}，当前选择 ${selected}`, 'error');
+        return false;
+    }
+
+    return true;
 }

@@ -5,7 +5,6 @@
 import {
     getActiveAccount,
     getOnboardingStep,
-    getDefaultWalletAddress,
     getWalletAddresses,
     hasSessionAddressKey,
     setOnboardingStep,
@@ -13,12 +12,14 @@ import {
 import type { AddressInfo } from '../../core/storage';
 import { getActiveLanguage } from '../utils/appSettings';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
+import { COIN_NAMES } from '../../core/types';
 
 const TEXT = {
     'zh-CN': {
         header: '钱包管理',
         walletAddress: '钱包地址',
-        defaultLabel: '默认',
+        created: '新建',
+        imported: '导入',
         unlocked: '已解锁',
         locked: '未解锁',
         copy: '复制',
@@ -45,7 +46,8 @@ const TEXT = {
     en: {
         header: 'Wallet Manager',
         walletAddress: 'Wallet Address',
-        defaultLabel: 'Default',
+        created: 'Created',
+        imported: 'Imported',
         unlocked: 'Unlocked',
         locked: 'Locked',
         copy: 'Copy',
@@ -77,7 +79,9 @@ function getText(): WalletText {
     return getActiveLanguage() === 'en' ? TEXT.en : TEXT['zh-CN'];
 }
 
-function renderAddressItem(address: AddressInfo, isDefault: boolean, unlocked: boolean, t: WalletText): string {
+function renderAddressItem(address: AddressInfo, unlocked: boolean, t: WalletText): string {
+    const sourceLabel = address.source === 'created' ? t.created : t.imported;
+    const coinLabel = COIN_NAMES[address.type as keyof typeof COIN_NAMES] || 'PGC';
     return `
       <div class="list-item" style="cursor: default;">
         <div class="list-item-icon" style="background: var(--bg-input); color: var(--primary-color);">
@@ -89,7 +93,8 @@ function renderAddressItem(address: AddressInfo, isDefault: boolean, unlocked: b
         <div class="list-item-content">
           <div class="list-item-title">
             ${t.walletAddress}
-            ${isDefault ? `<span class="org-badge" style="background: var(--primary-color);">${t.defaultLabel}</span>` : ''}
+            <span class="tag tag--neutral">${sourceLabel}</span>
+            <span class="tag tag--primary">${coinLabel}</span>
           </div>
           <div class="list-item-subtitle" style="font-family: monospace;">${address.address}</div>
         </div>
@@ -121,14 +126,12 @@ export async function renderWalletManager(): Promise<void> {
     const isOnboarding = step === 'wallet';
     const backTarget = isOnboarding ? 'welcome' : 'home';
     const walletAddresses = getWalletAddresses(account);
-    const defaultAddress = getDefaultWalletAddress(account);
 
     const addressList = walletAddresses.length
         ? walletAddresses
             .map((item) => {
-                const isDefault = defaultAddress?.address === item.address;
                 const unlocked = hasSessionAddressKey(item.address);
-                return renderAddressItem(item, isDefault, unlocked, t);
+                return renderAddressItem(item, unlocked, t);
             })
             .join('')
         : `

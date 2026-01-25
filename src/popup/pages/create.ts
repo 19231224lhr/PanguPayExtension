@@ -35,47 +35,43 @@ export function renderCreate(): void {
       </header>
       
       <div class="page-content">
-        <div class="card onboarding-card" style="margin-bottom: 16px;">
-          <div style="font-weight: 600; margin-bottom: 6px;">步骤 1 / 4 · 创建账户</div>
-          <div style="font-size: 12px; color: var(--text-secondary);">
-            生成账户 ID 与私钥，用于后续登录
+        <div class="card account-step-card section-space">
+          <div class="account-step-title">步骤 1 / 4 · 创建账户</div>
+          <div class="account-step-desc">生成账户 ID 与私钥，用于后续登录</div>
+        </div>
+
+        <div class="card account-card section-space">
+          <div class="account-row">
+            <div class="account-label">账户 ID</div>
+            <div class="account-value">${accountId}</div>
+          </div>
+          <div class="account-row">
+            <div class="account-label">账户地址</div>
+            <div class="account-value account-value--mono">${address}</div>
           </div>
         </div>
 
-        <div class="card" style="margin-bottom: 16px;">
-          <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">账户 ID</div>
-          <div style="font-weight: 600; letter-spacing: 0.5px;">${accountId}</div>
-        </div>
-
-        <div class="card" style="margin-bottom: 16px;">
-          <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">账户地址</div>
-          <div style="font-family: monospace; font-size: 12px; word-break: break-all; color: var(--primary-light);">
-            ${address}
-          </div>
-        </div>
-
-        <div class="card" style="margin-bottom: 16px; border-color: var(--warning);">
-          <div style="display: flex; align-items: flex-start; gap: 12px;">
-            <span style="font-size: 20px;">⚠️</span>
-            <div>
-              <div style="font-weight: 600; margin-bottom: 4px; color: var(--warning);">请妥善保管账户私钥</div>
-              <div style="font-size: 12px; color: var(--text-secondary);">
-                私钥是您资产的唯一凭证，丢失将无法找回
-              </div>
-            </div>
+        <div class="card notice-card section-space">
+          <div class="notice-icon">!</div>
+          <div>
+            <div class="notice-title">请妥善保管账户私钥</div>
+            <div class="notice-desc">私钥是您资产的唯一凭证，丢失将无法找回</div>
           </div>
         </div>
 
         <div class="input-group">
-          <label class="input-label">私钥（点击显示）</label>
-          <div class="card" style="cursor: pointer;" onclick="togglePrivateKey()">
-            <div id="privateKeyDisplay" style="font-family: monospace; font-size: 11px; word-break: break-all; color: var(--text-muted);">
+          <div class="label-row">
+            <label class="input-label">私钥（点击显示）</label>
+            <button class="link-btn" type="button" onclick="copyPrivateKey()" aria-label="复制私钥">复制</button>
+          </div>
+          <div class="reveal-card" onclick="togglePrivateKey()">
+            <div id="privateKeyDisplay" class="reveal-text">
               点击显示私钥...
             </div>
           </div>
         </div>
 
-        <div style="margin-top: 24px;">
+        <div class="form-actions">
           <button class="btn btn-primary btn-block btn-lg" onclick="handleCreateNext()">
             下一步
           </button>
@@ -87,6 +83,7 @@ export function renderCreate(): void {
     bindInlineHandlers(app, {
         navigateTo: (page: string) => (window as any).navigateTo(page),
         togglePrivateKey,
+        copyPrivateKey,
         handleCreateNext,
     });
 }
@@ -129,4 +126,14 @@ function handleCreateNext(): void {
         console.error('[创建] 失败:', error);
         (window as any).showToast('创建失败: ' + (error as Error).message, 'error');
     }
+}
+
+function copyPrivateKey(): void {
+    if (!generatedPrivateKey) {
+        (window as any).showToast('请先生成私钥', 'info');
+        return;
+    }
+    navigator.clipboard.writeText(generatedPrivateKey).then(() => {
+        (window as any).showToast('私钥已复制', 'success');
+    });
 }

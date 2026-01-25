@@ -4,7 +4,7 @@
  * 将 localStorage 操作替换为 chrome.storage.local
  */
 
-import type { UTXOData } from './blockchain';
+import type { TxCertificate, UTXOData } from './blockchain';
 
 // ========================================
 // 类型定义
@@ -22,6 +22,7 @@ export interface AddressInfo {
     balance: number;
     utxoCount: number;
     txCerCount: number;
+    source?: 'created' | 'imported';
     privHex?: string;
     pubXHex?: string;
     pubYHex?: string;
@@ -38,6 +39,7 @@ export interface UserAccount {
     mainAddress: string;
     addresses: Record<string, AddressInfo>;
     defaultAddress?: string;
+    txCerStore?: Record<string, TxCertificate>;
     organizationId?: string;
     organizationName?: string;
     onboardingComplete?: boolean;

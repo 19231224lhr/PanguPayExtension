@@ -2,6 +2,8 @@ import { buildNodeUrl } from './api';
 import { getOrganization, getTransactionHistory, updateTransactionStatus, type OrganizationChoice } from './storage';
 import { waitForTXConfirmation, type TXStatusResponse } from './txBuilder';
 import { startAccountPolling, stopAccountPolling } from './accountPolling';
+import { unlockUTXOsByTxId } from './utxoLock';
+import { getLockedTXCerIdsByTxId, unlockTXCers } from './txCerLockManager';
 
 type ToastType = 'success' | 'error' | 'info' | 'warning';
 
@@ -91,6 +93,19 @@ async function watchTransactionStatus(
             const changed = await updateTransactionStatus(accountId, txHash, 'failed');
             if (changed) {
                 dispatchHistoryUpdate(accountId, txHash, 'failed');
+            }
+            try {
+                await unlockUTXOsByTxId(txHash);
+            } catch (error) {
+                console.warn('[交易状态] 解锁 UTXO 失败:', error);
+            }
+            try {
+                const lockedTxCers = getLockedTXCerIdsByTxId(txHash);
+                if (lockedTxCers.length > 0) {
+                    unlockTXCers(lockedTxCers, false);
+                }
+            } catch (error) {
+                console.warn('[交易状态] 解锁 TXCer 失败:', error);
             }
         }
     } catch (error) {

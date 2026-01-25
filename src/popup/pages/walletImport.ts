@@ -215,6 +215,7 @@ async function handleImport(e: Event): Promise<void> {
                 balance: 0,
                 utxoCount: 0,
                 txCerCount: 0,
+                source: 'imported',
                 pubXHex,
                 pubYHex,
                 utxos: {},
@@ -228,6 +229,7 @@ async function handleImport(e: Event): Promise<void> {
                 pubXHex,
                 pubYHex,
                 type: addressType,
+                source: account.addresses[normalizedAddress].source || 'imported',
             };
         }
 

@@ -6,6 +6,7 @@ import { createNewAddressOnBackendWithPriv, registerAddressOnComNode } from '../
 import { generateKeyPair, generateAddress, getPublicKeyHexFromPrivate } from '../../core/signature';
 import { getActiveAccount, getOrganization, getSessionKey, saveAccount, setSessionAddressKey } from '../../core/storage';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
+import { enhanceCustomSelects } from '../utils/customSelect';
 
 let generatedPrivateKey: string | null = null;
 let generatedAddress: string | null = null;
@@ -38,8 +39,8 @@ export function renderWalletCreate(): void {
       </header>
 
       <div class="page-content">
-        <div class="input-group" style="margin-bottom: 16px;">
-          <label class="input-label">币种类型</label>
+        <div class="card form-section section-space">
+          <div class="form-section-title">币种类型</div>
           <select id="walletCoinType" class="input recipient-coin-select">
             <option value="0">PGC</option>
             <option value="1">BTC</option>
@@ -47,35 +48,34 @@ export function renderWalletCreate(): void {
           </select>
         </div>
 
-        <div class="card" style="margin-bottom: 16px;">
-          <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">钱包地址</div>
-          <div style="font-family: monospace; font-size: 12px; word-break: break-all; color: var(--primary-light);">
-            ${address}
+        <div class="card account-card section-space">
+          <div class="account-row">
+            <div class="account-label">钱包地址</div>
+            <div class="account-value account-value--mono">${address}</div>
           </div>
         </div>
 
-        <div class="card" style="margin-bottom: 16px; border-color: var(--warning);">
-          <div style="display: flex; align-items: flex-start; gap: 12px;">
-            <span style="font-size: 20px;">⚠️</span>
-            <div>
-              <div style="font-weight: 600; margin-bottom: 4px; color: var(--warning);">请妥善保管私钥</div>
-              <div style="font-size: 12px; color: var(--text-secondary);">
-                私钥是该地址资产的唯一凭证，请勿泄露
-              </div>
-            </div>
+        <div class="card notice-card section-space">
+          <div class="notice-icon">!</div>
+          <div>
+            <div class="notice-title">请妥善保管私钥</div>
+            <div class="notice-desc">私钥是该地址资产的唯一凭证，请勿泄露</div>
           </div>
         </div>
 
         <div class="input-group">
-          <label class="input-label">私钥（点击显示）</label>
-          <div class="card" style="cursor: pointer;" onclick="togglePrivateKey()">
-            <div id="privateKeyDisplay" style="font-family: monospace; font-size: 11px; word-break: break-all; color: var(--text-muted);">
+          <div class="label-row">
+            <label class="input-label">私钥（点击显示）</label>
+            <button class="link-btn" type="button" onclick="copyPrivateKey()" aria-label="复制私钥">复制</button>
+          </div>
+          <div class="reveal-card" onclick="togglePrivateKey()">
+            <div id="privateKeyDisplay" class="reveal-text">
               点击显示私钥...
             </div>
           </div>
         </div>
 
-        <div style="margin-top: 24px;">
+        <div class="form-actions">
           <button class="btn btn-primary btn-block btn-lg" onclick="handleAddWallet()">
             添加到钱包
           </button>
@@ -87,8 +87,11 @@ export function renderWalletCreate(): void {
     bindInlineHandlers(app, {
         navigateTo: (page: string) => (window as any).navigateTo(page),
         togglePrivateKey,
+        copyPrivateKey,
         handleAddWallet,
     });
+
+    enhanceCustomSelects(app);
 }
 
 function togglePrivateKey(): void {
@@ -110,6 +113,16 @@ function getSelectedCoinType(): number {
     const select = document.getElementById('walletCoinType') as HTMLSelectElement | null;
     const parsed = Number.parseInt(select?.value || '0', 10);
     return [0, 1, 2].includes(parsed) ? parsed : 0;
+}
+
+function copyPrivateKey(): void {
+    if (!generatedPrivateKey) {
+        (window as any).showToast('请先生成私钥', 'info');
+        return;
+    }
+    navigator.clipboard.writeText(generatedPrivateKey).then(() => {
+        (window as any).showToast('私钥已复制', 'success');
+    });
 }
 
 async function handleAddWallet(): Promise<void> {
@@ -167,6 +180,7 @@ async function handleAddWallet(): Promise<void> {
                 balance: 0,
                 utxoCount: 0,
                 txCerCount: 0,
+                source: 'created',
                 pubXHex: generatedPubXHex || '',
                 pubYHex: generatedPubYHex || '',
                 utxos: {},
@@ -174,6 +188,8 @@ async function handleAddWallet(): Promise<void> {
                 value: { totalValue: 0, utxoValue: 0, txCerValue: 0 },
                 estInterest: 0,
             };
+        } else if (!account.addresses[normalizedAddress].source) {
+            account.addresses[normalizedAddress].source = 'created';
         }
 
         if (!account.defaultAddress || !account.addresses[account.defaultAddress]) {

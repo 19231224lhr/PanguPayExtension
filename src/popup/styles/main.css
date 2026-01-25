@@ -261,6 +261,170 @@ body {
     background: var(--bg-secondary);
 }
 
+select.input {
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    cursor: pointer;
+    background-color: var(--bg-input);
+    padding-right: 40px;
+    background-image:
+        linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+        linear-gradient(135deg, var(--text-muted) 50%, transparent 50%),
+        linear-gradient(to right, rgba(148, 163, 184, 0.25), rgba(148, 163, 184, 0.25));
+    background-position:
+        calc(100% - 18px) calc(50% - 2px),
+        calc(100% - 13px) calc(50% - 2px),
+        calc(100% - 32px) 50%;
+    background-size: 5px 5px, 5px 5px, 1px 18px;
+    background-repeat: no-repeat;
+}
+
+select.input:focus {
+    border-color: var(--primary-color);
+    background-color: var(--bg-secondary);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+select.input:disabled {
+    color: var(--text-muted);
+    background-color: var(--bg-input);
+    cursor: not-allowed;
+    opacity: 0.75;
+}
+
+select.input option {
+    background-color: var(--bg-secondary);
+    color: var(--text-primary);
+}
+
+select.custom-select-native {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+    height: 0;
+    width: 0;
+    margin: 0;
+    padding: 0;
+    border: none;
+}
+
+.custom-select {
+    position: relative;
+    width: 100%;
+}
+
+.custom-select-trigger {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 12px 16px;
+    min-height: 44px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius-sm);
+    color: var(--text-primary);
+    font-size: 14px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.custom-select-trigger:hover {
+    border-color: rgba(37, 99, 235, 0.4);
+}
+
+.custom-select.open .custom-select-trigger {
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+    background: var(--bg-secondary);
+}
+
+.custom-select.is-disabled .custom-select-trigger {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.custom-select-value {
+    flex: 1;
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.custom-select-arrow {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    transition: transform 0.2s ease;
+}
+
+.custom-select.open .custom-select-arrow {
+    transform: rotate(180deg);
+}
+
+.custom-select-arrow svg {
+    width: 16px;
+    height: 16px;
+}
+
+.custom-select-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    box-shadow: var(--shadow-md);
+    padding: 6px;
+    display: grid;
+    gap: 4px;
+    max-height: 220px;
+    overflow-y: auto;
+    opacity: 0;
+    transform: translateY(-4px);
+    pointer-events: none;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+    z-index: 50;
+}
+
+.custom-select.open .custom-select-menu {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+}
+
+.custom-select-option {
+    width: 100%;
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 13px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.custom-select-option:hover {
+    background: rgba(37, 99, 235, 0.08);
+}
+
+.custom-select-option.is-selected {
+    background: rgba(37, 99, 235, 0.14);
+    color: var(--primary-color);
+    font-weight: 600;
+}
+
+.custom-select-option.is-disabled {
+    color: var(--text-muted);
+    cursor: not-allowed;
+}
+
 .input::placeholder {
     color: var(--text-muted);
 }
@@ -279,6 +443,37 @@ body {
     margin-top: 6px;
     font-size: 12px;
     color: var(--error);
+}
+
+.form-inline-error {
+    margin-top: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid rgba(245, 158, 11, 0.2);
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.form-inline-error-icon {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    background: rgba(245, 158, 11, 0.18);
+    color: var(--warning);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 700;
+    flex-shrink: 0;
+}
+
+.form-inline-error-text {
+    line-height: 1.4;
 }
 
 /* 卡片 */
@@ -623,6 +818,29 @@ body {
     font-size: 14px;
     font-weight: 500;
     margin-bottom: 2px;
+}
+
+.tag {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1.2;
+    margin-left: 6px;
+    background: var(--bg-input);
+    color: var(--text-secondary);
+}
+
+.tag--primary {
+    background: rgba(37, 99, 235, 0.12);
+    color: var(--primary-color);
+}
+
+.tag--neutral {
+    background: rgba(148, 163, 184, 0.2);
+    color: var(--text-secondary);
 }
 
 .list-item-subtitle {
@@ -1281,13 +1499,93 @@ body {
    组织页面
    ======================================== */
 
-.org-card {
-    padding: 16px;
+.org-onboarding {
+    margin-bottom: 16px;
+}
+
+.org-onboarding-title {
+    font-weight: 600;
+    margin-bottom: 6px;
+}
+
+.org-onboarding-desc {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.org-status-card {
     background: var(--bg-card);
-    border-radius: var(--border-radius);
+    border-radius: var(--border-radius-lg);
+    border: 1px solid var(--border-color);
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 18px;
+    box-shadow: var(--shadow-sm);
+}
+
+.org-status-main {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+}
+
+.org-status-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--text-primary);
+    background: var(--bg-input);
+}
+
+.org-status-icon--joined {
+    background: linear-gradient(135deg, var(--success), #34d399);
+    color: white;
+}
+
+.org-status-text {
+    min-width: 0;
+}
+
+.org-status-title {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 2px;
+}
+
+.org-status-desc {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.org-status-action {
+    color: var(--error);
+}
+
+.org-section-title {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+    padding-left: 2px;
+}
+
+.org-card {
+    padding: 14px 16px;
+    background: var(--bg-card);
+    border-radius: var(--border-radius-lg);
     border: 1px solid var(--border-color);
     margin-bottom: 12px;
     box-shadow: var(--shadow-sm);
+    display: grid;
+    gap: 12px;
 }
 
 .org-card.active {
@@ -1308,22 +1606,235 @@ body {
     gap: 10px;
 }
 
+/* ========================================
+   账户流程页面
+   ======================================== */
+
+.section-space {
+    margin-bottom: 16px;
+}
+
+.section-space-lg {
+    margin-bottom: 20px;
+}
+
+.form-actions {
+    margin-top: 16px;
+}
+
+.account-step-card {
+    border-radius: var(--border-radius-lg);
+    padding: 14px 16px;
+    border: 1px solid rgba(37, 99, 235, 0.16);
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.08), rgba(37, 99, 235, 0.02));
+    box-shadow: var(--shadow-sm);
+}
+
+.account-step-title {
+    font-weight: 600;
+    margin-bottom: 6px;
+}
+
+.account-step-desc {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.account-card {
+    display: grid;
+    gap: 12px;
+}
+
+.account-row {
+    display: grid;
+    gap: 6px;
+}
+
+.account-row + .account-row {
+    padding-top: 10px;
+    border-top: 1px dashed var(--border-color);
+}
+
+.account-label {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.account-value {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+}
+
+.account-value--mono {
+    font-family: monospace;
+    font-size: 12px;
+    color: var(--primary-light);
+    word-break: break-all;
+}
+
+.account-preview-card {
+    display: grid;
+    gap: 6px;
+}
+
+.account-preview-label {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.account-preview-id {
+    font-weight: 600;
+    font-size: 13px;
+}
+
+.account-preview-address {
+    font-family: monospace;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.notice-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    background: rgba(245, 158, 11, 0.08);
+    padding: 10px 12px;
+}
+
+.notice-icon {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    background: rgba(245, 158, 11, 0.16);
+    color: var(--warning);
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    flex-shrink: 0;
+}
+
+.notice-title {
+    font-weight: 600;
+    margin-bottom: 2px;
+    color: var(--warning);
+    font-size: 13px;
+}
+
+.notice-desc {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.reveal-card {
+    border: 1px dashed rgba(148, 163, 184, 0.4);
+    background: var(--bg-input);
+    border-radius: var(--border-radius);
+    padding: 12px;
+    cursor: pointer;
+}
+
+.reveal-text {
+    font-family: monospace;
+    font-size: 11px;
+    word-break: break-all;
+    color: var(--text-muted);
+}
+
+.form-section {
+    display: grid;
+    gap: 10px;
+}
+
+.form-section-title {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.label-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.label-row .input-label {
+    margin-bottom: 0;
+}
+
+.link-btn {
+    border: none;
+    background: none;
+    color: var(--primary-color);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 2px 4px;
+}
+
+.link-btn:hover {
+    color: var(--primary-dark);
+}
+
+.org-card-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.org-card-info {
+    min-width: 0;
+}
+
 .org-name {
     font-size: 15px;
     font-weight: 600;
     margin-bottom: 4px;
 }
 
-.org-info {
+.org-id {
     font-size: 12px;
     color: var(--text-muted);
 }
 
-.org-node-meta {
+.org-card-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.org-node-list {
     display: grid;
-    gap: 4px;
+    gap: 6px;
+}
+
+.org-node-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: var(--bg-input);
     font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.org-node-label {
     color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.org-node-value {
+    font-family: monospace;
+    font-size: 12px;
+    color: var(--text-primary);
+    text-align: right;
     word-break: break-all;
 }
 
@@ -1335,6 +1846,30 @@ body {
     color: white;
     border-radius: 4px;
     margin-left: 8px;
+}
+
+.org-info-card {
+    margin-top: 16px;
+    background: var(--bg-card);
+    border-radius: var(--border-radius-lg);
+    border: 1px solid var(--border-color);
+    padding: 14px 16px;
+    box-shadow: var(--shadow-sm);
+}
+
+.org-info-title {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 10px;
+}
+
+.org-info-list {
+    font-size: 12px;
+    color: var(--text-secondary);
+    padding-left: 16px;
+    margin: 0;
+    display: grid;
+    gap: 6px;
 }
 
 /* ========================================
@@ -2232,6 +2767,11 @@ body {
     color: var(--primary-color);
 }
 
+.transfer-mode-tab:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+}
+
 .transfer-warning {
     margin-top: 12px;
     padding: 10px 14px;
@@ -2415,11 +2955,7 @@ body {
 }
 
 .recipient-coin-select {
-    appearance: none;
-    background-image: linear-gradient(45deg, transparent 50%, var(--text-muted) 50%), linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
-    background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
-    background-size: 5px 5px, 5px 5px;
-    background-repeat: no-repeat;
+    min-width: 0;
 }
 
 .recipient-details {
@@ -2641,4 +3177,120 @@ body {
 .submit-btn svg {
     width: 16px;
     height: 16px;
+}
+
+/* ========================================
+   接收页面
+   ======================================== */
+
+.receive-page {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.receive-card {
+    background: var(--bg-card);
+    border-radius: var(--border-radius-lg);
+    border: 1px solid var(--border-color);
+    box-shadow: var(--shadow-sm);
+    padding: 16px;
+    display: grid;
+    gap: 12px;
+}
+
+.receive-qr-card {
+    text-align: center;
+}
+
+.receive-qr {
+    width: 200px;
+    height: 200px;
+    margin: 0 auto;
+    background: #ffffff;
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
+}
+
+.receive-qr-placeholder {
+    display: grid;
+    gap: 8px;
+    place-items: center;
+    color: #334155;
+    font-size: 12px;
+}
+
+.receive-qr-icon {
+    font-size: 36px;
+}
+
+.receive-title {
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.receive-subtitle {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.receive-field {
+    display: grid;
+    gap: 8px;
+}
+
+.receive-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.receive-select {
+    width: 100%;
+}
+
+.receive-address {
+    font-family: monospace;
+    font-size: 12px;
+    word-break: break-all;
+    padding: 12px;
+    border-radius: 10px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+}
+
+.receive-coin-card {
+    text-align: center;
+}
+
+.receive-coin-title {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.receive-coin-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 64px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-weight: 700;
+    font-size: 12px;
+    color: #fff;
+    margin: 0 auto;
+}
+
+.receive-coin-badge--pgc {
+    background: linear-gradient(135deg, #2563eb, #60a5fa);
+}
+
+.receive-coin-badge--btc {
+    background: linear-gradient(135deg, #f59e0b, #fbbf24);
+}
+
+.receive-coin-badge--eth {
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
 }

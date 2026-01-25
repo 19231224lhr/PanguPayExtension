@@ -8,9 +8,11 @@ import {
     buildNodeUrl,
     getComNodeEndpoint,
 } from './api';
-import { buildNormalTransaction, buildTransaction, serializeAggregateGTX, serializeUserNewTX } from './txBuilder';
+import { buildNormalTransaction, buildTransaction, serializeAggregateGTX, serializeUserNewTX, type UserNewTX } from './txBuilder';
 import { buildTxUserFromAccount, syncAccountAddresses } from './walletSync';
 import { getOrganization, saveTransaction, type TransactionRecord, type UserAccount } from './storage';
+import { lockUTXOs } from './utxoLock';
+import { lockTXCers, markTXCersSubmitted, unlockTXCers } from './txCerLockManager';
 
 export type TransferMode = 'quick' | 'cross';
 
@@ -21,6 +23,7 @@ export interface TransferRequest {
     amount: number;
     coinType: number;
     transferMode: TransferMode;
+    transferGas?: number;
     recipientPublicKey?: string;
     recipientOrgId?: string;
     gas: number;
@@ -59,6 +62,17 @@ function parseRecipientPubKey(input?: string): { xHex: string; yHex: string } {
     }
 
     return { xHex: '', yHex: '' };
+}
+
+function collectUsedTxCerIds(userTx: UserNewTX): string[] {
+    const used: string[] = [];
+    const inputs = userTx?.TX?.TXInputsCertificate || [];
+    for (const item of inputs as Array<{ TXCerID?: string }>) {
+        if (item?.TXCerID) {
+            used.push(String(item.TXCerID));
+        }
+    }
+    return used;
 }
 
 async function fetchWithTimeout(url: string, options: RequestInit, timeout: number): Promise<Response> {
@@ -134,6 +148,21 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
     }
 
     const pubKey = parseRecipientPubKey(request.recipientPublicKey);
+    const preferTXCer = request.transferMode === 'quick';
+
+    const lockedTXCerIds: string[] = [];
+    try {
+        for (const addr of normalizedFrom) {
+            const info = account.addresses?.[addr];
+            const txCers = info?.txCers ? Object.keys(info.txCers) : [];
+            if (txCers.length > 0) {
+                const lockedIds = lockTXCers(txCers, `构造交易 - 地址 ${addr.slice(0, 8)}...`);
+                lockedTXCerIds.push(...lockedIds);
+            }
+        }
+    } catch (error) {
+        console.warn('[Transfer] Failed to lock TXCers:', error);
+    }
 
     const params = {
         fromAddresses: normalizedFrom,
@@ -145,14 +174,14 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
                 publicKeyX: request.transferMode === 'cross' ? '' : pubKey.xHex,
                 publicKeyY: request.transferMode === 'cross' ? '' : pubKey.yHex,
                 guarGroupID: request.transferMode === 'cross' ? '' : request.recipientOrgId || '',
-                interest: request.transferMode === 'cross' ? 0 : 0,
+                interest: request.transferMode === 'cross' ? 0 : request.transferGas || 0,
             },
         ],
         changeAddresses,
         gas: request.gas,
         isCrossChain: request.transferMode === 'cross',
         howMuchPayForGas: request.extraGas || 0,
-        preferTXCer: false,
+        preferTXCer,
     };
 
     const txRecord: TransactionRecord = {
@@ -166,8 +195,26 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         timestamp: Date.now(),
     };
 
-    if (!org?.groupId) {
-        const aggregate = await buildNormalTransaction(params, user);
+    let userTx: UserNewTX | null = null;
+    let aggregate: Awaited<ReturnType<typeof buildNormalTransaction>> | null = null;
+
+    try {
+        if (!org?.groupId) {
+            aggregate = await buildNormalTransaction(params, user);
+        } else {
+            userTx = await buildTransaction(params, user);
+        }
+    } catch (error) {
+        if (lockedTXCerIds.length > 0) {
+            unlockTXCers(lockedTXCerIds, false);
+        }
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : '交易构造失败',
+        };
+    }
+
+    if (!org?.groupId && aggregate) {
         const comNodeUrl = await getComNodeEndpoint();
         const url = buildApiUrl(comNodeUrl, API_ENDPOINTS.COM_SUBMIT_NOGUARGROUP_TX);
         const body = serializeAggregateGTX(aggregate as any);
@@ -179,13 +226,22 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
             return { success: true, txId: txRecord.txHash };
         }
 
+        if (lockedTXCerIds.length > 0) {
+            unlockTXCers(lockedTXCerIds, false);
+        }
         return {
             success: false,
             error: response.data?.error || response.data?.message || '提交失败',
         };
     }
 
-    const userTx = await buildTransaction(params, user);
+    if (!userTx || !org?.groupId) {
+        if (lockedTXCerIds.length > 0) {
+            unlockTXCers(lockedTXCerIds, false);
+        }
+        return { success: false, error: '交易数据不完整' };
+    }
+
     const assignUrl = org.assignNodeUrl ? buildNodeUrl(org.assignNodeUrl) : API_BASE_URL;
     const submitUrl = buildApiUrl(assignUrl, API_ENDPOINTS.ASSIGN_SUBMIT_TX(org.groupId));
     const body = serializeUserNewTX(userTx);
@@ -194,9 +250,61 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
     if (response.ok && response.data?.success) {
         txRecord.txHash = response.data.tx_id || userTx.TX.TXID;
         await saveTransaction(account.accountId, txRecord);
+        if (lockedTXCerIds.length > 0) {
+            const usedTxCerIds = collectUsedTxCerIds(userTx);
+            const unusedTxCerIds = lockedTXCerIds.filter((id) => !usedTxCerIds.includes(id));
+            if (unusedTxCerIds.length > 0) {
+                unlockTXCers(unusedTxCerIds, false);
+            }
+            if (usedTxCerIds.length > 0) {
+                markTXCersSubmitted(usedTxCerIds, txRecord.txHash || userTx.TX.TXID);
+            }
+        }
+
+        try {
+            const utxosToLock: Array<{ utxoId: string; address: string; value: number; type: number }> = [];
+            const inputs = userTx.TX.TXInputsNormal || [];
+            for (const input of inputs) {
+                const fromTxId = input.FromTXID || '';
+                const indexZ = input.FromTxPosition?.IndexZ ?? 0;
+                if (!fromTxId) continue;
+
+                const utxoId = `${fromTxId}_${indexZ}`;
+                const backendKey = `${fromTxId} + ${indexZ}`;
+                const addressHint = normalizeAddress(input.FromAddress || '');
+                let resolvedAddr = addressHint;
+                let utxoData =
+                    account.addresses?.[resolvedAddr]?.utxos?.[utxoId] ||
+                    account.addresses?.[resolvedAddr]?.utxos?.[backendKey];
+
+                if (!utxoData) {
+                    for (const [addrKey, addrData] of Object.entries(account.addresses || {})) {
+                        const candidate = addrData?.utxos?.[utxoId] || addrData?.utxos?.[backendKey];
+                        if (candidate) {
+                            resolvedAddr = addrKey;
+                            utxoData = candidate;
+                            break;
+                        }
+                    }
+                }
+
+                const value = Number(utxoData?.Value ?? 0) || 0;
+                const type = Number(utxoData?.Type ?? account.addresses?.[resolvedAddr]?.type ?? 0) || 0;
+                utxosToLock.push({ utxoId, address: resolvedAddr || addressHint, value, type });
+            }
+
+            if (utxosToLock.length > 0 && txRecord.txHash) {
+                await lockUTXOs(utxosToLock, txRecord.txHash);
+            }
+        } catch (error) {
+            console.warn('[Transfer] Failed to lock UTXOs:', error);
+        }
         return { success: true, txId: txRecord.txHash };
     }
 
+    if (lockedTXCerIds.length > 0) {
+        unlockTXCers(lockedTXCerIds, false);
+    }
     return {
         success: false,
         error: response.data?.error || response.data?.message || '提交失败',
