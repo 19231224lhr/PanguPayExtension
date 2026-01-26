@@ -100,6 +100,26 @@ let isPollingCrossOrg = false;
 let consecutiveFailures = 0;
 let txCerFailures = 0;
 let crossOrgFailures = 0;
+let hasShownAssignNodeConnectedToast = false;
+let hasShownAssignNodeDisconnectedToast = false;
+
+type ToastType = 'success' | 'error' | 'info' | 'warning';
+
+function getToastHandler():
+    | ((message: string, type?: ToastType, title?: string, duration?: number) => void)
+    | null {
+    if (typeof window === 'undefined') return null;
+    const anyWindow = window as any;
+    if (anyWindow?.PanguPay?.ui?.showToast) return anyWindow.PanguPay.ui.showToast;
+    if (anyWindow?.showToast) return anyWindow.showToast;
+    return null;
+}
+
+function notifyToast(message: string, type: ToastType): void {
+    const handler = getToastHandler();
+    if (!handler) return;
+    handler(message, type);
+}
 
 function normalizeAddress(address: string): string {
     return String(address || '').trim().replace(/^0x/i, '').toLowerCase();
@@ -474,6 +494,7 @@ function startSSESync(): void {
     if (!activeAccountId || !activeGroupId) return;
     if (typeof EventSource === 'undefined') {
         console.warn('[AccountSSE] EventSource not supported');
+        notifyToast('浏览器不支持 SSE，同步可能不完整', 'warning');
         return;
     }
 
@@ -501,10 +522,19 @@ function startSSESync(): void {
 
         eventSource.onopen = () => {
             console.info('[AccountSSE] Connected');
+            if (!hasShownAssignNodeConnectedToast) {
+                hasShownAssignNodeConnectedToast = true;
+                hasShownAssignNodeDisconnectedToast = false;
+                notifyToast('已连接到担保组织节点', 'success');
+            }
         };
 
         eventSource.onerror = (err) => {
             console.error('[AccountSSE] Connection error:', err);
+            if (!hasShownAssignNodeDisconnectedToast) {
+                hasShownAssignNodeDisconnectedToast = true;
+                notifyToast('无法连接担保组织节点', 'warning');
+            }
         };
 
         eventSource.addEventListener('account_update', (event) => {
@@ -583,6 +613,7 @@ function stopSSESync(): void {
     eventSource = null;
     eventSourceUserId = null;
     eventSourceGroupId = null;
+    hasShownAssignNodeDisconnectedToast = false;
 }
 
 export function startAccountPolling(
@@ -595,6 +626,8 @@ export function startAccountPolling(
     activeGroupId = groupId;
     activeAssignUrl = assignNodeUrl ? buildNodeUrl(assignNodeUrl) : API_BASE_URL;
     consecutiveFailures = 0;
+    hasShownAssignNodeConnectedToast = false;
+    hasShownAssignNodeDisconnectedToast = false;
 
     if (!pollingTimer) {
         void pollAccountUpdates(true);

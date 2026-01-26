@@ -15,7 +15,7 @@ import {
     type EcdsaSignature,
     type PublicKeyNew,
 } from './signature';
-import { getOrganization, type OrganizationChoice } from './storage';
+import { getOrganization, getSessionKey, type OrganizationChoice } from './storage';
 
 export interface UserNewAddressInfo {
     NewAddress: string;
@@ -41,6 +41,22 @@ export interface RegisterAddressRequest {
 }
 
 export interface RegisterAddressResponse {
+    success: boolean;
+    message?: string;
+    error?: string;
+}
+
+export interface UserAddressBindingMsg {
+    Op: number;
+    UserID: string;
+    Address: string;
+    PublicKey: PublicKeyNew;
+    Type: number;
+    TimeStamp: number;
+    Sig?: EcdsaSignature;
+}
+
+export interface UnbindAddressResponse {
     success: boolean;
     message?: string;
     error?: string;
@@ -242,6 +258,86 @@ export async function queryAddressGroupInfo(
         return {
             success: false,
             error: error instanceof Error ? error.message : '查询失败',
+        };
+    }
+}
+
+export async function unbindAddressOnBackend(
+    accountId: string,
+    address: string,
+    pubXHex: string,
+    pubYHex: string,
+    addressType: number = 0
+): Promise<AddressResult<UnbindAddressResponse>> {
+    try {
+        const org = await getOrganization(accountId);
+        if (!org || !org.groupId) {
+            return {
+                success: true,
+                data: { success: true, message: 'Not in organization' },
+            };
+        }
+
+        const session = getSessionKey();
+        if (!session || session.accountId !== accountId) {
+            return { success: false, error: '请先解锁账户私钥' };
+        }
+
+        if (!pubXHex || !pubYHex) {
+            return { success: false, error: '地址公钥缺失' };
+        }
+
+        const requestBody: UserAddressBindingMsg = {
+            Op: 0,
+            UserID: accountId,
+            Address: normalizeAddress(address),
+            PublicKey: convertHexToPublicKey(pubXHex, pubYHex),
+            Type: addressType,
+            TimeStamp: getTimestamp(),
+        };
+
+        requestBody.Sig = signStruct(requestBody as unknown as Record<string, unknown>, session.privKey, ['Sig']);
+
+        const base = org.assignNodeUrl ? buildNodeUrl(org.assignNodeUrl) : API_BASE_URL;
+        const url = buildApiUrl(base, API_ENDPOINTS.ASSIGN_UNBIND_ADDRESS(org.groupId));
+
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+            },
+            body: serializeForBackend(requestBody),
+        });
+
+        let responseData: UnbindAddressResponse = { success: response.ok };
+        try {
+            responseData = await response.json();
+        } catch {
+            responseData = {
+                success: response.ok,
+                message: response.ok ? 'Address unbound' : `HTTP ${response.status}`,
+            };
+        }
+
+        if (!response.ok) {
+            const errorMsg = responseData.error || responseData.message || `HTTP ${response.status}`;
+            if (
+                errorMsg.includes('user is not in the guarantor') ||
+                errorMsg.includes('user not found in group') ||
+                errorMsg.includes('address not found') ||
+                errorMsg.includes('already revoked')
+            ) {
+                return { success: true, data: { success: true, message: errorMsg } };
+            }
+            return { success: false, error: errorMsg };
+        }
+
+        return { success: true, data: responseData };
+    } catch (error) {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : '解绑地址失败',
         };
     }
 }

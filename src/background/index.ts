@@ -14,6 +14,7 @@ import {
     clearSession,
     getOrganization,
     saveTransaction,
+    hydrateSession,
 } from '../core/storage';
 import type { PanguMessage, PanguResponse } from '../core/types';
 
@@ -34,6 +35,7 @@ async function handleMessage(
     message: PanguMessage,
     _sender: chrome.runtime.MessageSender
 ): Promise<PanguResponse> {
+    await hydrateSession();
     const requestId = message.requestId || Date.now().toString();
 
     switch (message.type) {

@@ -83,6 +83,7 @@ const STORAGE_KEYS = {
     SETTINGS: 'pangu_settings',
     TX_HISTORY: 'pangu_tx_history',
     ORGANIZATION: 'pangu_organization',
+    SESSION: 'pangu_session',
 };
 
 // ========================================
@@ -317,12 +318,16 @@ export interface ExtensionSettings {
 const DEFAULT_SETTINGS: ExtensionSettings = {
     language: 'zh-CN',
     theme: 'light',
-    autoLockMinutes: 15,
+    autoLockMinutes: 10,
 };
 
 export async function getSettings(): Promise<ExtensionSettings> {
     const settings = await getStorageData<ExtensionSettings>(STORAGE_KEYS.SETTINGS);
-    return { ...DEFAULT_SETTINGS, ...settings };
+    return {
+        ...DEFAULT_SETTINGS,
+        ...settings,
+        autoLockMinutes: DEFAULT_SETTINGS.autoLockMinutes,
+    };
 }
 
 export async function saveSettings(settings: Partial<ExtensionSettings>): Promise<void> {
@@ -334,8 +339,17 @@ export async function saveSettings(settings: Partial<ExtensionSettings>): Promis
 // Session (内存中的解锁状态)
 // ========================================
 
+interface SessionRecord {
+    accountId: string;
+    privKey: string;
+    expiresAt: number;
+    addressKeys?: Record<string, string>;
+}
+
 let sessionPrivateKey: string | null = null;
 let sessionAccountId: string | null = null;
+let sessionExpiresAt: number | null = null;
+let sessionAutoLockMs = DEFAULT_SETTINGS.autoLockMinutes * 60 * 1000;
 const sessionAddressKeys = new Map<string, string>();
 
 function normalizeSessionAddressKey(address: string): string {
@@ -345,39 +359,105 @@ function normalizeSessionAddressKey(address: string): string {
 export function setSessionKey(accountId: string, privKey: string): void {
     sessionAccountId = accountId;
     sessionPrivateKey = privKey;
+    void refreshSessionExpiry();
 }
 
 export function getSessionKey(): { accountId: string; privKey: string } | null {
-    if (sessionAccountId && sessionPrivateKey) {
-        return { accountId: sessionAccountId, privKey: sessionPrivateKey };
+    if (!sessionAccountId || !sessionPrivateKey) return null;
+    if (isSessionExpired()) {
+        clearSession();
+        return null;
     }
-    return null;
+    void refreshSessionExpiry();
+    return { accountId: sessionAccountId, privKey: sessionPrivateKey };
 }
 
 export function clearSession(): void {
     sessionAccountId = null;
     sessionPrivateKey = null;
+    sessionExpiresAt = null;
     sessionAddressKeys.clear();
+    void removeStorageData(STORAGE_KEYS.SESSION);
 }
 
 export function isUnlocked(): boolean {
-    return sessionPrivateKey !== null;
+    return getSessionKey() !== null;
 }
 
 export function setSessionAddressKey(address: string, privKey: string): void {
     sessionAddressKeys.set(normalizeSessionAddressKey(address), privKey);
+    void refreshSessionExpiry();
 }
 
 export function hasSessionAddressKey(address: string): boolean {
+    if (isSessionExpired()) {
+        clearSession();
+        return false;
+    }
     return sessionAddressKeys.has(normalizeSessionAddressKey(address));
 }
 
 export function getSessionAddressKey(address: string): string | null {
+    if (isSessionExpired()) {
+        clearSession();
+        return null;
+    }
+    void refreshSessionExpiry();
     return sessionAddressKeys.get(normalizeSessionAddressKey(address)) || null;
 }
 
 export function removeSessionAddressKey(address: string): void {
     sessionAddressKeys.delete(normalizeSessionAddressKey(address));
+    void refreshSessionExpiry();
+}
+
+function isSessionExpired(): boolean {
+    if (!sessionExpiresAt) return false;
+    return Date.now() > sessionExpiresAt;
+}
+
+async function refreshSessionExpiry(): Promise<void> {
+    if (!sessionAccountId || !sessionPrivateKey) return;
+    try {
+        const settings = await getSettings();
+        sessionAutoLockMs = Math.max(1, settings.autoLockMinutes || DEFAULT_SETTINGS.autoLockMinutes) * 60 * 1000;
+    } catch {
+        sessionAutoLockMs = DEFAULT_SETTINGS.autoLockMinutes * 60 * 1000;
+    }
+    sessionExpiresAt = Date.now() + sessionAutoLockMs;
+    const record: SessionRecord = {
+        accountId: sessionAccountId,
+        privKey: sessionPrivateKey,
+        expiresAt: sessionExpiresAt,
+        addressKeys: Object.fromEntries(sessionAddressKeys),
+    };
+    await setStorageData(STORAGE_KEYS.SESSION, record);
+}
+
+export async function hydrateSession(): Promise<void> {
+    const record = await getStorageData<SessionRecord>(STORAGE_KEYS.SESSION);
+    if (!record || !record.accountId || !record.privKey) return;
+    if (!record.expiresAt || Date.now() > record.expiresAt) {
+        await removeStorageData(STORAGE_KEYS.SESSION);
+        return;
+    }
+
+    sessionAccountId = record.accountId;
+    sessionPrivateKey = record.privKey;
+    sessionExpiresAt = record.expiresAt;
+    sessionAddressKeys.clear();
+    if (record.addressKeys) {
+        for (const [addr, key] of Object.entries(record.addressKeys)) {
+            if (key) sessionAddressKeys.set(normalizeSessionAddressKey(addr), key);
+        }
+    }
+
+    try {
+        const settings = await getSettings();
+        sessionAutoLockMs = Math.max(1, settings.autoLockMinutes || DEFAULT_SETTINGS.autoLockMinutes) * 60 * 1000;
+    } catch {
+        sessionAutoLockMs = DEFAULT_SETTINGS.autoLockMinutes * 60 * 1000;
+    }
 }
 
 // ========================================

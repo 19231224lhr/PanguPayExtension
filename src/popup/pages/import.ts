@@ -6,6 +6,7 @@ import { getPublicKeyFromPrivate, generateAddress, generateAccountIdFromPrivate 
 import { encryptPrivateKey } from '../../core/keyEncryption';
 import { getAccount, getOnboardingStep, saveAccount, saveEncryptedKey, setActiveAccount, setSessionKey, type UserAccount } from '../../core/storage';
 import { startTxStatusSync } from '../../core/txStatus';
+import { syncAccountFromReOnline } from '../../core/auth';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
 export function renderImport(): void {
@@ -224,6 +225,22 @@ async function handleImport(e: Event): Promise<void> {
         });
         await setActiveAccount(accountId);
         setSessionKey(accountId, privateKey);
+
+        try {
+            const syncResult = await syncAccountFromReOnline(account, privateKey);
+            if (syncResult.org?.groupId) {
+                (window as any).showToast(`已连接到担保组织 ${syncResult.org.groupId}`, 'success');
+            } else {
+                (window as any).showToast('已连接，当前为散户模式', 'info');
+            }
+            if (syncResult.notice) {
+                (window as any).showToast(syncResult.notice, 'warning');
+            }
+        } catch (error) {
+            console.warn('[登录] re-online 同步失败:', error);
+            (window as any).showToast('账户同步失败，将继续使用本地数据', 'warning');
+        }
+
         void startTxStatusSync(accountId);
 
         (window as any).showToast('账户登录成功！', 'success');

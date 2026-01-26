@@ -208,7 +208,14 @@ async function handleAddWallet(): Promise<void> {
                 coinType
             );
             if (!registerResult.success) {
-                (window as any).showToast(registerResult.error || '地址注册失败', 'error');
+                const msg = registerResult.error || '地址注册失败';
+                const boundMatch = msg.match(/address already bound to guarantor group (\d+)/i);
+                if (boundMatch && boundMatch[1]) {
+                    (window as any).showToast(`该地址已绑定担保组织 ${boundMatch[1]}，请先加入组织后导入`, 'error');
+                } else {
+                    (window as any).showToast(msg, 'error');
+                }
+                return;
             }
         }
 

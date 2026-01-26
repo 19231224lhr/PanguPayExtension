@@ -3,6 +3,7 @@
  */
 
 import { getActiveAccountId, getEncryptedKey, setSessionKey, getActiveAccount, getOnboardingStep } from '../../core/storage';
+import { syncAccountFromReOnline } from '../../core/auth';
 import { startTxStatusSync } from '../../core/txStatus';
 import { decryptPrivateKey } from '../../core/keyEncryption';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
@@ -93,13 +94,23 @@ async function handleUnlock(e: Event): Promise<void> {
 
         // 设置会话
         setSessionKey(accountId, privateKey);
-        void startTxStatusSync(accountId);
 
-        // 更新最后登录时间
-        const account = await getActiveAccount();
-        if (account) {
-            account.lastLogin = Date.now();
+        // 同步账户状态与担保组织信息
+        let syncedAccount = await getActiveAccount();
+        if (syncedAccount) {
+            try {
+                const syncResult = await syncAccountFromReOnline(syncedAccount, privateKey);
+                syncedAccount = syncResult.account;
+                if (syncResult.notice) {
+                    (window as any).showToast(syncResult.notice, 'info');
+                }
+            } catch (error) {
+                console.warn('[解锁] re-online 同步失败:', error);
+                (window as any).showToast('账户同步失败，将继续使用本地数据', 'warning');
+            }
         }
+
+        void startTxStatusSync(accountId);
 
         (window as any).showToast('解锁成功', 'success');
 

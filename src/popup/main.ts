@@ -7,6 +7,7 @@ import {
     getAllAccounts,
     getSessionKey,
     getOnboardingStep,
+    hydrateSession,
 } from '../core/storage';
 import { startTxStatusSync } from '../core/txStatus';
 import { renderWelcome } from './pages/welcome';
@@ -276,6 +277,7 @@ export const showWarningToast = (message: string, title = '', duration = 3000) =
 async function init(): Promise<void> {
     try {
         await applyStoredSettings();
+        await hydrateSession();
 
         // 检查是否有账户
         const accounts = await getAllAccounts();

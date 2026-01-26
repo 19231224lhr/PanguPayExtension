@@ -9,6 +9,7 @@ import {
     clearTransactionHistory,
     clearActiveAccount,
     clearSession,
+    getEncryptedKey,
     getSettings,
     saveSettings,
     type ExtensionSettings,
@@ -16,6 +17,7 @@ import {
 import { stopTxStatusSync } from '../../core/txStatus';
 import { applyLanguage, applyTheme } from '../utils/appSettings';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
+import { decryptPrivateKey } from '../../core/keyEncryption';
 
 const TEXT = {
     'zh-CN': {
@@ -48,6 +50,17 @@ const TEXT = {
         toastLanguage: '语言已切换',
         toastTheme: '主题已切换',
         toastLogout: '已退出登录',
+        verifyPassword: '验证密码',
+        passwordPlaceholder: '输入登录密码',
+        passwordRequired: '请输入密码',
+        passwordInvalid: '密码错误',
+        encryptedMissing: '未找到加密数据',
+        exportKeyTitle: '导出私钥',
+        exportKeyHint: '请妥善保管，避免泄露',
+        copyKey: '复制私钥',
+        keyCopied: '私钥已复制',
+        cancel: '取消',
+        confirm: '确认',
         langLabels: { zh: '简体中文', en: 'English' },
         themeLabels: { light: '浅色', dark: '深色' },
         autoLockUnit: '分钟',
@@ -82,6 +95,17 @@ const TEXT = {
         toastLanguage: 'Language switched',
         toastTheme: 'Theme switched',
         toastLogout: 'Logged out',
+        verifyPassword: 'Verify Password',
+        passwordPlaceholder: 'Enter password',
+        passwordRequired: 'Please enter password',
+        passwordInvalid: 'Invalid password',
+        encryptedMissing: 'Encrypted key not found',
+        exportKeyTitle: 'Export Private Key',
+        exportKeyHint: 'Keep it safe and never share',
+        copyKey: 'Copy Private Key',
+        keyCopied: 'Private key copied',
+        cancel: 'Cancel',
+        confirm: 'Confirm',
         langLabels: { zh: 'Chinese', en: 'English' },
         themeLabels: { light: 'Light', dark: 'Dark' },
         autoLockUnit: 'min',
@@ -370,7 +394,114 @@ async function handleLogout(): Promise<void> {
     (window as any).navigateTo('welcome');
 }
 
-function showExportKey(): void {
-    (window as any).showToast('请先验证密码', 'info');
-    // 这里可以弹出模态框验证密码后显示私钥
+function openModal(title: string): { overlay: HTMLDivElement; body: HTMLElement; footer: HTMLElement; close: () => void } {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal">
+        <div class="modal-header">
+          <div class="modal-title">${title}</div>
+          <button class="modal-close" type="button" aria-label="关闭">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body"></div>
+        <div class="modal-footer"></div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    const close = () => overlay.remove();
+    const closeBtn = overlay.querySelector('.modal-close') as HTMLButtonElement | null;
+    if (closeBtn) {
+        closeBtn.addEventListener('click', close);
+    }
+
+    overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) close();
+    });
+
+    return {
+        overlay,
+        body: overlay.querySelector('.modal-body') as HTMLElement,
+        footer: overlay.querySelector('.modal-footer') as HTMLElement,
+        close,
+    };
+}
+
+async function showExportKey(): Promise<void> {
+    const settings = await getSettings();
+    const t = getText(settings.language);
+    const account = await getActiveAccount();
+    if (!account) return;
+
+    const encrypted = await getEncryptedKey(account.accountId);
+    if (!encrypted) {
+        (window as any).showToast(t.encryptedMissing, 'error');
+        return;
+    }
+
+    const modal = openModal(t.exportKeyTitle || t.exportKey);
+    modal.body.innerHTML = `
+      <div class="input-group" style="margin-bottom: 8px;">
+        <label class="input-label">${t.verifyPassword}</label>
+        <input type="password" class="input" id="exportKeyPassword" placeholder="${t.passwordPlaceholder}">
+        <div class="input-hint">${t.exportKeyHint}</div>
+      </div>
+    `;
+    modal.footer.innerHTML = `
+      <button class="btn btn-secondary" id="exportCancelBtn" type="button" style="flex: 1;">${t.cancel}</button>
+      <button class="btn btn-primary" id="exportConfirmBtn" type="button" style="flex: 1;">${t.confirm}</button>
+    `;
+    modal.footer.style.display = 'flex';
+
+    const cancelBtn = modal.overlay.querySelector('#exportCancelBtn') as HTMLButtonElement | null;
+    const confirmBtn = modal.overlay.querySelector('#exportConfirmBtn') as HTMLButtonElement | null;
+
+    if (cancelBtn) cancelBtn.addEventListener('click', modal.close);
+    if (confirmBtn) {
+        confirmBtn.addEventListener('click', async () => {
+            const passwordEl = modal.overlay.querySelector<HTMLInputElement>('#exportKeyPassword');
+            const password = passwordEl?.value.trim() || '';
+            if (!password) {
+                (window as any).showToast(t.passwordRequired, 'info');
+                return;
+            }
+            try {
+                const privKey = await decryptPrivateKey(
+                    encrypted.encrypted,
+                    encrypted.salt,
+                    encrypted.iv,
+                    password
+                );
+                modal.body.innerHTML = `
+                  <div class="capsule-block">
+                    <div class="capsule-label">${t.exportKeyTitle}</div>
+                    <div class="capsule-code">${privKey}</div>
+                    <div class="capsule-hint" style="color: var(--warning);">${t.exportKeyHint}</div>
+                  </div>
+                `;
+                modal.footer.innerHTML = `
+                  <button class="btn btn-secondary" id="exportCloseBtn" type="button" style="flex: 1;">${t.cancel}</button>
+                  <button class="btn btn-primary" id="exportCopyBtn" type="button" style="flex: 1;">${t.copyKey}</button>
+                `;
+                const copyBtn = modal.overlay.querySelector('#exportCopyBtn') as HTMLButtonElement | null;
+                const closeBtn = modal.overlay.querySelector('#exportCloseBtn') as HTMLButtonElement | null;
+                if (closeBtn) closeBtn.addEventListener('click', modal.close);
+                if (copyBtn) {
+                    copyBtn.addEventListener('click', () => {
+                        navigator.clipboard.writeText(privKey).then(() => {
+                            (window as any).showToast(t.keyCopied, 'success');
+                        });
+                    });
+                }
+            } catch (error) {
+                (window as any).showToast(t.passwordInvalid, 'error');
+            }
+        });
+    }
 }

@@ -1,4 +1,5 @@
 import { API_BASE_URL, API_ENDPOINTS, buildApiUrl, buildNodeUrl, getGroupInfo } from './api';
+import { isInGuarGroup, queryAddressGroupInfo } from './address';
 import {
     getSessionKey,
     getWalletAddresses,
@@ -62,6 +63,32 @@ async function enrichOrg(org: OrganizationChoice): Promise<OrganizationChoice> {
     };
 }
 
+async function ensureAddressesBelongToTargetOrg(
+    account: UserAccount,
+    targetGroupId: string
+): Promise<{ ok: boolean; error?: string }> {
+    const addresses = getWalletAddresses(account);
+    for (const addr of addresses) {
+        try {
+            const result = await queryAddressGroupInfo(addr.address);
+            if (!result.success || !result.data) {
+                return { ok: false, error: result.error || '查询地址所属组织失败' };
+            }
+            const groupId = result.data.groupId || '';
+            if (isInGuarGroup(groupId) && groupId !== targetGroupId) {
+                const short = `${addr.address.slice(0, 10)}...${addr.address.slice(-6)}`;
+                return {
+                    ok: false,
+                    error: `地址 ${short} 已属于担保组织 ${groupId}，请加入该组织或删除该地址后重试`,
+                };
+            }
+        } catch (error) {
+            return { ok: false, error: (error as Error).message || '查询地址所属组织失败' };
+        }
+    }
+    return { ok: true };
+}
+
 function buildFlowApplyUrl(org: OrganizationChoice): string {
     const base = org.assignNodeUrl ? buildNodeUrl(org.assignNodeUrl) : API_BASE_URL;
     return buildApiUrl(base, API_ENDPOINTS.ASSIGN_FLOW_APPLY(org.groupId));
@@ -94,6 +121,11 @@ export async function joinGuarantorGroup(
     const addressMsg = buildAddressMsg(account);
     if (Object.keys(addressMsg).length === 0) {
         return { success: false, error: '加入担保组织前需要至少一个钱包子地址' };
+    }
+
+    const precheck = await ensureAddressesBelongToTargetOrg(account, org.groupId);
+    if (!precheck.ok) {
+        return { success: false, error: precheck.error || '地址组织校验失败' };
     }
 
     const { x: pubXHex, y: pubYHex } = getPublicKeyHexFromPrivate(session.privKey);

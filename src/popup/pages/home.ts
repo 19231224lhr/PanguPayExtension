@@ -5,7 +5,6 @@
 import {
     clearSession,
     getActiveAccount,
-    getDefaultWalletAddress,
     getOrganization,
     getSessionAddressKey,
     getWalletAddresses,
@@ -16,6 +15,9 @@ import {
 import { stopTxStatusSync } from '../../core/txStatus';
 import { COIN_NAMES } from '../../core/types';
 import { requestCapsuleAddress } from '../../core/capsule';
+import { unbindAddressOnBackend } from '../../core/address';
+import { syncAccountAddresses } from '../../core/walletSync';
+import { bigIntToHex } from '../../core/signature';
 import { getActiveLanguage } from '../utils/appSettings';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
@@ -50,7 +52,8 @@ const TEXT = {
         navHistory: '历史',
         navOrg: '组织',
         navSettings: '设置',
-        defaultLabel: '默认',
+        createdLabel: '新建',
+        importedLabel: '导入',
         fullAddress: '完整地址',
         copyAddress: '复制地址',
         totalBalance: '总余额',
@@ -101,7 +104,8 @@ const TEXT = {
         navHistory: 'History',
         navOrg: 'Org',
         navSettings: 'Settings',
-        defaultLabel: 'Default',
+        createdLabel: 'Created',
+        importedLabel: 'Imported',
         fullAddress: 'Full Address',
         copyAddress: 'Copy Address',
         totalBalance: 'Total Balance',
@@ -150,7 +154,6 @@ export async function renderHome(): Promise<void> {
 
     const org = await getOrganization(account.accountId);
     const walletAddresses = getWalletAddresses(account);
-    const defaultAddress = getDefaultWalletAddress(account);
     const logoUrl = chrome.runtime.getURL('logo.png');
 
     const pgcBalance = account.totalBalance[0] || 0;
@@ -159,9 +162,7 @@ export async function renderHome(): Promise<void> {
     const totalEstimate = 0;
 
     const addressList = walletAddresses.length
-        ? walletAddresses
-              .map((item) => renderAddressCard(item, defaultAddress?.address === item.address, t))
-              .join('')
+        ? walletAddresses.map((item) => renderAddressCard(item, t)).join('')
         : `
         <div class="empty-state address-empty">
           <div class="empty-title">${t.noAddressTitle}</div>
@@ -359,9 +360,10 @@ function renderAssetCard(coinType: number, balance: number): string {
     `;
 }
 
-function renderAddressCard(address: AddressInfo, isDefault: boolean, t: HomeText): string {
+function renderAddressCard(address: AddressInfo, t: HomeText): string {
     const meta = getCoinMeta(address.type);
     const coinName = COIN_NAMES[address.type as keyof typeof COIN_NAMES] || 'PGC';
+    const sourceLabel = address.source === 'created' ? t.createdLabel : t.importedLabel;
     const shortAddress = address.address.slice(0, 8) + '...' + address.address.slice(-6);
     const detailsId = `address-details-${address.address}`;
     const balance = (address.balance || 0).toFixed(meta.decimals);
@@ -373,10 +375,7 @@ function renderAddressCard(address: AddressInfo, isDefault: boolean, t: HomeText
             <div class="coin-badge coin-badge--${meta.className}">${meta.short}</div>
             <div class="address-card-main">
               <div class="address-title">${shortAddress}</div>
-              <div class="address-subtitle">
-                ${coinName}
-                ${isDefault ? `<span class="address-badge">${t.defaultLabel}</span>` : ''}
-              </div>
+              <div class="address-subtitle">${sourceLabel} · ${coinName}</div>
             </div>
           </div>
           <div class="address-card-right">
@@ -463,9 +462,29 @@ function handleLock(): void {
     (window as any).navigateTo('unlock');
 }
 
-function refreshHome(): void {
+async function refreshHome(): Promise<void> {
     const t = getText();
-    (window as any).showToast(t.refreshToast, 'success');
+    const account = await getActiveAccount();
+    if (!account) return;
+
+    const walletAddresses = getWalletAddresses(account);
+    if (walletAddresses.length > 0) {
+        try {
+            await syncAccountAddresses(
+                account,
+                walletAddresses.map((item) => item.address)
+            );
+            (window as any).showToast(t.refreshToast, 'success');
+        } catch (error) {
+            (window as any).showToast(
+                (error as Error).message || '刷新失败',
+                'error'
+            );
+        }
+    } else {
+        (window as any).showToast(t.refreshToast, 'success');
+    }
+
     renderHome();
 }
 
@@ -599,7 +618,32 @@ async function deleteWalletAddress(address: string): Promise<void> {
 
     const account = await getActiveAccount();
     if (!account) return;
-    if (!account.addresses[address]) return;
+    const info = account.addresses[address];
+    if (!info) return;
+
+    let pubXHex = info.pubXHex || '';
+    let pubYHex = info.pubYHex || '';
+    if ((!pubXHex || !pubYHex) && info.publicKeyNew?.X && info.publicKeyNew?.Y) {
+        try {
+            pubXHex = bigIntToHex(String(info.publicKeyNew.X));
+            pubYHex = bigIntToHex(String(info.publicKeyNew.Y));
+        } catch {
+            pubXHex = pubXHex || '';
+            pubYHex = pubYHex || '';
+        }
+    }
+
+    const unbindResult = await unbindAddressOnBackend(
+        account.accountId,
+        address,
+        pubXHex,
+        pubYHex,
+        info.type
+    );
+    if (!unbindResult.success) {
+        (window as any).showToast(unbindResult.error || '解绑失败', 'error');
+        return;
+    }
 
     delete account.addresses[address];
     removeSessionAddressKey(address);

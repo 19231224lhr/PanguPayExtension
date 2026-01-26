@@ -6,6 +6,7 @@ import {
     RETRY_DELAY,
     buildApiUrl,
     buildNodeUrl,
+    clearComNodeCache,
     getComNodeEndpoint,
 } from './api';
 import { buildNormalTransaction, buildTransaction, serializeAggregateGTX, serializeUserNewTX, type UserNewTX } from './txBuilder';
@@ -15,6 +16,15 @@ import { lockUTXOs } from './utxoLock';
 import { lockTXCers, markTXCersSubmitted, unlockTXCers } from './txCerLockManager';
 
 export type TransferMode = 'quick' | 'cross';
+
+export interface TransferRecipient {
+    address: string;
+    amount: number;
+    coinType: number;
+    publicKey?: string;
+    orgId?: string;
+    transferGas?: number;
+}
 
 export interface TransferRequest {
     account: UserAccount;
@@ -26,6 +36,7 @@ export interface TransferRequest {
     transferGas?: number;
     recipientPublicKey?: string;
     recipientOrgId?: string;
+    recipients?: TransferRecipient[];
     gas: number;
     extraGas: number;
     changeAddresses: Record<number, string>;
@@ -35,6 +46,7 @@ export interface TransferResult {
     success: boolean;
     txId?: string;
     error?: string;
+    usedAddresses?: string[];
 }
 
 function normalizeAddress(address: string): string {
@@ -123,9 +135,50 @@ async function postWithRetry(
     return { ok: false, data: { error: lastError?.message || '网络错误' }, status: 0 };
 }
 
+function mapTransferErrorMessage(raw: string): string {
+    const message = raw || '提交失败';
+    const lower = message.toLowerCase();
+
+    if (lower.includes('user is not in the guarantor') || lower.includes('not in the guarantor organization')) {
+        return '用户不在担保组织内，请退出后重新加入';
+    }
+    if (
+        lower.includes('address already revoked') ||
+        lower.includes('address not found') ||
+        lower.includes('already revoked')
+    ) {
+        return '地址已解绑，请选择其他地址';
+    }
+    if (lower.includes('signature') && (lower.includes('fail') || lower.includes('error'))) {
+        return '签名验证失败，请检查私钥是否正确';
+    }
+    if (lower.includes('utxo') && (lower.includes('spent') || lower.includes('used'))) {
+        return 'UTXO 已被使用，请刷新页面后重试';
+    }
+    if (lower.includes('no alternative guarantor available') || lower.includes('failed to reassign user')) {
+        return '担保组织无法正确分配处理交易的担保人，请稍后重试';
+    }
+    if (lower.includes('leader') && lower.includes('unavailable')) {
+        return 'Leader 节点暂时不可用，请稍后重试';
+    }
+
+    return message;
+}
+
 export async function buildAndSubmitTransfer(request: TransferRequest): Promise<TransferResult> {
     const normalizedFrom = request.fromAddresses.map(normalizeAddress);
-    const normalizedTo = normalizeAddress(request.toAddress);
+    const rawRecipients = request.recipients?.length
+        ? request.recipients
+        : [
+              {
+                  address: request.toAddress,
+                  amount: request.amount,
+                  coinType: request.coinType,
+                  publicKey: request.recipientPublicKey,
+                  orgId: request.recipientOrgId,
+                  transferGas: request.transferGas,
+              },
+          ];
 
     const changeAddresses = request.changeAddresses || {};
     const addressesToSync = new Set<string>(normalizedFrom);
@@ -147,7 +200,6 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         };
     }
 
-    const pubKey = parseRecipientPubKey(request.recipientPublicKey);
     const preferTXCer = request.transferMode === 'quick';
 
     const lockedTXCerIds: string[] = [];
@@ -164,19 +216,25 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         console.warn('[Transfer] Failed to lock TXCers:', error);
     }
 
+    const recipients = rawRecipients.map((recipient) => {
+        const pubKey = parseRecipientPubKey(recipient.publicKey || request.recipientPublicKey);
+        return {
+            address: normalizeAddress(recipient.address),
+            amount: recipient.amount,
+            coinType: recipient.coinType,
+            publicKeyX: request.transferMode === 'cross' ? '' : pubKey.xHex,
+            publicKeyY: request.transferMode === 'cross' ? '' : pubKey.yHex,
+            guarGroupID:
+                request.transferMode === 'cross'
+                    ? ''
+                    : recipient.orgId || request.recipientOrgId || '',
+            interest: request.transferMode === 'cross' ? 0 : recipient.transferGas ?? request.transferGas ?? 0,
+        };
+    });
+
     const params = {
         fromAddresses: normalizedFrom,
-        recipients: [
-            {
-                address: normalizedTo,
-                amount: request.amount,
-                coinType: request.coinType,
-                publicKeyX: request.transferMode === 'cross' ? '' : pubKey.xHex,
-                publicKeyY: request.transferMode === 'cross' ? '' : pubKey.yHex,
-                guarGroupID: request.transferMode === 'cross' ? '' : request.recipientOrgId || '',
-                interest: request.transferMode === 'cross' ? 0 : request.transferGas || 0,
-            },
-        ],
+        recipients,
         changeAddresses,
         gas: request.gas,
         isCrossChain: request.transferMode === 'cross',
@@ -184,16 +242,17 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         preferTXCer,
     };
 
-    const txRecord: TransactionRecord = {
-        id: Date.now().toString(),
+    const baseId = Date.now().toString();
+    const txRecords: TransactionRecord[] = recipients.map((recipient, index) => ({
+        id: `${baseId}_${index}`,
         type: 'send',
         status: 'pending',
-        amount: request.amount,
-        coinType: request.coinType,
+        amount: recipient.amount,
+        coinType: recipient.coinType,
         from: normalizedFrom[0] || account.mainAddress,
-        to: normalizedTo,
+        to: recipient.address,
         timestamp: Date.now(),
-    };
+    }));
 
     let userTx: UserNewTX | null = null;
     let aggregate: Awaited<ReturnType<typeof buildNormalTransaction>> | null = null;
@@ -220,10 +279,16 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         const body = serializeAggregateGTX(aggregate as any);
 
         const response = await postWithRetry(url, body);
+        if (response.status === 503) {
+            clearComNodeCache();
+        }
         if (response.ok && response.data?.success) {
-            txRecord.txHash = response.data.tx_hash || aggregate.TXHash;
-            await saveTransaction(account.accountId, txRecord);
-            return { success: true, txId: txRecord.txHash };
+            const txHash = response.data.tx_hash || aggregate.TXHash;
+            for (const record of txRecords) {
+                record.txHash = txHash;
+                await saveTransaction(account.accountId, record);
+            }
+            return { success: true, txId: txHash };
         }
 
         if (lockedTXCerIds.length > 0) {
@@ -231,7 +296,9 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         }
         return {
             success: false,
-            error: response.data?.error || response.data?.message || '提交失败',
+            error: mapTransferErrorMessage(
+                response.data?.error || response.data?.message || '提交失败'
+            ),
         };
     }
 
@@ -248,8 +315,11 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
 
     const response = await postWithRetry(submitUrl, body);
     if (response.ok && response.data?.success) {
-        txRecord.txHash = response.data.tx_id || userTx.TX.TXID;
-        await saveTransaction(account.accountId, txRecord);
+        const txHash = response.data.tx_id || userTx.TX.TXID;
+        for (const record of txRecords) {
+            record.txHash = txHash;
+            await saveTransaction(account.accountId, record);
+        }
         if (lockedTXCerIds.length > 0) {
             const usedTxCerIds = collectUsedTxCerIds(userTx);
             const unusedTxCerIds = lockedTXCerIds.filter((id) => !usedTxCerIds.includes(id));
@@ -257,7 +327,7 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
                 unlockTXCers(unusedTxCerIds, false);
             }
             if (usedTxCerIds.length > 0) {
-                markTXCersSubmitted(usedTxCerIds, txRecord.txHash || userTx.TX.TXID);
+                markTXCersSubmitted(usedTxCerIds, txHash || userTx.TX.TXID);
             }
         }
 
@@ -293,13 +363,13 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
                 utxosToLock.push({ utxoId, address: resolvedAddr || addressHint, value, type });
             }
 
-            if (utxosToLock.length > 0 && txRecord.txHash) {
-                await lockUTXOs(utxosToLock, txRecord.txHash);
+            if (utxosToLock.length > 0 && txHash) {
+                await lockUTXOs(utxosToLock, txHash);
             }
         } catch (error) {
             console.warn('[Transfer] Failed to lock UTXOs:', error);
         }
-        return { success: true, txId: txRecord.txHash };
+        return { success: true, txId: txHash };
     }
 
     if (lockedTXCerIds.length > 0) {
@@ -307,6 +377,8 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
     }
     return {
         success: false,
-        error: response.data?.error || response.data?.message || '提交失败',
+        error: mapTransferErrorMessage(
+            response.data?.error || response.data?.message || '提交失败'
+        ),
     };
 }

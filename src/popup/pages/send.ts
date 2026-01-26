@@ -4,28 +4,65 @@
 
 import {
     getActiveAccount,
-    getDefaultWalletAddress,
     getOrganization,
     getWalletAddresses,
     type AddressInfo,
 } from '../../core/storage';
 import { COIN_NAMES } from '../../core/types';
-import { GROUP_ID_NOT_EXIST, queryAddressGroupInfo } from '../../core/address';
-import { buildAndSubmitTransfer, type TransferMode } from '../../core/transfer';
+import { GROUP_ID_NOT_EXIST, GROUP_ID_RETAIL, queryAddressGroupInfo } from '../../core/address';
+import { queryAddressBalances } from '../../core/accountQuery';
+import { isCapsuleAddress, verifyCapsuleAddress } from '../../core/capsule';
+import { buildAndSubmitTransfer, type TransferMode, type TransferRecipient } from '../../core/transfer';
 import { watchSubmittedTransaction } from '../../core/txStatus';
+import { isTXCerLocked } from '../../core/txCerLockManager';
+import { getLockedUTXOs } from '../../core/utxoLock';
+import { bigIntToHex } from '../../core/signature';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 import { enhanceCustomSelects } from '../utils/customSelect';
 
-let selectedCoinType = 0; // 默认 PGC
-let selectedTransferMode: 'quick' | 'cross' | 'pledge' = 'quick';
+type TransferModeView = 'quick' | 'cross' | 'pledge';
+
+interface RecipientDraft {
+    id: string;
+    toAddress: string;
+    amount: string;
+    coinType: number;
+    publicKey: string;
+    orgId: string;
+    transferGas: string;
+    resolvedAddress?: string;
+    capsuleOrgId?: string;
+    verifiedType?: number;
+}
+
+let selectedTransferMode: TransferModeView = 'quick';
 let selectedSourceAddresses = new Set<string>();
 let selectionTouched = false;
-let lastCoinType = selectedCoinType;
-let currentCoinAddresses: Array<{ address: string; balance: number; type: number }> = [];
-let recipientAdvancedOpen = false;
+let currentAddresses: AddressInfo[] = [];
 let optionsOpen = false;
-const MAX_AMOUNT_DECIMALS = 8;
+
+const recipients: RecipientDraft[] = [];
+const recipientAdvancedOpen = new Set<string>();
 const recipientTypeCache = new Map<string, { exists: boolean; type: number }>();
+const MAX_AMOUNT_DECIMALS = 8;
+
+function createRecipient(defaultCoinType = 0): RecipientDraft {
+    return {
+        id: `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+        toAddress: '',
+        amount: '',
+        coinType: defaultCoinType,
+        publicKey: '',
+        orgId: '',
+        transferGas: '',
+    };
+}
+
+function ensureRecipients(): void {
+    if (recipients.length === 0) {
+        recipients.push(createRecipient(0));
+    }
+}
 
 export async function renderSend(): Promise<void> {
     const app = document.getElementById('app');
@@ -39,29 +76,25 @@ export async function renderSend(): Promise<void> {
 
     const org = await getOrganization(account.accountId);
     const hasOrg = !!(org && org.groupId);
-    const walletAddress = getDefaultWalletAddress(account);
+    const walletAddresses = getWalletAddresses(account);
 
-    if (!walletAddress) {
+    if (!walletAddresses.length) {
         (window as any).showToast('请先添加钱包地址', 'info');
         (window as any).navigateTo('walletManager');
         return;
     }
 
-    const walletAddresses = getWalletAddresses(account);
-    const coinAddresses = walletAddresses.filter((addr) => addr.type === selectedCoinType);
-    syncSelectionForCoin(coinAddresses);
-    currentCoinAddresses = coinAddresses.map((item) => ({
-        address: item.address,
-        balance: item.balance,
-        type: item.type,
-    }));
+    ensureRecipients();
+    currentAddresses = walletAddresses;
 
     if (!hasOrg && selectedTransferMode !== 'quick') {
         selectedTransferMode = 'quick';
     }
 
-    const selectedBalance = getSelectedBalance();
-    const displayDecimals = selectedCoinType === 0 ? 2 : selectedCoinType === 1 ? 8 : 6;
+    syncSelection(currentAddresses);
+
+    const summary = getSelectionSummary();
+    const isCrossMode = selectedTransferMode === 'cross';
     const modeIndex = selectedTransferMode === 'quick' ? 0 : selectedTransferMode === 'cross' ? 1 : 2;
     const quickLabel = hasOrg ? '快速转账' : '普通转账';
 
@@ -125,15 +158,15 @@ export async function renderSend(): Promise<void> {
                 <span>从 · FROM</span>
               </div>
               <div class="tx-addr-list">
-                ${coinAddresses.length === 0 ? `
+                ${currentAddresses.length === 0 ? `
                   <div class="empty-state" style="padding: 16px;">
-                    <div class="empty-desc">当前币种暂无可用地址</div>
+                    <div class="empty-desc">暂无可用地址</div>
                   </div>
-                ` : coinAddresses.map((addr) => renderSourceAddressRow(addr.address, addr.balance, addr.type)).join('')}
+                ` : currentAddresses.map((addr) => renderSourceAddressRow(addr)).join('')}
               </div>
               <div class="source-summary">
-                <span>已选 <span id="sourceSelectedCount">0</span> / ${coinAddresses.length}</span>
-                <span id="sourceAvailableBalance">${selectedSourceAddresses.size ? `${selectedBalance.toFixed(displayDecimals)} ${COIN_NAMES[selectedCoinType as keyof typeof COIN_NAMES]}` : '--'}</span>
+                <span>已选 <span id="sourceSelectedCount">${summary.count}</span> / ${currentAddresses.length}</span>
+                <span id="sourceAvailableBalance">${summary.label}</span>
               </div>
             </div>
 
@@ -148,80 +181,7 @@ export async function renderSend(): Promise<void> {
                 </div>
               </div>
               <div class="recipients-list">
-                <div class="recipient-card ${recipientAdvancedOpen ? 'expanded' : ''}">
-                  <div class="recipient-content">
-                    <div class="recipient-main">
-                      <div class="recipient-addr-field">
-                        <span class="recipient-field-label">收款地址</span>
-                        <div class="recipient-addr-input-wrap">
-                          <input id="toAddress" class="input" type="text" placeholder="输入收款方地址" required data-name="to">
-                          <button type="button" class="recipient-lookup-btn" onclick="verifyRecipientAddress()" title="验证收款地址">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                              <path d="M12 3l7 4v5c0 5-3.5 9-7 9s-7-4-7-9V7l7-4z"></path>
-                              <path d="M9 12l2 2 4-4"></path>
-                            </svg>
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                    <div class="recipient-amount-row">
-                      <div class="recipient-field">
-                        <span class="recipient-field-label">转账金额</span>
-                        <input id="amount" class="input" type="number" min="0" step="any" placeholder="0.00" required data-name="val">
-                      </div>
-                      <div class="recipient-field">
-                        <span class="recipient-field-label">币种</span>
-                        <select id="coinType" class="input recipient-coin-select" data-name="mt">
-                          <option value="0" ${selectedCoinType === 0 ? 'selected' : ''}>PGC</option>
-                          <option value="1" ${selectedCoinType === 1 ? 'selected' : ''}>BTC</option>
-                          <option value="2" ${selectedCoinType === 2 ? 'selected' : ''}>ETH</option>
-                        </select>
-                      </div>
-                    </div>
-
-                    <div class="recipient-details">
-                      <div class="recipient-details-inner">
-                        <div class="recipient-field">
-                          <span class="recipient-field-label">公钥</span>
-                          <input id="recipientPubKey" class="input" type="text" placeholder="04 + X + Y 或 X,Y" data-name="pub">
-                        </div>
-                        <div class="recipient-details-row">
-                          <div class="recipient-field">
-                            <span class="recipient-field-label">担保组织ID</span>
-                            <input id="recipientOrgId" class="input" type="text" placeholder="可选" data-name="gid">
-                          </div>
-                          <div class="recipient-field">
-                            <span class="recipient-field-label">转移Gas</span>
-                            <input id="recipientGas" class="input" type="number" min="0" step="any" placeholder="0" data-name="gas">
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div class="recipient-actions">
-                      <button type="button" class="recipient-action-btn recipient-action-btn--ghost" onclick="toggleRecipientAdvanced()">
-                        <span>高级选项</span>
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                          <polyline points="6 9 12 15 18 9"></polyline>
-                        </svg>
-                      </button>
-                      <button type="button" class="recipient-action-btn recipient-action-btn--danger" onclick="clearRecipientFields()">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                          <path d="M3 6h18"></path>
-                          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                        </svg>
-                        <span>清空</span>
-                      </button>
-                      <button type="button" class="recipient-action-btn recipient-action-btn--primary" onclick="addRecipient()">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                          <line x1="12" y1="5" x2="12" y2="19"></line>
-                          <line x1="5" y1="12" x2="19" y2="12"></line>
-                        </svg>
-                        <span>添加</span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
+                ${recipients.map((recipient, index) => renderRecipientCard(recipient, index, isCrossMode)).join('')}
               </div>
             </div>
 
@@ -261,20 +221,20 @@ export async function renderSend(): Promise<void> {
                   </div>
                   <div class="option-field">
                     <label class="option-field-label">PGC 找零</label>
-                    <select id="chAddrPGC" class="input option-select" ${hasChangeAddress(walletAddresses, 0) ? '' : 'disabled'}>
-                      ${renderChangeAddressOptions(walletAddresses, 0)}
+                    <select id="chAddrPGC" class="input option-select" ${hasChangeAddress(currentAddresses, 0) ? '' : 'disabled'}>
+                      ${renderChangeAddressOptions(currentAddresses, 0)}
                     </select>
                   </div>
                   <div class="option-field">
                     <label class="option-field-label">BTC 找零</label>
-                    <select id="chAddrBTC" class="input option-select" ${hasChangeAddress(walletAddresses, 1) ? '' : 'disabled'}>
-                      ${renderChangeAddressOptions(walletAddresses, 1)}
+                    <select id="chAddrBTC" class="input option-select" ${hasChangeAddress(currentAddresses, 1) ? '' : 'disabled'}>
+                      ${renderChangeAddressOptions(currentAddresses, 1)}
                     </select>
                   </div>
                   <div class="option-field">
                     <label class="option-field-label">ETH 找零</label>
-                    <select id="chAddrETH" class="input option-select" ${hasChangeAddress(walletAddresses, 2) ? '' : 'disabled'}>
-                      ${renderChangeAddressOptions(walletAddresses, 2)}
+                    <select id="chAddrETH" class="input option-select" ${hasChangeAddress(currentAddresses, 2) ? '' : 'disabled'}>
+                      ${renderChangeAddressOptions(currentAddresses, 2)}
                     </select>
                   </div>
                 </div>
@@ -303,32 +263,32 @@ export async function renderSend(): Promise<void> {
         toggleRecipientAdvanced,
         clearRecipientFields,
         addRecipient,
+        removeRecipient,
         toggleAdvancedOptions,
         verifyRecipientAddress,
     });
 
+    applyRecipientValues(app);
     enhanceCustomSelects(app);
+    bindRecipientInputHandlers(app);
 
-    const form = document.getElementById('sendForm') as HTMLFormElement;
-    form.addEventListener('submit', handleSend);
-
-    const coinSelect = document.getElementById('coinType') as HTMLSelectElement;
-    coinSelect.addEventListener('change', (e) => {
-        selectedCoinType = parseInt((e.target as HTMLSelectElement).value);
-        renderSend();
-    });
+    const form = document.getElementById('sendForm') as HTMLFormElement | null;
+    if (form) {
+        form.addEventListener('submit', handleSend);
+    }
 
     updateSourceSummary();
 }
 
-function renderSourceAddressRow(address: string, balance: number, coinType: number): string {
-    const isSelected = selectedSourceAddresses.has(address);
-    const displayDecimals = coinType === 0 ? 2 : coinType === 1 ? 8 : 6;
-    const shortAddress = address.slice(0, 10) + '...' + address.slice(-6);
-    const coinLabel = COIN_NAMES[coinType as keyof typeof COIN_NAMES];
+function renderSourceAddressRow(addr: AddressInfo): string {
+    const isSelected = selectedSourceAddresses.has(addr.address);
+    const available = getAvailableBalanceForAddress(addr);
+    const shortAddress = addr.address.slice(0, 10) + '...' + addr.address.slice(-6);
+    const coinLabel = COIN_NAMES[addr.type as keyof typeof COIN_NAMES];
+    const displayDecimals = getDisplayDecimals(addr.type);
 
     return `
-      <button type="button" class="tx-addr-item ${isSelected ? 'selected' : ''}" data-source-address="${address}" onclick="toggleSourceAddress('${address}')" aria-pressed="${isSelected}">
+      <button type="button" class="tx-addr-item ${isSelected ? 'selected' : ''}" data-source-address="${addr.address}" onclick="toggleSourceAddress('${addr.address}')" aria-pressed="${isSelected}">
         <div class="tx-addr-left">
           <div class="coin-badge coin-badge--${coinLabel.toLowerCase()}">${coinLabel.charAt(0)}</div>
           <div class="tx-addr-info">
@@ -337,14 +297,192 @@ function renderSourceAddressRow(address: string, balance: number, coinType: numb
           </div>
         </div>
         <div class="tx-addr-right">
-          <div class="tx-addr-balance">${(balance || 0).toFixed(displayDecimals)}</div>
+          <div class="tx-addr-balance">${available.toFixed(displayDecimals)}</div>
           <div class="tx-addr-check ${isSelected ? 'checked' : ''}"></div>
         </div>
       </button>
     `;
 }
 
-function setTransferMode(mode: 'quick' | 'cross' | 'pledge'): void {
+function renderRecipientCard(recipient: RecipientDraft, index: number, isCrossMode: boolean): string {
+    const isExpanded = recipientAdvancedOpen.has(recipient.id);
+    const isLast = index === recipients.length - 1;
+    const canRemove = recipients.length > 1;
+    const resolvedHint = recipient.resolvedAddress
+        ? `<div class="input-hint">胶囊地址已解析：${recipient.resolvedAddress.slice(0, 10)}...${recipient.resolvedAddress.slice(-6)}</div>`
+        : '';
+
+    return `
+      <div class="recipient-card ${isExpanded ? 'expanded' : ''}" data-recipient-id="${recipient.id}">
+        <div class="recipient-content">
+          <div class="recipient-main">
+            <div class="recipient-addr-field">
+              <span class="recipient-field-label">收款地址</span>
+              <div class="recipient-addr-input-wrap">
+                <input class="input" type="text" placeholder="输入收款方地址" data-recipient-id="${recipient.id}" data-recipient-field="toAddress">
+                <button type="button" class="recipient-lookup-btn" onclick="verifyRecipientAddress('${recipient.id}')" title="验证收款地址">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 3l7 4v5c0 5-3.5 9-7 9s-7-4-7-9V7l7-4z"></path>
+                    <path d="M9 12l2 2 4-4"></path>
+                  </svg>
+                </button>
+              </div>
+              ${resolvedHint}
+            </div>
+          </div>
+          <div class="recipient-amount-row">
+            <div class="recipient-field">
+              <span class="recipient-field-label">转账金额</span>
+              <input class="input" type="number" min="0" step="any" placeholder="0.00" data-recipient-id="${recipient.id}" data-recipient-field="amount">
+            </div>
+            <div class="recipient-field">
+              <span class="recipient-field-label">币种</span>
+              <select class="input recipient-coin-select" data-recipient-id="${recipient.id}" data-recipient-field="coinType">
+                <option value="0">PGC</option>
+                <option value="1">BTC</option>
+                <option value="2">ETH</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="recipient-details" ${isCrossMode ? 'style="display:none"' : ''}>
+            <div class="recipient-details-inner">
+              <div class="recipient-field">
+                <span class="recipient-field-label">公钥</span>
+                <input class="input" type="text" placeholder="04 + X + Y 或 X,Y" data-recipient-id="${recipient.id}" data-recipient-field="publicKey" ${isCrossMode ? 'disabled' : ''}>
+              </div>
+              <div class="recipient-details-row">
+                <div class="recipient-field">
+                  <span class="recipient-field-label">担保组织ID</span>
+                  <input class="input" type="text" placeholder="可选" data-recipient-id="${recipient.id}" data-recipient-field="orgId" ${isCrossMode ? 'disabled' : ''}>
+                </div>
+                <div class="recipient-field">
+                  <span class="recipient-field-label">转移Gas</span>
+                  <input class="input" type="number" min="0" step="any" placeholder="0" data-recipient-id="${recipient.id}" data-recipient-field="transferGas" ${isCrossMode ? 'disabled' : ''}>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="recipient-actions">
+            <button type="button" class="recipient-action-btn recipient-action-btn--ghost" onclick="toggleRecipientAdvanced('${recipient.id}')" ${isCrossMode ? 'disabled' : ''}>
+              <span>高级选项</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="6 9 12 15 18 9"></polyline>
+              </svg>
+            </button>
+            <button type="button" class="recipient-action-btn recipient-action-btn--danger" onclick="${canRemove ? `removeRecipient('${recipient.id}')` : `clearRecipientFields('${recipient.id}')`}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 6h18"></path>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+              </svg>
+              <span>${canRemove ? '删除' : '清空'}</span>
+            </button>
+            ${isLast ? `
+            <button type="button" class="recipient-action-btn recipient-action-btn--primary" onclick="addRecipient()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+              <span>添加</span>
+            </button>
+            ` : ''}
+          </div>
+        </div>
+      </div>
+    `;
+}
+function bindRecipientInputHandlers(root: HTMLElement): void {
+    const fields = root.querySelectorAll<HTMLElement>('[data-recipient-field]');
+    fields.forEach((fieldEl) => {
+        const recipientId = fieldEl.dataset.recipientId || '';
+        const field = fieldEl.dataset.recipientField || '';
+        if (!recipientId || !field) return;
+
+        const handler = () => {
+            const recipient = recipients.find((item) => item.id === recipientId);
+            if (!recipient) return;
+
+            const value = (fieldEl as HTMLInputElement).value;
+            if (field === 'coinType') {
+                recipient.coinType = Number(value || 0);
+                return;
+            }
+
+            if (field === 'toAddress') {
+                const trimmed = value.trim();
+                if (trimmed !== recipient.toAddress) {
+                    recipient.toAddress = trimmed;
+                    recipient.resolvedAddress = undefined;
+                    recipient.capsuleOrgId = undefined;
+                    recipient.verifiedType = undefined;
+                }
+                return;
+            }
+
+            if (field === 'amount') {
+                recipient.amount = value;
+                return;
+            }
+
+            if (field === 'publicKey') {
+                recipient.publicKey = value.trim();
+                return;
+            }
+
+            if (field === 'orgId') {
+                recipient.orgId = value.trim();
+                return;
+            }
+
+            if (field === 'transferGas') {
+                recipient.transferGas = value;
+            }
+        };
+
+        const eventType = fieldEl.tagName === 'SELECT' ? 'change' : 'input';
+        fieldEl.addEventListener(eventType, handler);
+    });
+}
+
+function applyRecipientValues(root: HTMLElement): void {
+    recipients.forEach((recipient) => {
+        const card = root.querySelector<HTMLElement>(`[data-recipient-id="${recipient.id}"]`);
+        if (!card) return;
+
+        const toEl = card.querySelector<HTMLInputElement>('[data-recipient-field="toAddress"]');
+        if (toEl) {
+            toEl.value = recipient.toAddress || '';
+            if (recipient.resolvedAddress) {
+                toEl.dataset.resolved = recipient.resolvedAddress;
+            } else {
+                delete toEl.dataset.resolved;
+            }
+            if (recipient.verifiedType !== undefined) {
+                toEl.dataset.verifiedType = String(recipient.verifiedType);
+            } else {
+                delete toEl.dataset.verifiedType;
+            }
+        }
+
+        const amountEl = card.querySelector<HTMLInputElement>('[data-recipient-field="amount"]');
+        if (amountEl) amountEl.value = recipient.amount || '';
+
+        const coinEl = card.querySelector<HTMLSelectElement>('[data-recipient-field="coinType"]');
+        if (coinEl) coinEl.value = String(recipient.coinType ?? 0);
+
+        const pubEl = card.querySelector<HTMLInputElement>('[data-recipient-field="publicKey"]');
+        if (pubEl) pubEl.value = recipient.publicKey || '';
+
+        const orgEl = card.querySelector<HTMLInputElement>('[data-recipient-field="orgId"]');
+        if (orgEl) orgEl.value = recipient.orgId || '';
+
+        const gasEl = card.querySelector<HTMLInputElement>('[data-recipient-field="transferGas"]');
+        if (gasEl) gasEl.value = recipient.transferGas || '';
+    });
+}
+
+function setTransferMode(mode: TransferModeView): void {
     if (mode === 'pledge') {
         (window as any).showToast('质押交易功能暂未开放', 'info');
         return;
@@ -368,32 +506,254 @@ function setTransferMode(mode: 'quick' | 'cross' | 'pledge'): void {
     renderSend();
 }
 
-async function handleSend(e: Event): Promise<void> {
-    e.preventDefault();
+function syncSelection(addresses: AddressInfo[]): void {
+    const validSet = new Set(addresses.map((addr) => addr.address));
+    for (const addr of Array.from(selectedSourceAddresses)) {
+        if (!validSet.has(addr)) {
+            selectedSourceAddresses.delete(addr);
+        }
+    }
 
-    const amountEl = document.getElementById('amount') as HTMLInputElement | null;
-    const toEl = document.getElementById('toAddress') as HTMLInputElement | null;
-    const amountRaw = amountEl ? amountEl.value.trim() : '';
-    const toAddress = toEl ? toEl.value.trim() : '';
-    const extraGasEl = document.getElementById('extraGasPGC') as HTMLInputElement | null;
-    const txGasEl = document.getElementById('txGasInput') as HTMLInputElement | null;
-    const pubEl = document.getElementById('recipientPubKey') as HTMLInputElement | null;
-    const orgEl = document.getElementById('recipientOrgId') as HTMLInputElement | null;
-    const recipientGasEl = document.getElementById('recipientGas') as HTMLInputElement | null;
-    const changePGC = document.getElementById('chAddrPGC') as HTMLSelectElement | null;
-    const changeBTC = document.getElementById('chAddrBTC') as HTMLSelectElement | null;
-    const changeETH = document.getElementById('chAddrETH') as HTMLSelectElement | null;
+    if (!selectionTouched && selectedSourceAddresses.size === 0 && addresses.length > 0) {
+        const requiredTypes = new Set(recipients.map((recipient) => recipient.coinType));
+        let autoPick = addresses;
+        if (requiredTypes.size > 0) {
+            autoPick = addresses.filter((addr) => requiredTypes.has(addr.type));
+        }
+        if (selectedTransferMode === 'cross') {
+            autoPick = autoPick.filter((addr) => addr.type === 0);
+            if (autoPick.length > 1) {
+                autoPick = [autoPick[0]];
+            }
+        }
+        if (autoPick.length === 0) {
+            autoPick = addresses;
+        }
+        autoPick.forEach((addr) => selectedSourceAddresses.add(addr.address));
+    }
 
-    const selectedAddresses = getSelectedAddresses();
-    if (selectedAddresses.length === 0) {
-        (window as any).showToast('请选择来源地址', 'error');
+    if (selectedTransferMode === 'cross' && selectedSourceAddresses.size > 1) {
+        const first = Array.from(selectedSourceAddresses)[0];
+        selectedSourceAddresses = new Set([first]);
+    }
+}
+
+function toggleSourceAddress(address: string): void {
+    selectionTouched = true;
+    if (selectedTransferMode === 'cross') {
+        if (!selectedSourceAddresses.has(address)) {
+            selectedSourceAddresses = new Set([address]);
+        } else {
+            selectedSourceAddresses.delete(address);
+        }
+    } else if (selectedSourceAddresses.has(address)) {
+        selectedSourceAddresses.delete(address);
+    } else {
+        selectedSourceAddresses.add(address);
+    }
+    updateSourceListSelection();
+    updateSourceSummary();
+}
+
+function updateSourceListSelection(): void {
+    currentAddresses.forEach((addr) => {
+        const row = document.querySelector<HTMLElement>(`[data-source-address="${addr.address}"]`);
+        if (!row) return;
+        const selected = selectedSourceAddresses.has(addr.address);
+        row.classList.toggle('selected', selected);
+        row.setAttribute('aria-pressed', selected ? 'true' : 'false');
+        const check = row.querySelector('.tx-addr-check');
+        if (check) {
+            check.classList.toggle('checked', selected);
+        }
+    });
+}
+
+function getSelectedAddresses(): AddressInfo[] {
+    return currentAddresses.filter((addr) => selectedSourceAddresses.has(addr.address));
+}
+
+function getSelectionSummary(): { count: number; label: string } {
+    const selected = getSelectedAddresses();
+    if (!selected.length) {
+        return { count: 0, label: '--' };
+    }
+
+    const totals: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
+    selected.forEach((addr) => {
+        totals[addr.type] += getAvailableBalanceForAddress(addr);
+    });
+
+    const label = [0, 1, 2]
+        .filter((type) => totals[type] > 0)
+        .map((type) => `${totals[type].toFixed(getDisplayDecimals(type))} ${COIN_NAMES[type as keyof typeof COIN_NAMES]}`)
+        .join(' / ');
+
+    return { count: selected.length, label: label || '--' };
+}
+
+function updateSourceSummary(): void {
+    const summary = getSelectionSummary();
+    const selectedCountEl = document.getElementById('sourceSelectedCount');
+    const balanceValueEl = document.getElementById('sourceAvailableBalance');
+
+    if (selectedCountEl) {
+        selectedCountEl.textContent = String(summary.count);
+    }
+    if (balanceValueEl) {
+        balanceValueEl.textContent = summary.label;
+    }
+}
+
+function toggleRecipientAdvanced(recipientId: string): void {
+    if (!recipientId) return;
+    if (recipientAdvancedOpen.has(recipientId)) {
+        recipientAdvancedOpen.delete(recipientId);
+    } else {
+        recipientAdvancedOpen.add(recipientId);
+    }
+    const card = document.querySelector<HTMLElement>(`[data-recipient-id="${recipientId}"]`);
+    if (card) {
+        card.classList.toggle('expanded', recipientAdvancedOpen.has(recipientId));
+    }
+}
+
+function toggleAdvancedOptions(): void {
+    optionsOpen = !optionsOpen;
+    const toggle = document.getElementById('optionsToggle');
+    const content = document.getElementById('optionsContent');
+    if (toggle) {
+        toggle.classList.toggle('active', optionsOpen);
+    }
+    if (content) {
+        content.classList.toggle('open', optionsOpen);
+    }
+}
+
+function clearRecipientFields(recipientId: string): void {
+    const recipient = recipients.find((item) => item.id === recipientId);
+    if (!recipient) return;
+    recipient.toAddress = '';
+    recipient.amount = '';
+    recipient.publicKey = '';
+    recipient.orgId = '';
+    recipient.transferGas = '';
+    recipient.resolvedAddress = undefined;
+    recipient.capsuleOrgId = undefined;
+    recipient.verifiedType = undefined;
+    renderSend();
+    (window as any).showToast('已清空收款信息', 'info');
+}
+
+function addRecipient(): void {
+    const last = recipients[recipients.length - 1];
+    recipients.push(createRecipient(last ? last.coinType : 0));
+    renderSend();
+}
+
+function removeRecipient(recipientId: string): void {
+    if (recipients.length <= 1) {
+        clearRecipientFields(recipientId);
+        return;
+    }
+    const index = recipients.findIndex((item) => item.id === recipientId);
+    if (index >= 0) {
+        recipients.splice(index, 1);
+        recipientAdvancedOpen.delete(recipientId);
+        renderSend();
+    }
+}
+async function verifyRecipientAddress(recipientId: string): Promise<void> {
+    const recipient = recipients.find((item) => item.id === recipientId);
+    if (!recipient) return;
+
+    const raw = recipient.toAddress.trim();
+    if (!raw) {
+        (window as any).showToast('请输入收款地址', 'info');
         return;
     }
 
+    const isCross = selectedTransferMode === 'cross';
+    if (isCross) {
+        if (!/^0x[a-fA-F0-9]{40}$/.test(raw)) {
+            (window as any).showToast('跨链地址需为 0x 开头的 40 位地址', 'error');
+            return;
+        }
+        (window as any).showToast('跨链地址格式已验证', 'success');
+        return;
+    }
+
+    const isCapsule = isCapsuleAddress(raw);
+    if (isCapsule) {
+        try {
+            const verified = await verifyCapsuleAddress(raw);
+            const info = await fetchRecipientInfo(verified.address);
+            if (!info || !info.exists) {
+                (window as any).showToast('地址不存在', 'error');
+                return;
+            }
+
+            const isRetailCapsule = verified.orgId === '00000000';
+            const orgMatched = isRetailCapsule ? !info.isInGroup : info.groupId === verified.orgId;
+            if (!orgMatched) {
+                (window as any).showToast('胶囊地址校验失败', 'error');
+                return;
+            }
+
+            recipient.resolvedAddress = verified.address;
+            recipient.capsuleOrgId = verified.orgId;
+            recipient.orgId = info.isInGroup ? info.groupId : '';
+            recipient.verifiedType = info.type;
+            recipient.coinType = info.type;
+            if (info.publicKey) {
+                recipient.publicKey = info.publicKey;
+            }
+
+            renderSend();
+            (window as any).showToast('胶囊地址已验证', 'success');
+            return;
+        } catch (error) {
+            (window as any).showToast((error as Error).message || '胶囊地址校验失败', 'error');
+            return;
+        }
+    }
+
+    const normalized = normalizeAddressInput(raw);
+    if (!/^[0-9a-fA-F]{40}$/.test(normalized)) {
+        (window as any).showToast('地址格式不正确', 'error');
+        return;
+    }
+
+    const info = await fetchRecipientInfo(normalized);
+    if (!info || !info.exists) {
+        (window as any).showToast('地址不存在', 'error');
+        return;
+    }
+
+    recipient.orgId = info.isInGroup ? info.groupId : '';
+    recipient.verifiedType = info.type;
+    recipient.coinType = info.type;
+    if (info.publicKey) {
+        recipient.publicKey = info.publicKey;
+    }
+
+    renderSend();
+    (window as any).showToast('地址信息已更新', 'success');
+}
+
+async function handleSend(e: Event): Promise<void> {
+    e.preventDefault();
+
     try {
-        const amountCheck = validateAmountInput(amountRaw);
-        if (!amountCheck.ok) {
-            (window as any).showToast(amountCheck.error || '请输入有效金额', 'error');
+        const extraGasEl = document.getElementById('extraGasPGC') as HTMLInputElement | null;
+        const txGasEl = document.getElementById('txGasInput') as HTMLInputElement | null;
+        const changePGC = document.getElementById('chAddrPGC') as HTMLSelectElement | null;
+        const changeBTC = document.getElementById('chAddrBTC') as HTMLSelectElement | null;
+        const changeETH = document.getElementById('chAddrETH') as HTMLSelectElement | null;
+
+        const selectedAddresses = getSelectedAddresses();
+        if (selectedAddresses.length === 0) {
+            (window as any).showToast('请选择来源地址', 'error');
             return;
         }
 
@@ -417,13 +777,71 @@ async function handleSend(e: Event): Promise<void> {
         const transferMode: TransferMode = hasOrg && selectedTransferMode === 'cross' ? 'cross' : 'quick';
         const isCross = transferMode === 'cross';
 
-        const addressCheck = validateRecipientAddressFormat(toAddress, isCross);
-        if (!addressCheck.ok) {
-            (window as any).showToast(addressCheck.error || '请输入有效的收款地址', 'error');
+        const preparedRecipients: TransferRecipient[] = [];
+        const recipientIndexMap = new Map<string, number>();
+        const addressMetaMap = new Map<string, { coinType: number; publicKey: string; orgId: string }>();
+        const requiredByType: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
+        let totalTransferGas = 0;
+
+        for (const recipient of recipients) {
+            const rawAddress = recipient.toAddress.trim();
+            if (!rawAddress) {
+                (window as any).showToast('请输入收款地址', 'error');
+                return;
+            }
+
+        const capsule = isCapsuleAddress(rawAddress);
+        if (capsule && isCross) {
+            (window as any).showToast('跨链转账不支持胶囊地址', 'error');
             return;
         }
 
-        const recipientPubKey = pubEl?.value?.trim() || '';
+        const resolved = capsule ? recipient.resolvedAddress : rawAddress;
+        if (capsule && !resolved) {
+            (window as any).showToast('请先验证胶囊地址', 'error');
+            return;
+        }
+
+        const addressCheck = validateRecipientAddressFormat(resolved || '', isCross, rawAddress);
+        if (!addressCheck.ok) {
+            (window as any).showToast(addressCheck.error || '地址格式不正确', 'error');
+            return;
+        }
+
+        const coinType = Number(recipient.coinType ?? 0);
+        if (![0, 1, 2].includes(coinType)) {
+            (window as any).showToast('币种类型不正确', 'error');
+            return;
+        }
+
+        if (isCross && coinType !== 0) {
+            (window as any).showToast('跨链转账仅支持 PGC', 'error');
+            return;
+        }
+
+        if (!isCross) {
+            const typeOk = await ensureRecipientTypeMatches(addressCheck.normalized, coinType, recipient.verifiedType);
+            if (!typeOk) return;
+        }
+
+        const amountCheck = validateAmountInput(recipient.amount);
+        if (!amountCheck.ok) {
+            (window as any).showToast(amountCheck.error || '请输入有效金额', 'error');
+            return;
+        }
+
+        if (isCross && !Number.isInteger(amountCheck.value)) {
+            (window as any).showToast('跨链转账金额必须为整数', 'error');
+            return;
+        }
+
+        const recipientOrgId = recipient.orgId.trim();
+        if (recipientOrgId && !isValidOrgId(recipientOrgId)) {
+            (window as any).showToast('担保组织ID格式错误', 'error');
+            return;
+        }
+
+        const recipientPubKey = recipient.publicKey.trim();
         if (!isCross) {
             if (!recipientPubKey) {
                 (window as any).showToast('请输入收款方公钥', 'error');
@@ -436,97 +854,153 @@ async function handleSend(e: Event): Promise<void> {
             }
         }
 
-        const recipientOrgId = orgEl?.value?.trim() || '';
-        if (recipientOrgId && !isValidOrgId(recipientOrgId)) {
-            (window as any).showToast('担保组织ID格式错误', 'error');
-            return;
-        }
-
-        if (!isCross) {
-            const typeOk = await ensureRecipientTypeMatches(addressCheck.normalized, selectedCoinType);
-            if (!typeOk) {
-                return;
-            }
-        }
-
-        const recipientGas = Number(recipientGasEl?.value || 0);
+        const recipientGas = Number(recipient.transferGas || 0);
         if (!Number.isFinite(recipientGas) || recipientGas < 0) {
             (window as any).showToast('转移Gas必须为非负数', 'error');
             return;
         }
 
-        const txGas = Number(txGasEl?.value || 1);
-        if (!Number.isFinite(txGas) || txGas < 0) {
-            (window as any).showToast('交易Gas必须为非负数', 'error');
-            return;
+        const normalizedAddress = addressCheck.normalized;
+        const existingMeta = addressMetaMap.get(normalizedAddress);
+        if (existingMeta) {
+            if (
+                existingMeta.coinType !== coinType ||
+                existingMeta.publicKey !== recipientPubKey ||
+                existingMeta.orgId !== recipientOrgId
+            ) {
+                (window as any).showToast('收款地址重复且信息不一致', 'error');
+                return;
+            }
+        } else {
+            addressMetaMap.set(normalizedAddress, {
+                coinType,
+                publicKey: recipientPubKey,
+                orgId: recipientOrgId,
+            });
         }
 
-        const extraGas = Number(extraGasEl?.value || 0);
-        if (!Number.isFinite(extraGas) || extraGas < 0) {
-            (window as any).showToast('额外Gas必须为非负数', 'error');
-            return;
+        requiredByType[coinType] += amountCheck.value;
+        if (!isCross) {
+            totalTransferGas += Math.max(0, recipientGas);
         }
 
-        if (extraGas > 0 && selectedCoinType !== 0) {
-            (window as any).showToast('额外Gas仅支持 PGC 地址', 'error');
-            return;
+        const mergeKey = `${normalizedAddress}_${coinType}_${recipientPubKey}_${recipientOrgId}`;
+        const existingIndex = recipientIndexMap.get(mergeKey);
+        if (existingIndex !== undefined) {
+            const existing = preparedRecipients[existingIndex];
+            existing.amount += amountCheck.value;
+            existing.transferGas = (existing.transferGas || 0) + recipientGas;
+        } else {
+            preparedRecipients.push({
+                address: normalizedAddress,
+                amount: amountCheck.value,
+                coinType,
+                publicKey: recipientPubKey,
+                orgId: recipientOrgId,
+                transferGas: recipientGas,
+            });
+            recipientIndexMap.set(mergeKey, preparedRecipients.length - 1);
         }
+    }
 
-        const amount = amountCheck.value;
-        const balance = getSelectedBalance();
-        const requiredAmount = selectedCoinType === 0 ? amount + extraGas : amount;
-        if (requiredAmount > balance) {
-            (window as any).showToast('余额不足', 'error');
-            return;
-        }
+    if (isCross && preparedRecipients.length !== 1) {
+        (window as any).showToast('跨链转账仅支持单个收款地址', 'error');
+        return;
+    }
 
-        if (isCross && selectedCoinType !== 0) {
-            (window as any).showToast('跨链转账仅支持 PGC', 'error');
-            return;
-        }
+    const extraGas = Number(extraGasEl?.value || 0);
+    if (!Number.isFinite(extraGas) || extraGas < 0) {
+        (window as any).showToast('额外Gas必须为非负数', 'error');
+        return;
+    }
 
-        if (isCross && selectedAddresses.length !== 1) {
-            (window as any).showToast('跨链转账仅支持单一来源地址', 'error');
-            return;
-        }
+    requiredByType[0] += extraGas;
 
-        if (isCross && !Number.isInteger(amount)) {
-            (window as any).showToast('跨链转账金额必须为整数', 'error');
-            return;
-        }
+    const txGas = Number(txGasEl?.value || 1);
+    if (!Number.isFinite(txGas) || txGas < 0) {
+        (window as any).showToast('交易Gas必须为非负数', 'error');
+        return;
+    }
 
-        const availableGas = selectedAddresses.reduce((sum, addr) => {
-            const info = account.addresses?.[addr.address];
-            return sum + (info?.estInterest || 0);
-        }, 0);
-        const totalGasNeed = txGas + (isCross ? 0 : recipientGas);
-        const totalGasBudget = availableGas + extraGas;
-        if (totalGasNeed > totalGasBudget + 1e-8) {
-            (window as any).showToast('Gas 不足，请调整转移Gas或额外Gas', 'error');
-            return;
-        }
+    const changeAddresses: Record<number, string> = {
+        0: changePGC?.value || '',
+        1: changeBTC?.value || '',
+        2: changeETH?.value || '',
+    };
 
-        const changeAddresses: Record<number, string> = {
-            0: changePGC?.value || '',
-            1: changeBTC?.value || '',
-            2: changeETH?.value || '',
-        };
-
-        if (!changeAddresses[selectedCoinType]) {
+    const addressMap = new Map(currentAddresses.map((addr) => [addr.address, addr]));
+    for (const type of [0, 1, 2]) {
+        if (requiredByType[type] <= 0) continue;
+        const changeAddress = changeAddresses[type];
+        if (!changeAddress) {
             (window as any).showToast('请选择找零地址', 'error');
             return;
         }
+        const info = addressMap.get(changeAddress);
+        if (!info || info.type !== type) {
+            (window as any).showToast('找零地址类型不匹配', 'error');
+            return;
+        }
+    }
+
+    const typeBalances: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
+    let availableGas = 0;
+    for (const addr of selectedAddresses) {
+        typeBalances[addr.type] += getAvailableBalanceForAddress(addr);
+        availableGas += Number(addr.estInterest || 0);
+    }
+
+    for (const type of [0, 1, 2]) {
+        if (requiredByType[type] > (typeBalances[type] || 0) + 1e-8) {
+            const coinLabel = COIN_NAMES[type as keyof typeof COIN_NAMES];
+            (window as any).showToast(`${coinLabel} 余额不足`, 'error');
+            return;
+        }
+    }
+
+    if (isCross) {
+        if (selectedAddresses.length !== 1) {
+            (window as any).showToast('跨链转账仅支持单一来源地址', 'error');
+            return;
+        }
+        if (selectedAddresses[0].type !== 0) {
+            (window as any).showToast('跨链转账仅支持 PGC 地址', 'error');
+            return;
+        }
+        if (!changeAddresses[0]) {
+            (window as any).showToast('跨链转账需设置 PGC 找零地址', 'error');
+            return;
+        }
+    }
+
+    const totalGasNeed = txGas + (isCross ? 0 : totalTransferGas);
+    const totalGasBudget = availableGas + extraGas;
+    if (totalGasNeed > totalGasBudget + 1e-8) {
+        (window as any).showToast('Gas 不足，请调整转移Gas或额外Gas', 'error');
+        return;
+    }
+
+    if (extraGas > 0) {
+        const confirmed = await showConfirmModal(
+            '确认Gas兑换',
+            `将使用 ${extraGas} PGC 兑换本次交易 Gas，是否继续？`,
+            '确认',
+            '取消'
+        );
+        if (!confirmed) return;
+    }
 
         const result = await buildAndSubmitTransfer({
             account,
             fromAddresses: selectedAddresses.map((addr) => addr.address),
-            toAddress,
-            amount,
-            coinType: selectedCoinType,
+            toAddress: preparedRecipients[0]?.address || '',
+            amount: preparedRecipients[0]?.amount || 0,
+            coinType: preparedRecipients[0]?.coinType || 0,
             transferMode,
-            transferGas: isCross ? 0 : recipientGas,
-            recipientPublicKey,
-            recipientOrgId,
+            transferGas: preparedRecipients[0]?.transferGas || 0,
+            recipientPublicKey: preparedRecipients[0]?.publicKey || '',
+            recipientOrgId: preparedRecipients[0]?.orgId || '',
+            recipients: preparedRecipients,
             gas: txGas,
             extraGas,
             changeAddresses,
@@ -536,7 +1010,13 @@ async function handleSend(e: Event): Promise<void> {
             throw new Error(result.error || '交易发送失败');
         }
 
-        (window as any).showToast('交易已提交', 'success');
+        const successMsg = !hasOrg
+            ? '普通转账已提交'
+            : transferMode === 'cross'
+            ? '跨链转账已提交'
+            : '快速转账已提交';
+
+        (window as any).showToast(successMsg, 'success');
         if (result.txId) {
             void watchSubmittedTransaction(account.accountId, result.txId);
         }
@@ -548,147 +1028,6 @@ async function handleSend(e: Event): Promise<void> {
         (window as any).showToast('发送失败: ' + (error as Error).message, 'error');
     }
 }
-
-function syncSelectionForCoin(coinAddresses: Array<{ address: string; balance: number; type: number }>): void {
-    if (lastCoinType !== selectedCoinType) {
-        selectedSourceAddresses = new Set<string>();
-        selectionTouched = false;
-        lastCoinType = selectedCoinType;
-    }
-
-    const prefill = (window as any).__sendSourceAddresses as string[] | undefined;
-    if (prefill && prefill.length) {
-        selectedSourceAddresses = new Set(prefill);
-        selectionTouched = true;
-        (window as any).__sendSourceAddresses = null;
-    }
-
-    const validSet = new Set(coinAddresses.map((addr) => addr.address));
-    for (const addr of Array.from(selectedSourceAddresses)) {
-        if (!validSet.has(addr)) {
-            selectedSourceAddresses.delete(addr);
-        }
-    }
-
-    if (!selectionTouched && selectedSourceAddresses.size === 0 && coinAddresses.length > 0) {
-        coinAddresses.forEach((addr) => selectedSourceAddresses.add(addr.address));
-    }
-}
-
-function toggleSourceAddress(address: string): void {
-    selectionTouched = true;
-    if (selectedSourceAddresses.has(address)) {
-        selectedSourceAddresses.delete(address);
-    } else {
-        selectedSourceAddresses.add(address);
-    }
-    updateSourceListSelection();
-    updateSourceSummary();
-}
-
-function updateSourceListSelection(): void {
-    currentCoinAddresses.forEach((addr) => {
-        const row = document.querySelector<HTMLElement>(`[data-source-address="${addr.address}"]`);
-        if (!row) return;
-        const selected = selectedSourceAddresses.has(addr.address);
-        row.classList.toggle('selected', selected);
-        row.setAttribute('aria-pressed', selected ? 'true' : 'false');
-        const check = row.querySelector('.tx-addr-check');
-        if (check) {
-            check.classList.toggle('checked', selected);
-        }
-    });
-}
-
-function getSelectedAddresses(): Array<{ address: string; balance: number; type: number }> {
-    return currentCoinAddresses.filter((addr) => selectedSourceAddresses.has(addr.address));
-}
-
-function getSelectedBalance(): number {
-    return getSelectedAddresses().reduce((sum, addr) => sum + (addr.balance || 0), 0);
-}
-
-function updateSourceSummary(): void {
-    const selectedCountEl = document.getElementById('sourceSelectedCount');
-    const balanceValueEl = document.getElementById('sourceAvailableBalance');
-
-    const selectedAddresses = getSelectedAddresses();
-    const displayDecimals = selectedCoinType === 0 ? 2 : selectedCoinType === 1 ? 8 : 6;
-    const balance = selectedAddresses.reduce((sum, addr) => sum + (addr.balance || 0), 0);
-
-    if (selectedCountEl) {
-        selectedCountEl.textContent = String(selectedAddresses.length);
-    }
-    if (balanceValueEl) {
-        balanceValueEl.textContent = selectedAddresses.length
-            ? `${balance.toFixed(displayDecimals)} ${COIN_NAMES[selectedCoinType as keyof typeof COIN_NAMES]}`
-            : '--';
-    }
-}
-
-function toggleRecipientAdvanced(): void {
-    recipientAdvancedOpen = !recipientAdvancedOpen;
-    const card = document.querySelector('.recipient-card');
-    if (card) {
-        card.classList.toggle('expanded', recipientAdvancedOpen);
-    }
-}
-
-function toggleAdvancedOptions(): void {
-    optionsOpen = !optionsOpen;
-    const toggle = document.getElementById('optionsToggle');
-    const content = document.getElementById('optionsContent');
-    if (toggle) {
-        toggle.classList.toggle('active', optionsOpen);
-    }
-    if (content) {
-        content.classList.toggle('open', optionsOpen);
-    }
-}
-
-function clearRecipientFields(): void {
-    const toEl = document.getElementById('toAddress') as HTMLInputElement | null;
-    const amountEl = document.getElementById('amount') as HTMLInputElement | null;
-    const pubEl = document.getElementById('recipientPubKey') as HTMLInputElement | null;
-    const orgEl = document.getElementById('recipientOrgId') as HTMLInputElement | null;
-    const gasEl = document.getElementById('recipientGas') as HTMLInputElement | null;
-
-    if (toEl) toEl.value = '';
-    if (amountEl) amountEl.value = '';
-    if (pubEl) pubEl.value = '';
-    if (orgEl) orgEl.value = '';
-    if (gasEl) gasEl.value = '';
-
-    (window as any).showToast('已清空收款信息', 'info');
-}
-
-function addRecipient(): void {
-    (window as any).showToast('当前仅支持单个收款人', 'info');
-}
-
-async function verifyRecipientAddress(): Promise<void> {
-    const input = document.getElementById('toAddress') as HTMLInputElement | null;
-    if (!input) return;
-    const raw = input.value.trim();
-    if (!raw) {
-        (window as any).showToast('请输入收款地址', 'info');
-        return;
-    }
-
-    const addressCheck = validateRecipientAddressFormat(raw, selectedTransferMode === 'cross');
-    if (!addressCheck.ok) {
-        (window as any).showToast(addressCheck.error || '地址格式不正确', 'error');
-        return;
-    }
-
-    if (selectedTransferMode !== 'cross') {
-        const typeOk = await ensureRecipientTypeMatches(addressCheck.normalized, selectedCoinType);
-        if (!typeOk) return;
-    }
-
-    (window as any).showToast('地址格式已验证', 'success');
-}
-
 function hasChangeAddress(addresses: AddressInfo[], coinType: number): boolean {
     return addresses.some((item) => item.type === coinType);
 }
@@ -709,14 +1048,16 @@ function normalizeAddressInput(address: string): string {
 
 function validateRecipientAddressFormat(
     raw: string,
-    isCross: boolean
+    isCross: boolean,
+    original?: string
 ): { ok: boolean; normalized: string; error?: string } {
     if (!raw) {
         return { ok: false, normalized: '', error: '请输入收款地址' };
     }
 
     if (isCross) {
-        if (!/^0x[a-fA-F0-9]{40}$/.test(raw)) {
+        const input = original || raw;
+        if (!/^0x[a-fA-F0-9]{40}$/.test(input)) {
             return { ok: false, normalized: '', error: '跨链地址需为 0x 开头的 40 位地址' };
         }
         return { ok: true, normalized: normalizeAddressInput(raw) };
@@ -778,17 +1119,44 @@ function isValidOrgId(orgId: string): boolean {
     return /^\d{8}$/.test(orgId.trim());
 }
 
-function getCoinLabel(type: number): string {
-    return COIN_NAMES[type as keyof typeof COIN_NAMES] || 'PGC';
+function getDisplayDecimals(type: number): number {
+    if (type === 0) return 2;
+    if (type === 1) return 8;
+    return 6;
 }
 
-async function ensureRecipientTypeMatches(address: string, coinType: number): Promise<boolean> {
+function getAvailableBalanceForAddress(addr: AddressInfo): number {
+    const utxoValue = Number(addr.value?.utxoValue ?? addr.balance ?? 0) || 0;
+    const lockedUtxoBalance = getLockedUTXOs()
+        .filter((lock) => lock.address === addr.address)
+        .reduce((sum, lock) => sum + (lock.value || 0), 0);
+    const availableUtxo = Math.max(0, utxoValue - lockedUtxoBalance);
+
+    const txCers = addr.txCers || {};
+    const txCerBalance = Object.values(txCers).reduce((sum, val) => sum + Number(val || 0), 0);
+    const lockedTxCerBalance = Object.keys(txCers).reduce((sum, id) => {
+        if (!isTXCerLocked(id)) return sum;
+        return sum + (Number((txCers as Record<string, number>)[id]) || 0);
+    }, 0);
+    const availableTxCer = Math.max(0, txCerBalance - lockedTxCerBalance);
+
+    return availableUtxo + availableTxCer;
+}
+async function ensureRecipientTypeMatches(address: string, coinType: number, verifiedType?: number): Promise<boolean> {
     const normalized = normalizeAddressInput(address);
+
+    if (verifiedType !== undefined && verifiedType !== coinType) {
+        const expected = COIN_NAMES[verifiedType as keyof typeof COIN_NAMES];
+        const selected = COIN_NAMES[coinType as keyof typeof COIN_NAMES];
+        (window as any).showToast(`收款地址币种为 ${expected}，当前选择 ${selected}`, 'error');
+        return false;
+    }
+
     const cached = recipientTypeCache.get(normalized);
     if (cached) {
         if (cached.exists && cached.type !== coinType) {
-            const expected = getCoinLabel(cached.type);
-            const selected = getCoinLabel(coinType);
+            const expected = COIN_NAMES[cached.type as keyof typeof COIN_NAMES];
+            const selected = COIN_NAMES[coinType as keyof typeof COIN_NAMES];
             (window as any).showToast(`收款地址币种为 ${expected}，当前选择 ${selected}`, 'error');
             return false;
         }
@@ -807,11 +1175,121 @@ async function ensureRecipientTypeMatches(address: string, coinType: number): Pr
     recipientTypeCache.set(normalized, { exists, type });
 
     if (exists && type !== coinType) {
-        const expected = getCoinLabel(type);
-        const selected = getCoinLabel(coinType);
+        const expected = COIN_NAMES[type as keyof typeof COIN_NAMES];
+        const selected = COIN_NAMES[coinType as keyof typeof COIN_NAMES];
         (window as any).showToast(`收款地址币种为 ${expected}，当前选择 ${selected}`, 'error');
         return false;
     }
 
     return true;
+}
+
+async function fetchRecipientInfo(address: string): Promise<{
+    exists: boolean;
+    type: number;
+    groupId: string;
+    isInGroup: boolean;
+    publicKey?: string;
+} | null> {
+    const normalized = normalizeAddressInput(address);
+    const result = await queryAddressBalances([normalized]);
+    if (!result.success || !result.data || !result.data.length) {
+        return null;
+    }
+
+    const info = result.data.find((item) => item.address === normalized) || result.data[0];
+    if (!info) return null;
+
+    const exists = !!info.exists;
+    const groupId = String(info.groupID || '');
+    const isInGroup = !!info.isInGroup && groupId !== GROUP_ID_RETAIL && groupId !== GROUP_ID_NOT_EXIST;
+
+    let publicKey = '';
+    if (info.publicKey?.x && info.publicKey?.y) {
+        try {
+            const xHex = bigIntToHex(info.publicKey.x);
+            const yHex = bigIntToHex(info.publicKey.y);
+            if (xHex && yHex && !/^0+$/.test(xHex) && !/^0+$/.test(yHex)) {
+                publicKey = `${xHex},${yHex}`;
+            }
+        } catch {
+            publicKey = '';
+        }
+    }
+
+    return {
+        exists,
+        type: Number(info.type ?? 0),
+        groupId,
+        isInGroup,
+        publicKey: publicKey || undefined,
+    };
+}
+
+function openModal(title: string): { overlay: HTMLDivElement; body: HTMLElement; footer: HTMLElement; close: () => void } {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal">
+        <div class="modal-header">
+          <div class="modal-title">${title}</div>
+          <button class="modal-close" type="button" aria-label="关闭">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body"></div>
+        <div class="modal-footer"></div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    const close = () => overlay.remove();
+    const closeBtn = overlay.querySelector('.modal-close') as HTMLButtonElement | null;
+    if (closeBtn) {
+        closeBtn.addEventListener('click', close);
+    }
+
+    return {
+        overlay,
+        body: overlay.querySelector('.modal-body') as HTMLElement,
+        footer: overlay.querySelector('.modal-footer') as HTMLElement,
+        close,
+    };
+}
+
+function showConfirmModal(
+    title: string,
+    message: string,
+    confirmLabel: string,
+    cancelLabel: string
+): Promise<boolean> {
+    return new Promise((resolve) => {
+        const modal = openModal(title);
+        modal.body.innerHTML = `
+          <div class="delete-confirm" style="background: var(--bg-secondary);">
+            <div class="delete-confirm-icon">!</div>
+            <div class="delete-confirm-title">${message}</div>
+          </div>
+        `;
+        modal.footer.innerHTML = `
+          <button class="btn btn-secondary" id="confirmCancelBtn" type="button" style="flex: 1;">${cancelLabel}</button>
+          <button class="btn btn-primary" id="confirmOkBtn" type="button" style="flex: 1;">${confirmLabel}</button>
+        `;
+        modal.footer.style.display = 'flex';
+
+        const cancelBtn = modal.overlay.querySelector('#confirmCancelBtn') as HTMLButtonElement | null;
+        const confirmBtn = modal.overlay.querySelector('#confirmOkBtn') as HTMLButtonElement | null;
+
+        const handleClose = (confirmed: boolean) => {
+            modal.close();
+            resolve(confirmed);
+        };
+
+        if (cancelBtn) cancelBtn.addEventListener('click', () => handleClose(false));
+        if (confirmBtn) confirmBtn.addEventListener('click', () => handleClose(true));
+    });
 }

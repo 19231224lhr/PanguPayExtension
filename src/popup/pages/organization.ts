@@ -11,7 +11,7 @@ import {
     setOnboardingStep,
     type OrganizationChoice,
 } from '../../core/storage';
-import { buildNodeUrl, getGroupList, type GroupListItem, type GroupListResponse } from '../../core/api';
+import { buildNodeUrl, getGroupInfo, getGroupList, type GroupListItem, type GroupListResponse } from '../../core/api';
 import { joinGuarantorGroup, leaveGuarantorGroup } from '../../core/group';
 import { startTxStatusSync, stopTxStatusSync } from '../../core/txStatus';
 import { getActiveLanguage } from '../utils/appSettings';
@@ -26,9 +26,29 @@ interface UiGroup {
     memberCount: number;
 }
 
+interface GroupDetailInfo {
+    groupId: string;
+    groupName: string;
+    assignNode: string;
+    aggrNode: string;
+    assignAPIEndpoint: string;
+    aggrAPIEndpoint: string;
+    pledgeAddress: string;
+}
+
+type OrgViewMode = 'list' | 'detail';
+type OrgSearchState = 'empty' | 'loading' | 'result' | 'notfound';
+
+let orgViewMode: OrgViewMode = 'list';
+let orgSearchState: OrgSearchState = 'empty';
+let orgSearchInput = '';
+let orgSearchResult: GroupDetailInfo | null = null;
+
 const TEXT = {
     'zh-CN': {
         header: '担保组织',
+        tabList: '组织列表',
+        tabDetail: '详情/搜索',
         stepTitle: '步骤 4 / 4 · 选择担保组织',
         stepDesc: '加入组织可使用快速转账；也可暂不加入，稍后在设置中修改',
         skip: '暂不加入',
@@ -59,9 +79,29 @@ const TEXT = {
         toastLeave: '正在退出担保组织...',
         toastLeaveFail: '退出担保组织失败',
         toastLeft: '已退出组织',
+        myOrgTitle: '我的担保组织',
+        myOrgEmptyTitle: '未加入担保组织',
+        myOrgEmptyDesc: '加入担保组织可享受更安全的交易保障与更快确认',
+        searchTitle: '查询担保组织',
+        searchDesc: '输入 8 位组织编号查询详细信息',
+        searchPlaceholder: '输入担保组织编号...',
+        searchButton: '查询',
+        searchEmptyTitle: '请输入组织编号',
+        searchEmptyDesc: '查询结果将在这里展示',
+        searchLoading: '正在查询组织信息...',
+        searchNotFound: '未找到该担保组织',
+        invalidOrgId: '请输入8位数字组织编号',
+        detailGroupId: '组织 ID',
+        detailAssignNode: 'Assign 节点',
+        detailAggrNode: 'Aggre 节点',
+        detailAssignApi: 'Assign API',
+        detailAggrApi: 'Aggre API',
+        detailPledge: '质押地址',
     },
     en: {
         header: 'Guarantor Organization',
+        tabList: 'Organization List',
+        tabDetail: 'Details/Search',
         stepTitle: 'Step 4 / 4 · Choose Organization',
         stepDesc: 'Join to enable fast transfers; you can skip and change later in settings',
         skip: 'Skip for now',
@@ -92,6 +132,24 @@ const TEXT = {
         toastLeave: 'Leaving organization...',
         toastLeaveFail: 'Failed to leave organization',
         toastLeft: 'Left organization',
+        myOrgTitle: 'My Organization',
+        myOrgEmptyTitle: 'Not in organization',
+        myOrgEmptyDesc: 'Join an organization to enjoy safer and faster transfers',
+        searchTitle: 'Search Organization',
+        searchDesc: 'Enter an 8-digit organization ID to search',
+        searchPlaceholder: 'Enter organization ID...',
+        searchButton: 'Search',
+        searchEmptyTitle: 'Enter organization ID',
+        searchEmptyDesc: 'Search results will appear here',
+        searchLoading: 'Searching organization...',
+        searchNotFound: 'Organization not found',
+        invalidOrgId: 'Please enter an 8-digit organization ID',
+        detailGroupId: 'Organization ID',
+        detailAssignNode: 'Assign Node',
+        detailAggrNode: 'Aggre Node',
+        detailAssignApi: 'Assign API',
+        detailAggrApi: 'Aggre API',
+        detailPledge: 'Pledge Address',
     },
 };
 
@@ -111,6 +169,58 @@ function formatNodeAddress(url: string): string {
     } catch {
         return raw.replace(/^https?:\/\//, '').replace(/\/$/, '');
     }
+}
+
+function normalizeGroupDetail(groupId: string, raw: Record<string, any>): GroupDetailInfo {
+    return {
+        groupId: raw.GroupID || raw.group_id || raw.groupID || groupId,
+        groupName: raw.GroupName || raw.group_name || raw.groupName || groupId,
+        assignNode: raw.AssiID || raw.assignNode || raw.assign_node || '',
+        aggrNode: raw.AggrID || raw.aggrNode || raw.aggr_node || '',
+        assignAPIEndpoint: raw.AssignAPIEndpoint || raw.assign_api_endpoint || raw.assignAPIEndpoint || '',
+        aggrAPIEndpoint: raw.AggrAPIEndpoint || raw.aggr_api_endpoint || raw.aggrAPIEndpoint || '',
+        pledgeAddress: raw.PledgeAddress || raw.pledge_address || raw.pledgeAddress || '',
+    };
+}
+
+function buildDetailFromOrg(org: OrganizationChoice): GroupDetailInfo {
+    return {
+        groupId: org.groupId,
+        groupName: org.groupName || org.groupId,
+        assignNode: formatNodeAddress(org.assignNodeUrl),
+        aggrNode: formatNodeAddress(org.aggrNodeUrl),
+        assignAPIEndpoint: org.assignNodeUrl || '',
+        aggrAPIEndpoint: org.aggrNodeUrl || '',
+        pledgeAddress: org.pledgeAddress || '',
+    };
+}
+
+function renderDetailList(info: GroupDetailInfo, t: OrgText): string {
+    const assignNode = info.assignNode || formatNodeAddress(info.assignAPIEndpoint);
+    const aggrNode = info.aggrNode || formatNodeAddress(info.aggrAPIEndpoint);
+    const items = [
+        { label: t.detailGroupId, value: info.groupId || '--' },
+        { label: t.detailAssignNode, value: assignNode || '--' },
+        { label: t.detailAggrNode, value: aggrNode || '--' },
+        { label: t.detailAssignApi, value: info.assignAPIEndpoint || '--' },
+        { label: t.detailAggrApi, value: info.aggrAPIEndpoint || '--' },
+        { label: t.detailPledge, value: info.pledgeAddress || '--' },
+    ];
+
+    return `
+      <div class="org-node-list">
+        ${items
+            .map(
+                (item) => `
+          <div class="org-node-item">
+            <span class="org-node-label">${item.label}</span>
+            <span class="org-node-value">${item.value}</span>
+          </div>
+        `
+            )
+            .join('')}
+      </div>
+    `;
 }
 
 export async function renderOrganization(): Promise<void> {
@@ -214,6 +324,45 @@ export async function renderOrganization(): Promise<void> {
         groupLoadError = t.groupLoadError;
     }
 
+    const myOrgDetail = currentOrg ? buildDetailFromOrg(currentOrg) : null;
+    const searchDisabled = !/^\d{8}$/.test(orgSearchInput);
+    let searchStateBlock = '';
+
+    if (orgSearchState === 'loading') {
+        searchStateBlock = `
+          <div class="loading-container" style="padding: 16px 0;">
+            <div class="loading-spinner"></div>
+            <div>${t.searchLoading}</div>
+          </div>
+        `;
+    } else if (orgSearchState === 'result' && orgSearchResult) {
+        searchStateBlock = `
+          <div class="org-card">
+            <div class="org-card-top">
+              <div class="org-card-info">
+                <div class="org-name">${orgSearchResult.groupName}</div>
+                <div class="org-id">ID ${orgSearchResult.groupId}</div>
+              </div>
+            </div>
+            ${renderDetailList(orgSearchResult, t)}
+          </div>
+        `;
+    } else if (orgSearchState === 'notfound') {
+        searchStateBlock = `
+          <div class="empty-state" style="padding: 24px 12px;">
+            <div class="empty-title">${t.searchNotFound}</div>
+            <div class="empty-desc">${t.searchDesc}</div>
+          </div>
+        `;
+    } else {
+        searchStateBlock = `
+          <div class="empty-state" style="padding: 24px 12px;">
+            <div class="empty-title">${t.searchEmptyTitle}</div>
+            <div class="empty-desc">${t.searchEmptyDesc}</div>
+          </div>
+        `;
+    }
+
     app.innerHTML = `
     <div class="page">
       <header class="header">
@@ -228,70 +377,120 @@ export async function renderOrganization(): Promise<void> {
       
       <div class="page-content">
         ${onboardingBanner}
-        <div class="org-status-card">
-          <div class="org-status-main">
-            <div class="org-status-icon ${currentOrg ? 'org-status-icon--joined' : 'org-status-icon--empty'}">
-              ${currentOrg ? '✓' : 'ORG'}
-            </div>
-            <div class="org-status-text">
-              <div class="org-status-title">${currentOrg ? currentOrg.groupName : t.notJoined}</div>
-              <div class="org-status-desc">${currentOrg ? t.joinedDesc : t.notJoinedDesc}</div>
-            </div>
-          </div>
-          ${currentOrg ? `
-          <button class="btn btn-ghost btn-sm org-status-action" onclick="leaveOrganization()">
-            ${t.leave}
+        <div class="org-tabs" data-active="${orgViewMode}">
+          <button class="org-tab ${orgViewMode === 'list' ? 'org-tab--active' : ''}" onclick="switchOrgView('list')">
+            ${t.tabList}
           </button>
-          ` : ''}
+          <button class="org-tab ${orgViewMode === 'detail' ? 'org-tab--active' : ''}" onclick="switchOrgView('detail')">
+            ${t.tabDetail}
+          </button>
         </div>
 
-        <div class="list-section org-list-section">
-          <div class="org-section-title">${t.available}</div>
-          
-          ${groups.length ? groups.map(group => `
-            <div class="org-card ${currentOrg?.groupId === group.groupId ? 'active' : ''}">
+        <div class="org-pane" style="display: ${orgViewMode === 'list' ? 'block' : 'none'};">
+          <div class="org-status-card">
+            <div class="org-status-main">
+              <div class="org-status-icon ${currentOrg ? 'org-status-icon--joined' : 'org-status-icon--empty'}">
+                ${currentOrg ? '✓' : 'ORG'}
+              </div>
+              <div class="org-status-text">
+                <div class="org-status-title">${currentOrg ? currentOrg.groupName : t.notJoined}</div>
+                <div class="org-status-desc">${currentOrg ? t.joinedDesc : t.notJoinedDesc}</div>
+              </div>
+            </div>
+            ${currentOrg ? `
+            <button class="btn btn-ghost btn-sm org-status-action" onclick="leaveOrganization()">
+              ${t.leave}
+            </button>
+            ` : ''}
+          </div>
+
+          <div class="list-section org-list-section">
+            <div class="org-section-title">${t.available}</div>
+            
+            ${groups.length ? groups.map(group => `
+              <div class="org-card ${currentOrg?.groupId === group.groupId ? 'active' : ''}">
+                <div class="org-card-top">
+                  <div class="org-card-info">
+                    <div class="org-name">
+                      ${group.groupName}
+                      ${currentOrg?.groupId === group.groupId ? `<span class="org-badge">${t.joined}</span>` : ''}
+                    </div>
+                    <div class="org-id">ID ${group.groupId}</div>
+                  </div>
+                  <div class="org-card-actions">
+                    ${currentOrg?.groupId !== group.groupId ? `
+                    <button class="btn btn-primary btn-sm" onclick="joinOrganization('${group.groupId}', '${group.groupName}', '${group.assignNodeUrl}', '${group.aggrNodeUrl}', '${group.pledgeAddress}')">
+                      ${t.join}
+                    </button>
+                    ` : ''}
+                  </div>
+                </div>
+                <div class="org-node-list">
+                  <div class="org-node-item">
+                    <span class="org-node-label">${t.assignIp}</span>
+                    <span class="org-node-value">${formatNodeAddress(group.assignNodeUrl)}</span>
+                  </div>
+                  <div class="org-node-item">
+                    <span class="org-node-label">${t.aggrIp}</span>
+                    <span class="org-node-value">${formatNodeAddress(group.aggrNodeUrl)}</span>
+                  </div>
+                </div>
+              </div>
+            `).join('') : `
+              <div class="empty-state" style="padding: 24px 12px;">
+                <div class="empty-title">${t.emptyTitle}</div>
+                <div class="empty-desc">${groupLoadError || t.emptyDesc}</div>
+              </div>
+            `}
+          </div>
+
+          <div class="org-info-card">
+            <div class="org-info-title">${t.infoTitle}</div>
+            <ul class="org-info-list">
+              <li>${t.info1}</li>
+              <li>${t.info2}</li>
+              <li>${t.info3}</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="org-pane" style="display: ${orgViewMode === 'detail' ? 'block' : 'none'};">
+          <div class="org-section-title">${t.myOrgTitle}</div>
+          ${myOrgDetail ? `
+            <div class="org-card">
               <div class="org-card-top">
                 <div class="org-card-info">
-                  <div class="org-name">
-                    ${group.groupName}
-                    ${currentOrg?.groupId === group.groupId ? `<span class="org-badge">${t.joined}</span>` : ''}
-                  </div>
-                  <div class="org-id">ID ${group.groupId}</div>
+                  <div class="org-name">${myOrgDetail.groupName}</div>
+                  <div class="org-id">ID ${myOrgDetail.groupId}</div>
                 </div>
                 <div class="org-card-actions">
-                  ${currentOrg?.groupId !== group.groupId ? `
-                  <button class="btn btn-primary btn-sm" onclick="joinOrganization('${group.groupId}', '${group.groupName}', '${group.assignNodeUrl}', '${group.aggrNodeUrl}', '${group.pledgeAddress}')">
-                    ${t.join}
+                  <button class="btn btn-ghost btn-sm org-status-action" onclick="leaveOrganization()">
+                    ${t.leave}
                   </button>
-                  ` : ''}
                 </div>
               </div>
-              <div class="org-node-list">
-                <div class="org-node-item">
-                  <span class="org-node-label">${t.assignIp}</span>
-                  <span class="org-node-value">${formatNodeAddress(group.assignNodeUrl)}</span>
-                </div>
-                <div class="org-node-item">
-                  <span class="org-node-label">${t.aggrIp}</span>
-                  <span class="org-node-value">${formatNodeAddress(group.aggrNodeUrl)}</span>
-                </div>
-              </div>
+              ${renderDetailList(myOrgDetail, t)}
             </div>
-          `).join('') : `
+          ` : `
             <div class="empty-state" style="padding: 24px 12px;">
-              <div class="empty-title">${t.emptyTitle}</div>
-              <div class="empty-desc">${groupLoadError || t.emptyDesc}</div>
+              <div class="empty-title">${t.myOrgEmptyTitle}</div>
+              <div class="empty-desc">${t.myOrgEmptyDesc}</div>
             </div>
           `}
-        </div>
 
-        <div class="org-info-card">
-          <div class="org-info-title">${t.infoTitle}</div>
-          <ul class="org-info-list">
-            <li>${t.info1}</li>
-            <li>${t.info2}</li>
-            <li>${t.info3}</li>
-          </ul>
+          <div class="org-section-title" style="margin-top: 16px;">${t.searchTitle}</div>
+          <div class="org-search-card">
+            <div class="org-search-desc">${t.searchDesc}</div>
+            <div class="org-search-row">
+              <input class="input org-search-input" id="orgSearchInput" value="${orgSearchInput}" placeholder="${t.searchPlaceholder}">
+              <button class="btn btn-primary btn-sm" id="orgSearchBtn" onclick="handleOrgSearch()" ${searchDisabled ? 'disabled' : ''}>
+                ${t.searchButton}
+              </button>
+            </div>
+          </div>
+          <div class="org-search-result">
+            ${searchStateBlock}
+          </div>
         </div>
       </div>
 
@@ -303,9 +502,82 @@ export async function renderOrganization(): Promise<void> {
         navigateTo: (page: string) => (window as any).navigateTo(page),
         joinOrganization,
         leaveOrganization,
+        switchOrgView,
+        handleOrgSearchInput,
+        handleOrgSearch,
         skipOnboarding,
         completeOnboarding,
     });
+
+    const searchInputEl = document.getElementById('orgSearchInput') as HTMLInputElement | null;
+    if (searchInputEl) {
+        searchInputEl.addEventListener('input', handleOrgSearchInput);
+        searchInputEl.addEventListener('change', handleOrgSearchInput);
+    }
+}
+
+function switchOrgView(mode: OrgViewMode): void {
+    if (orgViewMode === mode) return;
+    orgViewMode = mode;
+    renderOrganization();
+}
+
+function handleOrgSearchInput(): void {
+    const input = document.getElementById('orgSearchInput') as HTMLInputElement | null;
+    if (!input) return;
+    let value = input.value || '';
+    const digitsOnly = value.replace(/\D/g, '').slice(0, 8);
+    if (digitsOnly !== value) {
+        input.value = digitsOnly;
+        value = digitsOnly;
+    }
+    orgSearchInput = value;
+    const button = document.getElementById('orgSearchBtn') as HTMLButtonElement | null;
+    if (button) {
+        button.disabled = !/^\d{8}$/.test(value);
+    }
+    if (!value) {
+        orgSearchState = 'empty';
+        orgSearchResult = null;
+        renderOrganization();
+    }
+}
+
+async function handleOrgSearch(): Promise<void> {
+    const t = getText();
+    const groupId = orgSearchInput.trim();
+    if (!/^\d{8}$/.test(groupId)) {
+        (window as any).showToast(t.invalidOrgId, 'info');
+        return;
+    }
+
+    orgSearchState = 'loading';
+    orgSearchResult = null;
+    renderOrganization();
+
+    try {
+        const result = await getGroupInfo(groupId);
+        if (!result.success || !result.data) {
+            orgSearchState = 'notfound';
+            renderOrganization();
+            return;
+        }
+
+        const payload = (result.data as any)?.group_msg || (result.data as any)?.data || result.data;
+        if (!payload) {
+            orgSearchState = 'notfound';
+            renderOrganization();
+            return;
+        }
+
+        orgSearchResult = normalizeGroupDetail(groupId, payload as Record<string, any>);
+        orgSearchState = 'result';
+        renderOrganization();
+    } catch (error) {
+        console.error('[组织查询] 失败:', error);
+        orgSearchState = 'notfound';
+        renderOrganization();
+    }
 }
 
 async function joinOrganization(

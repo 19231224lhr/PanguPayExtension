@@ -1872,6 +1872,64 @@ select.custom-select-native {
     gap: 6px;
 }
 
+.org-tabs {
+    display: flex;
+    gap: 6px;
+    padding: 4px;
+    border-radius: 999px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    margin-bottom: 16px;
+}
+
+.org-tab {
+    flex: 1;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 8px 10px;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.org-tab--active {
+    background: var(--primary-color);
+    color: #fff;
+    box-shadow: 0 6px 14px rgba(37, 99, 235, 0.2);
+}
+
+.org-search-card {
+    background: var(--bg-card);
+    border-radius: var(--border-radius-lg);
+    border: 1px solid var(--border-color);
+    padding: 14px 16px;
+    display: grid;
+    gap: 10px;
+    box-shadow: var(--shadow-sm);
+}
+
+.org-search-desc {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.org-search-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.org-search-input {
+    flex: 1;
+}
+
+.org-search-result {
+    margin-top: 12px;
+}
+
 /* ========================================
    设置页面
    ======================================== */
