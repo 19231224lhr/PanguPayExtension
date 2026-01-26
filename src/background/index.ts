@@ -75,21 +75,10 @@ async function openPopupWindow(): Promise<void> {
     } catch {
         // ignore
     }
-
-    const url = chrome.runtime.getURL('src/popup/index.html');
-    try {
-        await chrome.windows.create({
-            url,
-            type: 'popup',
-            width: 380,
-            height: 640,
-        });
-    } catch (error) {
-        console.warn('[PanguPay] 无法打开弹窗:', error);
-    }
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.__pangu_ui) return false;
     handleMessage(message, sender)
         .then(sendResponse)
         .catch((error) => {
@@ -196,6 +185,16 @@ async function handleConnect(
         title: site.title,
         icon: site.icon,
     });
+
+    try {
+        void chrome.runtime.sendMessage({
+            __pangu_ui: true,
+            type: 'PANGU_UI_PENDING',
+            accountId: account.accountId,
+        });
+    } catch {
+        // ignore
+    }
 
     void openPopupWindow();
 

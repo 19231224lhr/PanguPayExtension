@@ -13,6 +13,8 @@ import {
     getSettings,
     saveSettings,
     type ExtensionSettings,
+    getDappConnections,
+    removeDappConnection,
 } from '../../core/storage';
 import { stopTxStatusSync } from '../../core/txStatus';
 import { applyLanguage, applyTheme } from '../utils/appSettings';
@@ -43,6 +45,10 @@ const TEXT = {
         developer: '开发者',
         logout: '退出登录',
         logoutDesc: '返回首页',
+        connectedSites: '已连接网站',
+        connectedSitesDesc: '管理当前站点授权',
+        disconnectSite: '断开',
+        noConnectedSites: '暂无已连接网站',
         navHome: '首页',
         navHistory: '历史',
         navOrg: '组织',
@@ -88,6 +94,10 @@ const TEXT = {
         developer: 'Developer',
         logout: 'Log Out',
         logoutDesc: 'Back to home',
+        connectedSites: 'Connected Sites',
+        connectedSitesDesc: 'Manage site access',
+        disconnectSite: 'Disconnect',
+        noConnectedSites: 'No connected sites',
         navHome: 'Home',
         navHistory: 'History',
         navOrg: 'Org',
@@ -123,6 +133,10 @@ export async function renderSettings(): Promise<void> {
     const account = await getActiveAccount();
     const settings = await getSettings();
     const t = getText(settings.language);
+    const connections = account ? await getDappConnections(account.accountId) : {};
+    const connectionList = Object.values(connections || {}).sort(
+        (a, b) => (b.connectedAt || 0) - (a.connectedAt || 0)
+    );
 
     const languageLabel =
         settings.language === 'zh-CN' ? t.langLabels.zh : t.langLabels.en;
@@ -297,6 +311,48 @@ export async function renderSettings(): Promise<void> {
           </div>
         </div>
 
+        <div class="settings-section">
+          <div class="settings-section-title">${t.connectedSites}</div>
+          <div class="settings-card">
+            ${
+                connectionList.length === 0
+                    ? `<div class="settings-empty">${t.noConnectedSites}</div>`
+                    : connectionList
+                          .map((conn) => {
+                              const origin = conn.origin || '';
+                              const title = conn.title || origin.replace(/^https?:\/\//, '');
+                              const address = conn.address
+                                  ? `${conn.address.slice(0, 8)}...${conn.address.slice(-6)}`
+                                  : '--';
+                              return `
+                <div class="settings-row settings-row--static settings-row--site">
+                  <span class="settings-row-icon settings-row-icon--green">
+                    ${
+                        conn.icon
+                            ? `<img src="${conn.icon}" alt="${title}" />`
+                            : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="9"></circle>
+                                <path d="M3 12h18"></path>
+                                <path d="M12 3a15 15 0 0 1 0 18"></path>
+                              </svg>`
+                    }
+                  </span>
+                  <span class="settings-row-content">
+                    <span class="settings-row-title">${title}</span>
+                    <span class="settings-row-desc">${origin}</span>
+                    <span class="settings-row-desc">${address}</span>
+                  </span>
+                  <button class="btn btn-ghost btn-sm settings-row-action" onclick="disconnectSite('${origin}')">
+                    ${t.disconnectSite}
+                  </button>
+                </div>
+              `;
+                          })
+                          .join('')
+            }
+          </div>
+        </div>
+
         <div class="settings-footer">
           <button class="btn btn-danger btn-block" onclick="handleLogout()">
             ${t.logout}
@@ -346,6 +402,7 @@ export async function renderSettings(): Promise<void> {
         showExportKey,
         handleLockWallet,
         handleLogout,
+        disconnectSite,
     });
 }
 
@@ -392,6 +449,14 @@ async function handleLogout(): Promise<void> {
     stopTxStatusSync();
     (window as any).showToast(t.toastLogout, 'info');
     (window as any).navigateTo('welcome');
+}
+
+async function disconnectSite(origin: string): Promise<void> {
+    const account = await getActiveAccount();
+    if (!account) return;
+    await removeDappConnection(account.accountId, origin);
+    (window as any).showToast('已断开连接', 'info');
+    renderSettings();
 }
 
 function openModal(title: string): { overlay: HTMLDivElement; body: HTMLElement; footer: HTMLElement; close: () => void } {

@@ -273,6 +273,16 @@ export const showWarningToast = (message: string, title = '', duration = 3000) =
     showWarningToast,
 };
 
+chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type !== 'PANGU_UI_PENDING') return;
+    void (async () => {
+        const account = await getActiveAccount();
+        if (!account) return;
+        if (message.accountId && message.accountId !== account.accountId) return;
+        navigateTo('dappConnect');
+    })();
+});
+
 // ========================================
 // 初始化
 // ========================================
