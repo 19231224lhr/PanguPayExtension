@@ -83,6 +83,8 @@ const STORAGE_KEYS = {
     SETTINGS: 'pangu_settings',
     TX_HISTORY: 'pangu_tx_history',
     ORGANIZATION: 'pangu_organization',
+    DAPP_CONNECTIONS: 'pangu_dapp_connections',
+    DAPP_PENDING: 'pangu_dapp_pending',
     SESSION: 'pangu_session',
 };
 
@@ -139,6 +141,20 @@ export async function deleteAccount(accountId: string): Promise<void> {
     const keys = await getStorageData<Record<string, EncryptedAccount>>(STORAGE_KEYS.ENCRYPTED_KEYS) || {};
     delete keys[accountId];
     await setStorageData(STORAGE_KEYS.ENCRYPTED_KEYS, keys);
+
+    const dappConnections =
+        await getStorageData<Record<string, Record<string, DappConnection>>>(STORAGE_KEYS.DAPP_CONNECTIONS) || {};
+    if (dappConnections[accountId]) {
+        delete dappConnections[accountId];
+        await setStorageData(STORAGE_KEYS.DAPP_CONNECTIONS, dappConnections);
+    }
+
+    const dappPending =
+        await getStorageData<Record<string, DappPendingConnection>>(STORAGE_KEYS.DAPP_PENDING) || {};
+    if (dappPending[accountId]) {
+        delete dappPending[accountId];
+        await setStorageData(STORAGE_KEYS.DAPP_PENDING, dappPending);
+    }
 }
 
 // ========================================
@@ -306,6 +322,113 @@ export async function clearOrganization(accountId: string): Promise<void> {
 }
 
 // ========================================
+// DApp Connections
+// ========================================
+
+export interface DappConnection {
+    accountId: string;
+    origin: string;
+    address: string;
+    connectedAt: number;
+    title?: string;
+    icon?: string;
+}
+
+export interface DappPendingConnection {
+    requestId: string;
+    accountId: string;
+    origin: string;
+    createdAt: number;
+    title?: string;
+    icon?: string;
+}
+
+function normalizeOrigin(origin: string): string {
+    return String(origin || '').trim().toLowerCase();
+}
+
+export async function getDappConnection(
+    accountId: string,
+    origin: string
+): Promise<DappConnection | null> {
+    if (!accountId || !origin) return null;
+    const connections =
+        await getStorageData<Record<string, Record<string, DappConnection>>>(STORAGE_KEYS.DAPP_CONNECTIONS);
+    const normalized = normalizeOrigin(origin);
+    return connections?.[accountId]?.[normalized] || null;
+}
+
+export async function getDappConnections(
+    accountId: string
+): Promise<Record<string, DappConnection>> {
+    if (!accountId) return {};
+    const connections =
+        await getStorageData<Record<string, Record<string, DappConnection>>>(STORAGE_KEYS.DAPP_CONNECTIONS);
+    return connections?.[accountId] || {};
+}
+
+export async function setDappConnection(
+    accountId: string,
+    origin: string,
+    connection: Omit<DappConnection, 'accountId' | 'origin' | 'connectedAt'> & {
+        connectedAt?: number;
+    }
+): Promise<void> {
+    if (!accountId || !origin) return;
+    const connections =
+        await getStorageData<Record<string, Record<string, DappConnection>>>(STORAGE_KEYS.DAPP_CONNECTIONS) || {};
+    const normalized = normalizeOrigin(origin);
+    if (!connections[accountId]) connections[accountId] = {};
+    connections[accountId][normalized] = {
+        accountId,
+        origin: normalized,
+        address: connection.address,
+        connectedAt: connection.connectedAt || Date.now(),
+        title: connection.title,
+        icon: connection.icon,
+    };
+    await setStorageData(STORAGE_KEYS.DAPP_CONNECTIONS, connections);
+}
+
+export async function removeDappConnection(accountId: string, origin: string): Promise<void> {
+    if (!accountId || !origin) return;
+    const connections =
+        await getStorageData<Record<string, Record<string, DappConnection>>>(STORAGE_KEYS.DAPP_CONNECTIONS) || {};
+    const normalized = normalizeOrigin(origin);
+    if (!connections[accountId]) return;
+    if (connections[accountId][normalized]) {
+        delete connections[accountId][normalized];
+        await setStorageData(STORAGE_KEYS.DAPP_CONNECTIONS, connections);
+    }
+}
+
+export async function saveDappPendingConnection(pending: DappPendingConnection): Promise<void> {
+    if (!pending?.accountId) return;
+    const pendingMap =
+        await getStorageData<Record<string, DappPendingConnection>>(STORAGE_KEYS.DAPP_PENDING) || {};
+    pendingMap[pending.accountId] = pending;
+    await setStorageData(STORAGE_KEYS.DAPP_PENDING, pendingMap);
+}
+
+export async function getDappPendingConnection(accountId: string): Promise<DappPendingConnection | null> {
+    if (!accountId) return null;
+    const pendingMap =
+        await getStorageData<Record<string, DappPendingConnection>>(STORAGE_KEYS.DAPP_PENDING);
+    return pendingMap?.[accountId] || null;
+}
+
+export async function clearDappPendingConnection(accountId: string, requestId?: string): Promise<void> {
+    if (!accountId) return;
+    const pendingMap =
+        await getStorageData<Record<string, DappPendingConnection>>(STORAGE_KEYS.DAPP_PENDING) || {};
+    const existing = pendingMap[accountId];
+    if (!existing) return;
+    if (requestId && existing.requestId !== requestId) return;
+    delete pendingMap[accountId];
+    await setStorageData(STORAGE_KEYS.DAPP_PENDING, pendingMap);
+}
+
+// ========================================
 // Settings
 // ========================================
 
@@ -458,6 +581,17 @@ export async function hydrateSession(): Promise<void> {
     } catch {
         sessionAutoLockMs = DEFAULT_SETTINGS.autoLockMinutes * 60 * 1000;
     }
+}
+
+export async function hasActiveSession(accountId?: string): Promise<boolean> {
+    const record = await getStorageData<SessionRecord>(STORAGE_KEYS.SESSION);
+    if (!record || !record.accountId || !record.privKey) return false;
+    if (accountId && record.accountId !== accountId) return false;
+    if (!record.expiresAt || Date.now() > record.expiresAt) {
+        await removeStorageData(STORAGE_KEYS.SESSION);
+        return false;
+    }
+    return true;
 }
 
 // ========================================

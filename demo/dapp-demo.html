@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PanguPay DApp Demo</title>
+    <style>
+      body {
+        font-family: "Segoe UI", sans-serif;
+        padding: 24px;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      .card {
+        max-width: 520px;
+        margin: 0 auto;
+        background: #111827;
+        border: 1px solid #1e293b;
+        border-radius: 16px;
+        padding: 20px;
+        box-shadow: 0 12px 30px rgba(15, 23, 42, 0.4);
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 20px;
+      }
+      p {
+        margin: 0 0 16px;
+        color: #94a3b8;
+      }
+      button {
+        border: none;
+        border-radius: 10px;
+        padding: 10px 16px;
+        font-weight: 600;
+        margin-right: 8px;
+        cursor: pointer;
+      }
+      .primary {
+        background: #2563eb;
+        color: #fff;
+      }
+      .secondary {
+        background: #1e293b;
+        color: #e2e8f0;
+      }
+      .status {
+        margin-top: 16px;
+        font-size: 13px;
+        line-height: 1.6;
+        background: #0b1120;
+        padding: 12px;
+        border-radius: 12px;
+        border: 1px solid #1e293b;
+        white-space: pre-wrap;
+      }
+      .warn {
+        color: #facc15;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>PanguPay DApp Demo</h1>
+      <p>演示网页连接钱包并获取当前站点授权地址。</p>
+      <div>
+        <button class="primary" id="connectBtn">连接钱包</button>
+        <button class="secondary" id="getAccountBtn">获取地址</button>
+      </div>
+      <div class="status" id="status">等待操作...</div>
+    </div>
+
+    <script>
+      const statusEl = document.getElementById('status');
+      const connectBtn = document.getElementById('connectBtn');
+      const getAccountBtn = document.getElementById('getAccountBtn');
+
+      function logStatus(message, isWarn) {
+        statusEl.textContent = message;
+        statusEl.classList.toggle('warn', Boolean(isWarn));
+      }
+
+      function ensurePangu() {
+        if (window.pangu) return Promise.resolve();
+        return new Promise((resolve) => {
+          window.addEventListener('panguReady', () => resolve(), { once: true });
+        });
+      }
+
+      connectBtn.addEventListener('click', async () => {
+        try {
+          await ensurePangu();
+          logStatus('连接中...');
+          const result = await window.pangu.connect();
+          logStatus('连接成功\\n' + JSON.stringify(result, null, 2));
+        } catch (err) {
+          logStatus('连接失败: ' + (err && err.message ? err.message : err), true);
+        }
+      });
+
+      getAccountBtn.addEventListener('click', async () => {
+        try {
+          await ensurePangu();
+          logStatus('查询中...');
+          const info = await window.pangu.getAccount();
+          logStatus('当前地址\\n' + JSON.stringify(info, null, 2));
+        } catch (err) {
+          logStatus('获取失败: ' + (err && err.message ? err.message : err), true);
+        }
+      });
+    </script>
+  </body>
+</html>

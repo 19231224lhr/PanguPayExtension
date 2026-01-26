@@ -23,6 +23,13 @@ window.addEventListener('message', async (event) => {
     if (!event.data.type.startsWith('PANGU_')) return;
 
     const { type, payload, requestId } = event.data;
+    const iconEl = document.querySelector<HTMLLinkElement>("link[rel~='icon']");
+    const siteInfo = {
+        origin: window.location.origin,
+        href: window.location.href,
+        title: document.title || window.location.hostname,
+        icon: iconEl?.href || '',
+    };
 
     try {
         // 转发消息到 background
@@ -30,6 +37,7 @@ window.addEventListener('message', async (event) => {
             type,
             payload,
             requestId,
+            site: siteInfo,
         });
 
         // 将响应发回页面

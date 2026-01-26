@@ -8,6 +8,7 @@ import {
     getSessionKey,
     getOnboardingStep,
     hydrateSession,
+    getDappPendingConnection,
 } from '../core/storage';
 import { startTxStatusSync } from '../core/txStatus';
 import { renderWelcome } from './pages/welcome';
@@ -24,6 +25,7 @@ import { renderOrganization } from './pages/organization';
 import { renderSettings } from './pages/settings';
 import { renderCreate } from './pages/create';
 import { renderImport } from './pages/import';
+import { renderDappConnect } from './pages/dappConnect';
 import type { PageName } from '../core/types';
 import { applyStoredSettings } from './utils/appSettings';
 
@@ -54,6 +56,7 @@ const pageRenderers: Record<PageName, PageRenderer> = {
     history: renderHistory,
     organization: renderOrganization,
     settings: renderSettings,
+    dappConnect: renderDappConnect,
 };
 
 // ========================================
@@ -293,7 +296,16 @@ async function init(): Promise<void> {
         if (session) {
             void startTxStatusSync(session.accountId);
             const step = await getOnboardingStep(session.accountId);
-            navigateTo(step === 'complete' ? 'home' : step === 'organization' ? 'organization' : 'walletManager');
+            if (step === 'complete') {
+                const pending = await getDappPendingConnection(session.accountId);
+                if (pending) {
+                    navigateTo('dappConnect');
+                } else {
+                    navigateTo('home');
+                }
+            } else {
+                navigateTo(step === 'organization' ? 'organization' : 'walletManager');
+            }
         } else {
             // 未解锁，显示解锁页
             navigateTo('unlock');

@@ -40,7 +40,7 @@ function sendMessage(type, payload) {
         setTimeout(() => {
             window.removeEventListener('message', handler);
             reject(new Error('请求超时'));
-        }, 30000);
+        }, 120000);
     });
 }
 

@@ -543,6 +543,8 @@ interface PanguWallet {
 
 ## 10. 网站对接指南
 
+> 更详细说明见 `docs/DAPP_CONNECT.md`，示例页面在 `demo/dapp-demo.html`。
+
 ### 10.1 检测扩展
 
 ```javascript
@@ -569,6 +571,8 @@ async function connectWallet() {
   }
 }
 ```
+
+> 当前版本为“每个网站单独选一个地址”。首次连接会弹出插件，让用户选择授权地址。
 
 ### 10.3 发送交易
 

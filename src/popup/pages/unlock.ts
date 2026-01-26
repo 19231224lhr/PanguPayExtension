@@ -2,7 +2,14 @@
  * 解锁页面
  */
 
-import { getActiveAccountId, getEncryptedKey, setSessionKey, getActiveAccount, getOnboardingStep } from '../../core/storage';
+import {
+    getActiveAccountId,
+    getEncryptedKey,
+    setSessionKey,
+    getActiveAccount,
+    getOnboardingStep,
+    getDappPendingConnection,
+} from '../../core/storage';
 import { syncAccountFromReOnline } from '../../core/auth';
 import { startTxStatusSync } from '../../core/txStatus';
 import { decryptPrivateKey } from '../../core/keyEncryption';
@@ -117,7 +124,12 @@ async function handleUnlock(e: Event): Promise<void> {
         // 跳转到下一步
         setTimeout(async () => {
             const step = await getOnboardingStep(accountId);
-            (window as any).navigateTo(step === 'complete' ? 'home' : step === 'organization' ? 'organization' : 'walletManager');
+            if (step === 'complete') {
+                const pending = await getDappPendingConnection(accountId);
+                (window as any).navigateTo(pending ? 'dappConnect' : 'home');
+            } else {
+                (window as any).navigateTo(step === 'organization' ? 'organization' : 'walletManager');
+            }
         }, 300);
     } catch (error) {
         console.error('[解锁] 失败:', error);

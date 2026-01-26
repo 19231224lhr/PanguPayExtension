@@ -133,6 +133,9 @@ export type MessageType =
     | 'PANGU_GET_ACCOUNT'
     | 'PANGU_SEND_TRANSACTION'
     | 'PANGU_SIGN_MESSAGE'
+    | 'PANGU_DAPP_GET_PENDING'
+    | 'PANGU_DAPP_APPROVE'
+    | 'PANGU_DAPP_REJECT'
     | 'PANGU_CONNECTED'
     | 'PANGU_RESPONSE';
 
@@ -140,6 +143,12 @@ export interface PanguMessage {
     type: MessageType;
     payload?: unknown;
     requestId?: string;
+    site?: {
+        origin?: string;
+        href?: string;
+        title?: string;
+        icon?: string;
+    };
 }
 
 export interface PanguResponse {
@@ -168,7 +177,8 @@ export type PageName =
     | 'receive'
     | 'history'
     | 'organization'
-    | 'settings';
+    | 'settings'
+    | 'dappConnect';
 
 export interface UIState {
     currentPage: PageName;
