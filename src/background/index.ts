@@ -221,11 +221,13 @@ async function handleConnect(
         if (uiPort) {
             uiPort.postMessage({ type: 'PANGU_UI_PENDING', accountId: account.accountId });
         } else {
-            void chrome.runtime.sendMessage({
-                __pangu_ui: true,
-                type: 'PANGU_UI_PENDING',
-                accountId: account.accountId,
-            });
+            void chrome.runtime
+                .sendMessage({
+                    __pangu_ui: true,
+                    type: 'PANGU_UI_PENDING',
+                    accountId: account.accountId,
+                })
+                .catch(() => {});
         }
     } catch {
         // ignore
@@ -315,11 +317,13 @@ async function handleConnectSign(
         if (uiPort) {
             uiPort.postMessage({ type: 'PANGU_UI_SIGN_PENDING', accountId: account.accountId });
         } else {
-            void chrome.runtime.sendMessage({
-                __pangu_ui: true,
-                type: 'PANGU_UI_SIGN_PENDING',
-                accountId: account.accountId,
-            });
+            void chrome.runtime
+                .sendMessage({
+                    __pangu_ui: true,
+                    type: 'PANGU_UI_SIGN_PENDING',
+                    accountId: account.accountId,
+                })
+                .catch(() => {});
         }
     } catch {
         // ignore
