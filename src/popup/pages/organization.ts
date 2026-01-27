@@ -11,7 +11,16 @@ import {
     setOnboardingStep,
     type OrganizationChoice,
 } from '../../core/storage';
-import { buildNodeUrl, getGroupInfo, getGroupList, type GroupListItem, type GroupListResponse } from '../../core/api';
+import {
+    API_BASE_URL,
+    API_ENDPOINTS,
+    buildApiUrl,
+    buildNodeUrl,
+    getGroupInfo,
+    getGroupList,
+    type GroupListItem,
+    type GroupListResponse,
+} from '../../core/api';
 import { joinGuarantorGroup, leaveGuarantorGroup } from '../../core/group';
 import { startTxStatusSync, stopTxStatusSync } from '../../core/txStatus';
 import { getActiveLanguage } from '../utils/appSettings';
@@ -553,14 +562,37 @@ async function handleOrgSearch(): Promise<void> {
     renderOrganization();
 
     try {
-        const result = await getGroupInfo(groupId);
-        if (!result.success || !result.data) {
-            orgSearchState = 'notfound';
-            renderOrganization();
-            return;
+        const account = await getActiveAccount();
+        const currentOrg = account ? await getOrganization(account.accountId) : null;
+        let payload: Record<string, any> | null = null;
+
+        if (currentOrg?.groupId) {
+            const base = currentOrg.assignNodeUrl ? buildNodeUrl(currentOrg.assignNodeUrl) : API_BASE_URL;
+            const url = buildApiUrl(
+                base,
+                `${API_ENDPOINTS.ASSIGN_GROUP_INFO(currentOrg.groupId)}?groupId=${encodeURIComponent(groupId)}`
+            );
+            try {
+                const response = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' } });
+                if (response.ok) {
+                    const data = await response.json();
+                    payload = (data as any)?.group_msg || (data as any)?.GroupMsg || (data as any)?.data || data;
+                }
+            } catch (error) {
+                console.warn('[组织查询] AssignNode 查询失败，改用 BootNode:', error);
+            }
         }
 
-        const payload = (result.data as any)?.group_msg || (result.data as any)?.data || result.data;
+        if (!payload) {
+            const result = await getGroupInfo(groupId);
+            if (!result.success || !result.data) {
+                orgSearchState = 'notfound';
+                renderOrganization();
+                return;
+            }
+            payload = (result.data as any)?.group_msg || (result.data as any)?.data || result.data;
+        }
+
         if (!payload) {
             orgSearchState = 'notfound';
             renderOrganization();

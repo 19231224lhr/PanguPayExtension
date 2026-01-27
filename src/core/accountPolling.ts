@@ -11,6 +11,7 @@ import {
     type TransactionRecord,
     type UserAccount,
 } from './storage';
+import { COIN_NAMES } from './types';
 import type { TxCertificate, UTXOData } from './blockchain';
 import { cacheTXCerUpdate, shouldBlockTXCerUpdate, unlockTXCers } from './txCerLockManager';
 
@@ -183,12 +184,15 @@ async function maybeAddReceiveRecord(accountId: string, address: string, utxo: U
         id: `in_${txHash}`,
         type: 'receive',
         status: 'success',
+        transferMode: 'incoming',
         amount: utxo.Value || 0,
         coinType: utxo.Type || 0,
+        currency: COIN_NAMES[utxo.Type as keyof typeof COIN_NAMES] || 'PGC',
         from: fromAddress,
         to: address,
         timestamp: utxo.Time || Date.now(),
         txHash,
+        gas: 0,
         blockNumber: utxo.Position?.Blocknum || 0,
     };
 

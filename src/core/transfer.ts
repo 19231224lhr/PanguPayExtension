@@ -20,6 +20,7 @@ import { buildTxUserFromAccount, syncAccountAddresses } from './walletSync';
 import { getOrganization, saveTransaction, type TransactionRecord, type UserAccount } from './storage';
 import { lockUTXOs } from './utxoLock';
 import { lockTXCers, markTXCersSubmitted, unlockTXCers } from './txCerLockManager';
+import { COIN_NAMES } from './types';
 
 export type TransferMode = 'quick' | 'cross';
 
@@ -257,15 +258,21 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
     };
 
     const baseId = Date.now().toString();
+    const historyMode: TransactionRecord['transferMode'] =
+        hasOrg ? (isCrossChain ? 'cross' : 'quick') : 'normal';
     const txRecords: TransactionRecord[] = recipients.map((recipient, index) => ({
         id: `${baseId}_${index}`,
         type: 'send',
         status: 'pending',
+        transferMode: historyMode,
         amount: recipient.amount,
         coinType: recipient.coinType,
+        currency: COIN_NAMES[recipient.coinType as keyof typeof COIN_NAMES] || 'PGC',
         from: normalizedFrom[0] || account.mainAddress,
         to: recipient.address,
         timestamp: Date.now(),
+        gas: request.gas || 0,
+        guarantorOrg: hasOrg ? org?.groupId || '' : '',
     }));
 
     let userTx: UserNewTX | null = null;

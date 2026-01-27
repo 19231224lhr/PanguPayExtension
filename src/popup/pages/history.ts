@@ -168,7 +168,7 @@ function renderTransactionItem(tx: TransactionRecord, t: HistoryText): string {
         failed: 'var(--error)',
     }[tx.status];
 
-    const coinName = COIN_NAMES[tx.coinType as keyof typeof COIN_NAMES] || 'PGC';
+    const coinName = tx.currency || COIN_NAMES[tx.coinType as keyof typeof COIN_NAMES] || 'PGC';
     const time = new Date(tx.timestamp).toLocaleString('zh-CN', {
         month: '2-digit',
         day: '2-digit',
@@ -179,6 +179,22 @@ function renderTransactionItem(tx: TransactionRecord, t: HistoryText): string {
     const shortAddress = isSend
         ? tx.to.slice(0, 8) + '...' + tx.to.slice(-4)
         : tx.from.slice(0, 8) + '...' + tx.from.slice(-4);
+    const modeLabel = (() => {
+        switch (tx.transferMode) {
+            case 'quick':
+                return t.navHistory === 'History' ? 'Quick' : '快速';
+            case 'cross':
+                return t.navHistory === 'History' ? 'Cross' : '跨链';
+            case 'normal':
+                return t.navHistory === 'History' ? 'Normal' : '普通';
+            case 'incoming':
+                return t.navHistory === 'History' ? 'Incoming' : '入账';
+            default:
+                return t.navHistory === 'History' ? 'Unknown' : '未知';
+        }
+    })();
+    const gasLabel = tx.gas ? `Gas ${tx.gas}` : '';
+    const failureNote = tx.status === 'failed' && tx.failureReason ? tx.failureReason : '';
 
     return `
     <div class="list-item">
@@ -192,13 +208,18 @@ function renderTransactionItem(tx: TransactionRecord, t: HistoryText): string {
       </div>
       <div class="list-item-content">
         <div class="list-item-title">${isSend ? t.send : t.receive}</div>
-        <div class="list-item-subtitle">${isSend ? t.to : t.from} ${shortAddress}</div>
+        <div class="list-item-subtitle">
+          ${isSend ? t.to : t.from} ${shortAddress}
+          <span class="tag tag--neutral">${modeLabel}</span>
+        </div>
+        ${failureNote ? `<div class="list-item-note">${failureNote}</div>` : ''}
       </div>
       <div class="list-item-value">
         <div class="list-item-amount ${isSend ? 'negative' : 'positive'}">
           ${isSend ? '-' : '+'}${tx.amount.toFixed(tx.coinType === 0 ? 2 : 6)} ${coinName}
         </div>
         <div class="list-item-time" style="color: ${statusColor};">${statusText} · ${time}</div>
+        ${gasLabel ? `<div class="list-item-time">${gasLabel}</div>` : ''}
       </div>
     </div>
   `;

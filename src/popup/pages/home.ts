@@ -18,6 +18,7 @@ import { requestCapsuleAddress } from '../../core/capsule';
 import { unbindAddressOnBackend } from '../../core/address';
 import { syncAccountAddresses } from '../../core/walletSync';
 import { bigIntToHex } from '../../core/signature';
+import { isTXCerLocked } from '../../core/txCerLockManager';
 import { getActiveLanguage } from '../utils/appSettings';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
@@ -58,6 +59,8 @@ const TEXT = {
         copyAddress: '复制地址',
         totalBalance: '总余额',
         availableBalance: '可用余额',
+        txCerAvailable: 'TXCer 可用',
+        txCerLocked: 'TXCer 锁定',
         export: '导出',
         delete: '删除',
         gas: 'GAS',
@@ -110,6 +113,8 @@ const TEXT = {
         copyAddress: 'Copy Address',
         totalBalance: 'Total Balance',
         availableBalance: 'Available',
+        txCerAvailable: 'TXCer Available',
+        txCerLocked: 'TXCer Locked',
         export: 'Export',
         delete: 'Delete',
         gas: 'GAS',
@@ -367,6 +372,14 @@ function renderAddressCard(address: AddressInfo, t: HomeText): string {
     const shortAddress = address.address.slice(0, 8) + '...' + address.address.slice(-6);
     const detailsId = `address-details-${address.address}`;
     const balance = (address.balance || 0).toFixed(meta.decimals);
+    const txCerEntries = Object.entries(address.txCers || {});
+    const txCerTotal = txCerEntries.reduce((sum, [, value]) => sum + (Number(value) || 0), 0);
+    const txCerLocked = txCerEntries.reduce((sum, [id, value]) => {
+        if (!isTXCerLocked(id)) return sum;
+        return sum + (Number(value) || 0);
+    }, 0);
+    const txCerAvailable = Math.max(0, txCerTotal - txCerLocked);
+    const gasValue = Number(address.estInterest || 0).toFixed(2);
 
     return `
       <div class="address-card">
@@ -407,10 +420,24 @@ function renderAddressCard(address: AddressInfo, t: HomeText): string {
               <span>${t.availableBalance}</span>
               <span>${balance} ${coinName}</span>
             </div>
+            ${
+                txCerTotal > 0
+                    ? `
+            <div class="balance-panel-row balance-panel-row--muted">
+              <span>${t.txCerAvailable}</span>
+              <span>${txCerAvailable.toFixed(meta.decimals)} ${coinName}</span>
+            </div>
+            <div class="balance-panel-row balance-panel-row--muted">
+              <span>${t.txCerLocked}</span>
+              <span>${txCerLocked.toFixed(meta.decimals)} ${coinName}</span>
+            </div>
+            `
+                    : ''
+            }
           </div>
           <div class="address-gas-row">
             <span>${t.gas}</span>
-            <span>0.0</span>
+            <span>${gasValue}</span>
           </div>
           <div class="address-actions">
             <button class="address-action-btn address-action-btn--primary" onclick="showCapsuleReceive('${address.address}')">

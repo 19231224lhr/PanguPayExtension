@@ -46,6 +46,7 @@ async function handleStatusChange(
     if (status.status !== 'success' && status.status !== 'failed') return;
     const changed = await updateTransactionStatus(accountId, txHash, status.status, {
         blockNumber: status.block_height || 0,
+        failureReason: status.status === 'failed' ? status.error_reason || '未知错误' : undefined,
     });
     if (changed) {
         dispatchHistoryUpdate(accountId, txHash, status.status);
@@ -90,7 +91,9 @@ async function watchTransactionStatus(
         if (result.status === 'failed') {
             const reason = result.errorReason || '未知错误';
             notifyToast(`交易验证失败: ${reason}`, 'error', '交易验证失败', 8000);
-            const changed = await updateTransactionStatus(accountId, txHash, 'failed');
+            const changed = await updateTransactionStatus(accountId, txHash, 'failed', {
+                failureReason: reason,
+            });
             if (changed) {
                 dispatchHistoryUpdate(accountId, txHash, 'failed');
             }

@@ -63,13 +63,19 @@ export interface TransactionRecord {
     id: string;
     type: 'send' | 'receive';
     status: 'pending' | 'success' | 'failed';
+    transferMode?: 'normal' | 'quick' | 'cross' | 'incoming' | 'unknown';
     amount: number;
     coinType: number;
+    currency?: string;
     from: string;
     to: string;
     timestamp: number;
     txHash?: string;
+    gas?: number;
+    guarantorOrg?: string;
     blockNumber?: number;
+    confirmations?: number;
+    failureReason?: string;
 }
 
 // ========================================
@@ -247,9 +253,9 @@ export async function saveTransaction(accountId: string, tx: TransactionRecord):
         history[accountId] = [];
     }
     history[accountId].unshift(tx);
-    // 只保留最近 100 条
-    if (history[accountId].length > 100) {
-        history[accountId] = history[accountId].slice(0, 100);
+    // 只保留最近 200 条
+    if (history[accountId].length > 200) {
+        history[accountId] = history[accountId].slice(0, 200);
     }
     await setStorageData(STORAGE_KEYS.TX_HISTORY, history);
 }
@@ -272,7 +278,7 @@ export async function updateTransactionStatus(
     accountId: string,
     txHash: string,
     status: TransactionRecord['status'],
-    options: { blockNumber?: number } = {}
+    options: { blockNumber?: number; failureReason?: string; confirmations?: number } = {}
 ): Promise<boolean> {
     if (!accountId || !txHash) return false;
     const history = await getStorageData<Record<string, TransactionRecord[]>>(STORAGE_KEYS.TX_HISTORY) || {};
@@ -287,6 +293,14 @@ export async function updateTransactionStatus(
             }
             if (options.blockNumber && item.blockNumber !== options.blockNumber) {
                 item.blockNumber = options.blockNumber;
+                changed = true;
+            }
+            if (options.failureReason !== undefined && item.failureReason !== options.failureReason) {
+                item.failureReason = options.failureReason;
+                changed = true;
+            }
+            if (options.confirmations !== undefined && item.confirmations !== options.confirmations) {
+                item.confirmations = options.confirmations;
                 changed = true;
             }
         }
