@@ -1,219 +1,239 @@
-# PanguPay Extension 使用指南
+# PanguPay 开发者接入指南
 
-本文档说明如何构建、加载和测试 PanguPay 浏览器钱包扩展。
+本文档面向希望将 PanguPay 钱包集成到网站中的开发者，介绍如何接入插件、测试连接功能。
 
 ---
 
 ## 目录
 
-1. [开发环境准备](#1-开发环境准备)
-2. [安装依赖](#2-安装依赖)
-3. [构建扩展](#3-构建扩展)
-4. [加载到浏览器](#4-加载到浏览器)
-5. [功能测试](#5-功能测试)
-6. [常见问题](#6-常见问题)
+1. [环境准备](#1-环境准备)
+2. [构建与加载插件](#2-构建与加载插件)
+3. [使用 Demo 测试连接](#3-使用-demo-测试连接)
+4. [网页接入钱包](#4-网页接入钱包)
+5. [常见问题](#5-常见问题)
 
 ---
 
-## 1. 开发环境准备
+## 1. 环境准备
 
 确保已安装：
-- **Node.js** 18+ (推荐 20.x)
-- **npm** 或 **pnpm**
+- **Node.js** 18+（推荐 20.x）
 - **Chrome** 或 **Edge** 浏览器
 
 ---
 
-## 2. 安装依赖
+## 2. 构建与加载插件
 
-在扩展项目目录下运行：
+### 2.1 安装依赖
 
 ```bash
-cd C:\Users\18360\Desktop\Code\PanguPayExtension
+cd PanguPayExtension
 npm install
 ```
 
----
-
-## 3. 构建扩展
-
-### 开发模式（实时编译）
+### 2.2 构建
 
 ```bash
+# 开发模式（文件变化自动重构建）
 npm run dev
-```
 
-这将持续监听文件变化并自动重新构建。
-
-### 生产构建
-
-```bash
+# 生产构建
 npm run build
 ```
 
 构建产物输出到 `dist/` 目录。
 
----
+### 2.3 加载到 Chrome
 
-## 4. 加载到浏览器
+1. 打开 `chrome://extensions/`
+2. 开启右上角 **开发者模式**
+3. 点击 **加载已解压的扩展程序**
+4. 选择 `dist/` 目录
+5. 插件图标将出现在浏览器工具栏
 
-### Chrome 浏览器
+### 2.4 创建测试钱包
 
-1. 打开 Chrome，访问 `chrome://extensions/`
-2. 开启右上角 **"开发者模式"**
-3. 点击 **"加载已解压的扩展程序"**
-4. 选择 `dist/` 文件夹（或直接选择项目根目录，如果使用 crxjs）
-5. 扩展将出现在工具栏中
+首次使用需创建钱包：
 
-![加载扩展示意图](https://developer.chrome.com/static/docs/extensions/get-started/tutorial/hello-world/image/extensions-page-e702601.png)
-
-### Edge 浏览器
-
-1. 打开 Edge，访问 `edge://extensions/`
-2. 开启 **"开发人员模式"**
-3. 点击 **"加载解压缩的扩展"**
-4. 选择 `dist/` 文件夹
-
----
-
-## 5. 功能测试
-
-### 5.1 创建钱包
-
-1. 点击浏览器工具栏的 PanguPay 图标
-2. 点击 **"创建新钱包"**
-3. 查看生成的地址（点击可显示私钥）
-4. 设置密码并确认
-5. 完成后自动跳转到首页
-
-### 5.2 导入钱包
-
-1. 在欢迎页点击 **"导入已有钱包"**
-2. 输入 64 字符的十六进制私钥
+1. 点击工具栏的 PanguPay 图标
+2. 选择 **创建新钱包** 或 **导入已有钱包**
 3. 设置密码
-4. 完成导入
-
-### 5.3 查看余额
-
-首页显示：
-- 总资产（PGC 计价）
-- 钱包地址（可复制）
-- PGC、BTC、ETH 分类余额
-
-### 5.4 发送交易
-
-1. 点击 **"发送"** 按钮
-2. 选择转账模式：
-   - **快速转账**：组织内即时到账（需先加入组织）
-   - **普通转账**：散户聚合交易
-   - **跨链**：BTC/ETH 跨链转账
-3. 输入金额和收款地址
-4. 确认发送
-
-### 5.5 接收资产
-
-1. 点击 **"接收"** 按钮
-2. 显示收款地址和二维码
-3. 支持 PGC、BTC、ETH 三种资产
-
-### 5.6 交易历史
-
-- 查看所有发送/接收记录
-- 显示交易状态和时间
-
-### 5.7 担保组织
-
-1. 进入 **"组织"** 页面
-2. 查看可用的担保组织列表
-3. 点击 **"加入"** 加入组织
-4. 加入后可使用快速转账功能
-
-### 5.8 设置
-
-- 切换语言（中文/英文）
-- 切换主题（深色/浅色）
-- 锁定钱包
-- 删除钱包
+4. 完成初始化流程（创建地址、加入担保组织）
 
 ---
 
-## 6. 常见问题
+## 3. 使用 Demo 测试连接
 
-### Q: 加载扩展时报错 "Manifest file is missing"
+我们提供了一个演示页面用于测试 DApp 连接功能。
 
-确保选择的是 `dist/` 目录，而不是 `src/` 目录。
+### 3.1 打开 Demo 页面
 
-### Q: 图标不显示
-
-检查 `public/icons/` 目录是否存在 SVG 图标文件。
-
-### Q: 页面空白
-
-1. 打开 Chrome 开发者工具（F12）
-2. 切换到 Console 面板查看错误信息
-3. 尝试重新构建：`npm run build`
-
-### Q: Chrome 类型报错
-
-运行 `npm install` 安装 `@types/chrome` 类型定义。
-
----
-
-## 项目文件结构
+直接在浏览器中打开以下文件：
 
 ```
-PanguPayExtension/
-├── manifest.json           # 扩展配置
-├── package.json            # 依赖配置
-├── vite.config.ts          # 构建配置
-├── tsconfig.json           # TypeScript 配置
-├── public/
-│   └── icons/              # 扩展图标
-├── src/
-│   ├── background/         # Service Worker
-│   ├── content/            # 内容脚本
-│   ├── popup/              # 弹窗界面
-│   │   ├── index.html
-│   │   ├── main.ts
-│   │   ├── styles/
-│   │   └── pages/
-│   └── core/               # 核心业务逻辑
-│       ├── signature.ts
-│       ├── keyEncryption.ts
-│       ├── storage.ts
-│       ├── api.ts
-│       └── types.ts
-└── dist/                   # 构建输出
+PanguPayExtension/demo/dapp-demo.html
 ```
+
+或使用本地服务器：
+
+```bash
+# 使用 Python
+python -m http.server 8000
+
+# 然后访问 http://127.0.0.1:8000/demo/dapp-demo.html
+```
+
+### 3.2 测试流程
+
+Demo 页面提供三个按钮：
+
+| 按钮 | 功能 | 说明 |
+|:-----|:-----|:-----|
+| **连接钱包** | `connect()` | 请求授权，用户选择地址 |
+| **签名连接** | `connectSigned()` | 请求签名验证身份 |
+| **获取地址** | `getAccount()` | 查询当前授权的地址 |
+
+**测试步骤**：
+
+1. 确保钱包已解锁
+2. 点击 **连接钱包**
+3. 插件弹出连接请求页面
+4. 选择要授权的地址，点击 **确认连接**
+5. Demo 页面显示连接成功和地址信息
+
+### 3.3 测试签名连接
+
+1. 点击 **签名连接**
+2. 插件弹出签名请求页面，显示待签名消息
+3. 选择地址（需已解锁私钥）
+4. 点击 **签名并连接**
+5. Demo 页面显示签名结果（`signature` 和 `publicKey`）
 
 ---
 
-## 网站对接示例
+## 4. 网页接入钱包
 
-第三方网站可以通过 `window.pangu` 调用钱包功能：
+### 4.1 检测插件
+
+PanguPay 会向页面注入 `window.pangu` 对象，并触发 `panguReady` 事件。
 
 ```javascript
-// 检测扩展是否安装
-if (typeof window.pangu === 'undefined') {
-  alert('请安装 PanguPay 钱包扩展');
-  return;
+// 推荐：等待插件就绪
+function ensurePangu() {
+    if (window.pangu) return Promise.resolve();
+    return new Promise((resolve) => {
+        window.addEventListener('panguReady', () => resolve(), { once: true });
+    });
 }
 
-// 连接钱包
-const { address } = await window.pangu.connect();
-console.log('已连接:', address);
+// 使用
+await ensurePangu();
+console.log('PanguPay 已就绪');
+```
 
-// 发送交易
-const result = await window.pangu.sendTransaction({
-  to: '收款地址',
-  amount: 10,
-  coinType: 0, // 0=PGC, 1=BTC, 2=ETH
+如果 `window.pangu` 为 `undefined`，说明用户未安装插件，可引导用户安装。
+
+### 4.2 连接钱包
+
+```javascript
+try {
+    const result = await window.pangu.connect();
+    console.log('地址:', result.address);
+    console.log('账户ID:', result.accountId);
+} catch (err) {
+    console.error('连接失败:', err.message);
+}
+```
+
+首次连接会弹出插件让用户选择授权地址。授权后该站点会被记住，下次调用直接返回。
+
+### 4.3 签名登录
+
+当需要验证用户确实控制该地址时，使用签名连接：
+
+```javascript
+const result = await window.pangu.connectSigned({
+    nonce: String(Date.now()),  // 随机数防重放
+    message: 'Login to MyDApp'   // 可选自定义消息
 });
-console.log('交易ID:', result.txId);
+
+// 将签名发送到后端验证
+console.log('签名:', result.signature);
+console.log('公钥:', result.publicKey);
+```
+
+### 4.4 获取当前地址
+
+```javascript
+const info = await window.pangu.getAccount();
+if (info) {
+    console.log('已连接:', info.address);
+} else {
+    console.log('未连接');
+}
+```
+
+### 4.5 监听事件
+
+```javascript
+// 用户在插件中断开连接
+window.pangu.on('disconnect', () => {
+    console.log('已断开');
+});
+
+// 用户切换账户
+window.pangu.on('accountChanged', (newAddress) => {
+    console.log('新地址:', newAddress);
+});
+```
+
+### 4.6 断开连接
+
+```javascript
+await window.pangu.disconnect();
 ```
 
 ---
 
-## 联系与支持
+## 5. 常见问题
 
-如有问题，请联系 PanguPay 开发团队。
+### Q: `window.pangu` 是 undefined
+
+**原因**：插件未安装或未加载
+
+**解决**：
+1. 确认插件已正确加载到浏览器
+2. 使用 `ensurePangu()` 等待就绪事件
+
+### Q: 连接时报错 "请先登录钱包"
+
+**原因**：钱包处于锁定状态
+
+**解决**：点击插件图标，输入密码解锁
+
+### Q: 签名时报错 "请先解锁该地址私钥"
+
+**原因**：选择的地址是子钱包地址，未解锁
+
+**解决**：在插件中解锁对应子钱包
+
+### Q: 加载插件时报错 "Manifest file is missing"
+
+**原因**：选择了错误的目录
+
+**解决**：确保选择 `dist/` 目录，而非 `src/`
+
+### Q: 如何查看已连接的网站？
+
+在插件中进入 **设置 → 已连接网站**，可查看和断开已授权站点。
+
+---
+
+## 更多资料
+
+- [DApp 连接技术文档](DAPP_CONNECT.md) - 完整 API 参考
+- [Demo 源码](../demo/dapp-demo.html) - 可参考的接入示例
+
+---
+
+> 如有问题，请联系 PanguPay 开发团队。
