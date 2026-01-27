@@ -365,6 +365,30 @@ function normalizeOrigin(origin: string): string {
     return String(origin || '').trim().toLowerCase();
 }
 
+function isPendingRecord(value: unknown): value is { requestId: string } {
+    return !!value && typeof value === 'object' && typeof (value as { requestId?: string }).requestId === 'string';
+}
+
+function normalizePendingStore<T extends { requestId: string }>(
+    raw: Record<string, unknown> | null
+): { store: Record<string, Record<string, T>>; migrated: boolean } {
+    const store: Record<string, Record<string, T>> = {};
+    let migrated = false;
+    if (!raw || typeof raw !== 'object') return { store, migrated };
+    for (const [accountId, entry] of Object.entries(raw)) {
+        if (!entry) continue;
+        if (isPendingRecord(entry)) {
+            store[accountId] = { [entry.requestId]: entry as T };
+            migrated = true;
+            continue;
+        }
+        if (typeof entry === 'object') {
+            store[accountId] = entry as Record<string, T>;
+        }
+    }
+    return { store, migrated };
+}
+
 export async function getDappConnection(
     accountId: string,
     origin: string
@@ -422,54 +446,140 @@ export async function removeDappConnection(accountId: string, origin: string): P
 
 export async function saveDappPendingConnection(pending: DappPendingConnection): Promise<void> {
     if (!pending?.accountId) return;
-    const pendingMap =
-        await getStorageData<Record<string, DappPendingConnection>>(STORAGE_KEYS.DAPP_PENDING) || {};
-    pendingMap[pending.accountId] = pending;
-    await setStorageData(STORAGE_KEYS.DAPP_PENDING, pendingMap);
+    const raw =
+        await getStorageData<Record<string, unknown>>(STORAGE_KEYS.DAPP_PENDING);
+    const { store } = normalizePendingStore<DappPendingConnection>(raw);
+    if (!store[pending.accountId]) store[pending.accountId] = {};
+    store[pending.accountId][pending.requestId] = pending;
+    await setStorageData(STORAGE_KEYS.DAPP_PENDING, store);
 }
 
 export async function getDappPendingConnection(accountId: string): Promise<DappPendingConnection | null> {
     if (!accountId) return null;
-    const pendingMap =
-        await getStorageData<Record<string, DappPendingConnection>>(STORAGE_KEYS.DAPP_PENDING);
-    return pendingMap?.[accountId] || null;
+    const raw =
+        await getStorageData<Record<string, unknown>>(STORAGE_KEYS.DAPP_PENDING);
+    const { store, migrated } = normalizePendingStore<DappPendingConnection>(raw);
+    if (migrated) {
+        await setStorageData(STORAGE_KEYS.DAPP_PENDING, store);
+    }
+    const accountPending = store[accountId] || {};
+    const list = Object.values(accountPending).sort((a, b) => a.createdAt - b.createdAt);
+    return list[0] || null;
+}
+
+export async function getDappPendingConnections(accountId: string): Promise<DappPendingConnection[]> {
+    if (!accountId) return [];
+    const raw =
+        await getStorageData<Record<string, unknown>>(STORAGE_KEYS.DAPP_PENDING);
+    const { store, migrated } = normalizePendingStore<DappPendingConnection>(raw);
+    if (migrated) {
+        await setStorageData(STORAGE_KEYS.DAPP_PENDING, store);
+    }
+    const accountPending = store[accountId] || {};
+    return Object.values(accountPending).sort((a, b) => a.createdAt - b.createdAt);
+}
+
+export async function getDappPendingConnectionById(
+    accountId: string,
+    requestId: string
+): Promise<DappPendingConnection | null> {
+    if (!accountId || !requestId) return null;
+    const raw =
+        await getStorageData<Record<string, unknown>>(STORAGE_KEYS.DAPP_PENDING);
+    const { store, migrated } = normalizePendingStore<DappPendingConnection>(raw);
+    if (migrated) {
+        await setStorageData(STORAGE_KEYS.DAPP_PENDING, store);
+    }
+    return store?.[accountId]?.[requestId] || null;
 }
 
 export async function clearDappPendingConnection(accountId: string, requestId?: string): Promise<void> {
     if (!accountId) return;
-    const pendingMap =
-        await getStorageData<Record<string, DappPendingConnection>>(STORAGE_KEYS.DAPP_PENDING) || {};
-    const existing = pendingMap[accountId];
-    if (!existing) return;
-    if (requestId && existing.requestId !== requestId) return;
-    delete pendingMap[accountId];
-    await setStorageData(STORAGE_KEYS.DAPP_PENDING, pendingMap);
+    const raw =
+        await getStorageData<Record<string, unknown>>(STORAGE_KEYS.DAPP_PENDING);
+    const { store } = normalizePendingStore<DappPendingConnection>(raw);
+    const accountPending = store[accountId];
+    if (!accountPending) return;
+    if (!requestId) {
+        delete store[accountId];
+        await setStorageData(STORAGE_KEYS.DAPP_PENDING, store);
+        return;
+    }
+    if (!accountPending[requestId]) return;
+    delete accountPending[requestId];
+    if (Object.keys(accountPending).length === 0) {
+        delete store[accountId];
+    }
+    await setStorageData(STORAGE_KEYS.DAPP_PENDING, store);
 }
 
 export async function saveDappSignPendingConnection(pending: DappSignPendingConnection): Promise<void> {
     if (!pending?.accountId) return;
-    const pendingMap =
-        await getStorageData<Record<string, DappSignPendingConnection>>(STORAGE_KEYS.DAPP_SIGN_PENDING) || {};
-    pendingMap[pending.accountId] = pending;
-    await setStorageData(STORAGE_KEYS.DAPP_SIGN_PENDING, pendingMap);
+    const raw =
+        await getStorageData<Record<string, unknown>>(STORAGE_KEYS.DAPP_SIGN_PENDING);
+    const { store } = normalizePendingStore<DappSignPendingConnection>(raw);
+    if (!store[pending.accountId]) store[pending.accountId] = {};
+    store[pending.accountId][pending.requestId] = pending;
+    await setStorageData(STORAGE_KEYS.DAPP_SIGN_PENDING, store);
 }
 
 export async function getDappSignPendingConnection(accountId: string): Promise<DappSignPendingConnection | null> {
     if (!accountId) return null;
-    const pendingMap =
-        await getStorageData<Record<string, DappSignPendingConnection>>(STORAGE_KEYS.DAPP_SIGN_PENDING);
-    return pendingMap?.[accountId] || null;
+    const raw =
+        await getStorageData<Record<string, unknown>>(STORAGE_KEYS.DAPP_SIGN_PENDING);
+    const { store, migrated } = normalizePendingStore<DappSignPendingConnection>(raw);
+    if (migrated) {
+        await setStorageData(STORAGE_KEYS.DAPP_SIGN_PENDING, store);
+    }
+    const accountPending = store[accountId] || {};
+    const list = Object.values(accountPending).sort((a, b) => a.createdAt - b.createdAt);
+    return list[0] || null;
+}
+
+export async function getDappSignPendingConnections(accountId: string): Promise<DappSignPendingConnection[]> {
+    if (!accountId) return [];
+    const raw =
+        await getStorageData<Record<string, unknown>>(STORAGE_KEYS.DAPP_SIGN_PENDING);
+    const { store, migrated } = normalizePendingStore<DappSignPendingConnection>(raw);
+    if (migrated) {
+        await setStorageData(STORAGE_KEYS.DAPP_SIGN_PENDING, store);
+    }
+    const accountPending = store[accountId] || {};
+    return Object.values(accountPending).sort((a, b) => a.createdAt - b.createdAt);
+}
+
+export async function getDappSignPendingConnectionById(
+    accountId: string,
+    requestId: string
+): Promise<DappSignPendingConnection | null> {
+    if (!accountId || !requestId) return null;
+    const raw =
+        await getStorageData<Record<string, unknown>>(STORAGE_KEYS.DAPP_SIGN_PENDING);
+    const { store, migrated } = normalizePendingStore<DappSignPendingConnection>(raw);
+    if (migrated) {
+        await setStorageData(STORAGE_KEYS.DAPP_SIGN_PENDING, store);
+    }
+    return store?.[accountId]?.[requestId] || null;
 }
 
 export async function clearDappSignPendingConnection(accountId: string, requestId?: string): Promise<void> {
     if (!accountId) return;
-    const pendingMap =
-        await getStorageData<Record<string, DappSignPendingConnection>>(STORAGE_KEYS.DAPP_SIGN_PENDING) || {};
-    const existing = pendingMap[accountId];
-    if (!existing) return;
-    if (requestId && existing.requestId !== requestId) return;
-    delete pendingMap[accountId];
-    await setStorageData(STORAGE_KEYS.DAPP_SIGN_PENDING, pendingMap);
+    const raw =
+        await getStorageData<Record<string, unknown>>(STORAGE_KEYS.DAPP_SIGN_PENDING);
+    const { store } = normalizePendingStore<DappSignPendingConnection>(raw);
+    const accountPending = store[accountId];
+    if (!accountPending) return;
+    if (!requestId) {
+        delete store[accountId];
+        await setStorageData(STORAGE_KEYS.DAPP_SIGN_PENDING, store);
+        return;
+    }
+    if (!accountPending[requestId]) return;
+    delete accountPending[requestId];
+    if (Object.keys(accountPending).length === 0) {
+        delete store[accountId];
+    }
+    await setStorageData(STORAGE_KEYS.DAPP_SIGN_PENDING, store);
 }
 
 // ========================================

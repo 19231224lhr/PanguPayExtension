@@ -4,7 +4,7 @@
 
 import {
     getActiveAccount,
-    getDappPendingConnection,
+    getDappPendingConnections,
     getWalletAddresses,
     getSettings,
     type AddressInfo,
@@ -68,7 +68,9 @@ export async function renderDappConnect(): Promise<void> {
     const settings = await getSettings();
     const t = getText(settings.language);
     const account = await getActiveAccount();
-    const pending = account ? await getDappPendingConnection(account.accountId) : null;
+    const pendingList = account ? await getDappPendingConnections(account.accountId) : [];
+    const pending = pendingList[0] || null;
+    const pendingCount = pendingList.length;
 
     if (!account || !pending) {
         app.innerHTML = `
@@ -133,6 +135,13 @@ export async function renderDappConnect(): Promise<void> {
           </div>
           <div class="dapp-site-hint">${t.subtitle}</div>
         </div>
+        ${
+            pendingCount > 1
+                ? `<div style="margin: 6px 4px 12px; color: var(--text-muted); font-size: 12px;">
+                    还有 ${pendingCount - 1} 个待处理连接请求
+                  </div>`
+                : ''
+        }
 
         <div class="list-section">
           <div class="list-title">${t.addressLabel}</div>
@@ -211,7 +220,12 @@ export async function renderDappConnect(): Promise<void> {
                 payload: { requestId: pending.requestId },
             });
             (window as any).showToast('已拒绝连接', 'info');
-            (window as any).navigateTo('home');
+            const remaining = await getDappPendingConnections(account.accountId);
+            if (remaining.length > 0) {
+                await renderDappConnect();
+            } else {
+                (window as any).navigateTo('home');
+            }
         });
     }
 
@@ -225,7 +239,12 @@ export async function renderDappConnect(): Promise<void> {
             });
             if (response?.success) {
                 (window as any).showToast('连接成功', 'success');
-                (window as any).navigateTo('home');
+                const remaining = await getDappPendingConnections(account.accountId);
+                if (remaining.length > 0) {
+                    await renderDappConnect();
+                } else {
+                    (window as any).navigateTo('home');
+                }
             } else {
                 approveBtn.disabled = false;
                 (window as any).showToast(response?.error || '连接失败', 'error');

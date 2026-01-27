@@ -4,7 +4,7 @@
 
 import {
     getActiveAccount,
-    getDappSignPendingConnection,
+    getDappSignPendingConnections,
     getWalletAddresses,
     getSessionAddressKey,
     getSessionKey,
@@ -74,7 +74,9 @@ export async function renderDappSignConnect(): Promise<void> {
     const settings = await getSettings();
     const t = getText(settings.language);
     const account = await getActiveAccount();
-    const pending = account ? await getDappSignPendingConnection(account.accountId) : null;
+    const pendingList = account ? await getDappSignPendingConnections(account.accountId) : [];
+    const pending = pendingList[0] || null;
+    const pendingCount = pendingList.length;
 
     if (!account || !pending) {
         app.innerHTML = `
@@ -138,6 +140,13 @@ export async function renderDappSignConnect(): Promise<void> {
           </div>
           <div class="dapp-site-hint">${t.subtitle}</div>
         </div>
+        ${
+            pendingCount > 1
+                ? `<div style="margin: 6px 4px 12px; color: var(--text-muted); font-size: 12px;">
+                    还有 ${pendingCount - 1} 个待处理签名请求
+                  </div>`
+                : ''
+        }
 
         <div class="list-section">
           <div class="list-title">${t.addressLabel}</div>
@@ -219,7 +228,12 @@ export async function renderDappSignConnect(): Promise<void> {
                 payload: { requestId: pending.requestId },
             });
             (window as any).showToast('已拒绝签名', 'info');
-            (window as any).navigateTo('home');
+            const remaining = await getDappSignPendingConnections(account.accountId);
+            if (remaining.length > 0) {
+                await renderDappSignConnect();
+            } else {
+                (window as any).navigateTo('home');
+            }
         });
     }
 
@@ -248,7 +262,12 @@ export async function renderDappSignConnect(): Promise<void> {
 
             if (response?.success) {
                 (window as any).showToast('签名连接成功', 'success');
-                (window as any).navigateTo('home');
+                const remaining = await getDappSignPendingConnections(account.accountId);
+                if (remaining.length > 0) {
+                    await renderDappSignConnect();
+                } else {
+                    (window as any).navigateTo('home');
+                }
             } else {
                 approveBtn.disabled = false;
                 (window as any).showToast(response?.error || '签名失败', 'error');

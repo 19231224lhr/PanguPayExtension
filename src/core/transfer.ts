@@ -9,7 +9,13 @@ import {
     clearComNodeCache,
     getComNodeEndpoint,
 } from './api';
-import { buildNormalTransaction, buildTransaction, serializeAggregateGTX, serializeUserNewTX, type UserNewTX } from './txBuilder';
+import {
+    buildNormalTransaction,
+    buildTransaction,
+    serializeAggregateGTX,
+    submitTransaction,
+    type UserNewTX,
+} from './txBuilder';
 import { buildTxUserFromAccount, syncAccountAddresses } from './walletSync';
 import { getOrganization, saveTransaction, type TransactionRecord, type UserAccount } from './storage';
 import { lockUTXOs } from './utxoLock';
@@ -188,9 +194,16 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
 
     const account = await syncAccountAddresses(request.account, Array.from(addressesToSync));
     const org = await getOrganization(account.accountId);
+    const hasOrg = !!org?.groupId;
+    if (!hasOrg && request.transferMode === 'cross') {
+        return {
+            success: false,
+            error: '未加入担保组织，无法发起跨链转账',
+        };
+    }
 
     const user = buildTxUserFromAccount(account);
-    if (org?.groupId) {
+    if (hasOrg) {
         user.orgNumber = org.groupId;
         user.guarGroup = {
             groupID: org.groupId,
@@ -200,7 +213,8 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         };
     }
 
-    const preferTXCer = request.transferMode === 'quick';
+    const isCrossChain = hasOrg && request.transferMode === 'cross';
+    const preferTXCer = hasOrg && request.transferMode === 'quick';
 
     const lockedTXCerIds: string[] = [];
     try {
@@ -222,13 +236,13 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
             address: normalizeAddress(recipient.address),
             amount: recipient.amount,
             coinType: recipient.coinType,
-            publicKeyX: request.transferMode === 'cross' ? '' : pubKey.xHex,
-            publicKeyY: request.transferMode === 'cross' ? '' : pubKey.yHex,
+            publicKeyX: isCrossChain ? '' : pubKey.xHex,
+            publicKeyY: isCrossChain ? '' : pubKey.yHex,
             guarGroupID:
-                request.transferMode === 'cross'
+                isCrossChain
                     ? ''
                     : recipient.orgId || request.recipientOrgId || '',
-            interest: request.transferMode === 'cross' ? 0 : recipient.transferGas ?? request.transferGas ?? 0,
+            interest: isCrossChain ? 0 : recipient.transferGas ?? request.transferGas ?? 0,
         };
     });
 
@@ -237,7 +251,7 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         recipients,
         changeAddresses,
         gas: request.gas,
-        isCrossChain: request.transferMode === 'cross',
+        isCrossChain,
         howMuchPayForGas: request.extraGas || 0,
         preferTXCer,
     };
@@ -258,7 +272,7 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
     let aggregate: Awaited<ReturnType<typeof buildNormalTransaction>> | null = null;
 
     try {
-        if (!org?.groupId) {
+        if (!hasOrg) {
             aggregate = await buildNormalTransaction(params, user);
         } else {
             userTx = await buildTransaction(params, user);
@@ -273,7 +287,7 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         };
     }
 
-    if (!org?.groupId && aggregate) {
+    if (!hasOrg && aggregate) {
         const comNodeUrl = await getComNodeEndpoint();
         const url = buildApiUrl(comNodeUrl, API_ENDPOINTS.COM_SUBMIT_NOGUARGROUP_TX);
         const body = serializeAggregateGTX(aggregate as any);
@@ -302,7 +316,7 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         };
     }
 
-    if (!userTx || !org?.groupId) {
+    if (!userTx || !hasOrg) {
         if (lockedTXCerIds.length > 0) {
             unlockTXCers(lockedTXCerIds, false);
         }
@@ -310,12 +324,21 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
     }
 
     const assignUrl = org.assignNodeUrl ? buildNodeUrl(org.assignNodeUrl) : API_BASE_URL;
-    const submitUrl = buildApiUrl(assignUrl, API_ENDPOINTS.ASSIGN_SUBMIT_TX(org.groupId));
-    const body = serializeUserNewTX(userTx);
+    let response: Awaited<ReturnType<typeof submitTransaction>> | null = null;
+    try {
+        response = await submitTransaction(userTx, org.groupId, assignUrl);
+    } catch (error) {
+        if (lockedTXCerIds.length > 0) {
+            unlockTXCers(lockedTXCerIds, false);
+        }
+        return {
+            success: false,
+            error: mapTransferErrorMessage((error as Error).message || '提交失败'),
+        };
+    }
 
-    const response = await postWithRetry(submitUrl, body);
-    if (response.ok && response.data?.success) {
-        const txHash = response.data.tx_id || userTx.TX.TXID;
+    if (response?.success) {
+        const txHash = response.tx_id || userTx.TX.TXID;
         for (const record of txRecords) {
             record.txHash = txHash;
             await saveTransaction(account.accountId, record);
@@ -377,8 +400,6 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
     }
     return {
         success: false,
-        error: mapTransferErrorMessage(
-            response.data?.error || response.data?.message || '提交失败'
-        ),
+        error: mapTransferErrorMessage(response?.error || '提交失败'),
     };
 }

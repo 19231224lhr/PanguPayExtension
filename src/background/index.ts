@@ -19,9 +19,11 @@ import {
     removeDappConnection,
     saveDappPendingConnection,
     getDappPendingConnection,
+    getDappPendingConnectionById,
     clearDappPendingConnection,
     saveDappSignPendingConnection,
     getDappSignPendingConnection,
+    getDappSignPendingConnectionById,
     clearDappSignPendingConnection,
     getOnboardingStep,
 } from '../core/storage';
@@ -474,8 +476,16 @@ async function handleApprove(requestId: string, payload: unknown): Promise<Pangu
     }
 
     const data = payload as { requestId?: string; address?: string; origin?: string } | null;
-    const pending = await getDappPendingConnection(account.accountId);
-    if (!pending || !data?.requestId || pending.requestId !== data.requestId) {
+    if (!data?.requestId) {
+        return {
+            type: 'PANGU_RESPONSE',
+            requestId,
+            success: false,
+            error: '连接请求已失效',
+        };
+    }
+    const pending = await getDappPendingConnectionById(account.accountId, data.requestId);
+    if (!pending) {
         return {
             type: 'PANGU_RESPONSE',
             requestId,
@@ -546,8 +556,16 @@ async function handleReject(requestId: string, payload: unknown): Promise<PanguR
     }
 
     const data = payload as { requestId?: string } | null;
-    const pending = await getDappPendingConnection(account.accountId);
-    if (!pending || !data?.requestId || pending.requestId !== data.requestId) {
+    if (!data?.requestId) {
+        return {
+            type: 'PANGU_RESPONSE',
+            requestId,
+            success: false,
+            error: '连接请求已失效',
+        };
+    }
+    const pending = await getDappPendingConnectionById(account.accountId, data.requestId);
+    if (!pending) {
         return {
             type: 'PANGU_RESPONSE',
             requestId,
@@ -594,8 +612,16 @@ async function handleSignApprove(requestId: string, payload: unknown): Promise<P
         signature?: { R: string; S: string };
         publicKey?: { x: string; y: string };
     } | null;
-    const pending = await getDappSignPendingConnection(account.accountId);
-    if (!pending || !data?.requestId || pending.requestId !== data.requestId) {
+    if (!data?.requestId) {
+        return {
+            type: 'PANGU_RESPONSE',
+            requestId,
+            success: false,
+            error: '签名请求已失效',
+        };
+    }
+    const pending = await getDappSignPendingConnectionById(account.accountId, data.requestId);
+    if (!pending) {
         return {
             type: 'PANGU_RESPONSE',
             requestId,
@@ -663,8 +689,16 @@ async function handleSignReject(requestId: string, payload: unknown): Promise<Pa
     }
 
     const data = payload as { requestId?: string } | null;
-    const pending = await getDappSignPendingConnection(account.accountId);
-    if (!pending || !data?.requestId || pending.requestId !== data.requestId) {
+    if (!data?.requestId) {
+        return {
+            type: 'PANGU_RESPONSE',
+            requestId,
+            success: false,
+            error: '签名请求已失效',
+        };
+    }
+    const pending = await getDappSignPendingConnectionById(account.accountId, data.requestId);
+    if (!pending) {
         return {
             type: 'PANGU_RESPONSE',
             requestId,
