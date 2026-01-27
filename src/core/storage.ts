@@ -85,6 +85,7 @@ const STORAGE_KEYS = {
     ORGANIZATION: 'pangu_organization',
     DAPP_CONNECTIONS: 'pangu_dapp_connections',
     DAPP_PENDING: 'pangu_dapp_pending',
+    DAPP_SIGN_PENDING: 'pangu_dapp_sign_pending',
     SESSION: 'pangu_session',
 };
 
@@ -154,6 +155,13 @@ export async function deleteAccount(accountId: string): Promise<void> {
     if (dappPending[accountId]) {
         delete dappPending[accountId];
         await setStorageData(STORAGE_KEYS.DAPP_PENDING, dappPending);
+    }
+
+    const dappSignPending =
+        await getStorageData<Record<string, DappSignPendingConnection>>(STORAGE_KEYS.DAPP_SIGN_PENDING) || {};
+    if (dappSignPending[accountId]) {
+        delete dappSignPending[accountId];
+        await setStorageData(STORAGE_KEYS.DAPP_SIGN_PENDING, dappSignPending);
     }
 }
 
@@ -343,6 +351,16 @@ export interface DappPendingConnection {
     icon?: string;
 }
 
+export interface DappSignPendingConnection {
+    requestId: string;
+    accountId: string;
+    origin: string;
+    createdAt: number;
+    title?: string;
+    icon?: string;
+    message: string;
+}
+
 function normalizeOrigin(origin: string): string {
     return String(origin || '').trim().toLowerCase();
 }
@@ -426,6 +444,32 @@ export async function clearDappPendingConnection(accountId: string, requestId?: 
     if (requestId && existing.requestId !== requestId) return;
     delete pendingMap[accountId];
     await setStorageData(STORAGE_KEYS.DAPP_PENDING, pendingMap);
+}
+
+export async function saveDappSignPendingConnection(pending: DappSignPendingConnection): Promise<void> {
+    if (!pending?.accountId) return;
+    const pendingMap =
+        await getStorageData<Record<string, DappSignPendingConnection>>(STORAGE_KEYS.DAPP_SIGN_PENDING) || {};
+    pendingMap[pending.accountId] = pending;
+    await setStorageData(STORAGE_KEYS.DAPP_SIGN_PENDING, pendingMap);
+}
+
+export async function getDappSignPendingConnection(accountId: string): Promise<DappSignPendingConnection | null> {
+    if (!accountId) return null;
+    const pendingMap =
+        await getStorageData<Record<string, DappSignPendingConnection>>(STORAGE_KEYS.DAPP_SIGN_PENDING);
+    return pendingMap?.[accountId] || null;
+}
+
+export async function clearDappSignPendingConnection(accountId: string, requestId?: string): Promise<void> {
+    if (!accountId) return;
+    const pendingMap =
+        await getStorageData<Record<string, DappSignPendingConnection>>(STORAGE_KEYS.DAPP_SIGN_PENDING) || {};
+    const existing = pendingMap[accountId];
+    if (!existing) return;
+    if (requestId && existing.requestId !== requestId) return;
+    delete pendingMap[accountId];
+    await setStorageData(STORAGE_KEYS.DAPP_SIGN_PENDING, pendingMap);
 }
 
 // ========================================

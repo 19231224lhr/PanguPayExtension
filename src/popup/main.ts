@@ -9,6 +9,7 @@ import {
     getOnboardingStep,
     hydrateSession,
     getDappPendingConnection,
+    getDappSignPendingConnection,
 } from '../core/storage';
 import { startTxStatusSync } from '../core/txStatus';
 import { renderWelcome } from './pages/welcome';
@@ -26,6 +27,7 @@ import { renderSettings } from './pages/settings';
 import { renderCreate } from './pages/create';
 import { renderImport } from './pages/import';
 import { renderDappConnect } from './pages/dappConnect';
+import { renderDappSignConnect } from './pages/dappSignConnect';
 import type { PageName } from '../core/types';
 import { applyStoredSettings } from './utils/appSettings';
 
@@ -57,6 +59,7 @@ const pageRenderers: Record<PageName, PageRenderer> = {
     organization: renderOrganization,
     settings: renderSettings,
     dappConnect: renderDappConnect,
+    dappSign: renderDappSignConnect,
 };
 
 // ========================================
@@ -273,13 +276,25 @@ export const showWarningToast = (message: string, title = '', duration = 3000) =
     showWarningToast,
 };
 
-chrome.runtime.onMessage.addListener((message) => {
-    if (message?.type !== 'PANGU_UI_PENDING') return;
+const uiPort = chrome.runtime.connect({ name: 'pangu-ui' });
+
+uiPort.onMessage.addListener((message) => {
+    if (message?.type !== 'PANGU_UI_PENDING' && message?.type !== 'PANGU_UI_SIGN_PENDING') return;
     void (async () => {
         const account = await getActiveAccount();
         if (!account) return;
         if (message.accountId && message.accountId !== account.accountId) return;
-        navigateTo('dappConnect');
+        navigateTo(message.type === 'PANGU_UI_SIGN_PENDING' ? 'dappSign' : 'dappConnect');
+    })();
+});
+
+chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type !== 'PANGU_UI_PENDING' && message?.type !== 'PANGU_UI_SIGN_PENDING') return;
+    void (async () => {
+        const account = await getActiveAccount();
+        if (!account) return;
+        if (message.accountId && message.accountId !== account.accountId) return;
+        navigateTo(message.type === 'PANGU_UI_SIGN_PENDING' ? 'dappSign' : 'dappConnect');
     })();
 });
 
@@ -307,6 +322,11 @@ async function init(): Promise<void> {
             void startTxStatusSync(session.accountId);
             const step = await getOnboardingStep(session.accountId);
             if (step === 'complete') {
+                const pendingSign = await getDappSignPendingConnection(session.accountId);
+                if (pendingSign) {
+                    navigateTo('dappSign');
+                    return;
+                }
                 const pending = await getDappPendingConnection(session.accountId);
                 if (pending) {
                     navigateTo('dappConnect');
@@ -327,4 +347,6 @@ async function init(): Promise<void> {
 }
 
 // 等待 DOM 加载完成
-document.addEventListener('DOMContentLoaded', init);
+document.addEventListener('DOMContentLoaded', () => {
+    init();
+});

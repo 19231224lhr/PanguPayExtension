@@ -56,5 +56,19 @@ window.addEventListener('message', async (event) => {
     }
 });
 
+chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type !== 'PANGU_EVENT') return;
+    if (message.origin && message.origin !== window.location.origin) return;
+    window.postMessage(
+        {
+            type: 'PANGU_EVENT',
+            event: message.event,
+            origin: message.origin,
+            address: message.address || '',
+        },
+        '*'
+    );
+});
+
 // 导出空对象使其成为模块
 export { };

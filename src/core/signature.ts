@@ -212,6 +212,16 @@ export function convertPublicKeyToHex(publicKey: PublicKeyNew): { x: string; y: 
     };
 }
 
+export function signMessage(message: string, privateKeyHex: string): EcdsaSignatureWire {
+    const hashBytes = sha256.array(message || '');
+    const key = ec.keyFromPrivate(privateKeyHex, 'hex');
+    const signature = key.sign(hashBytes);
+    return {
+        R: signature.r.toString(16),
+        S: signature.s.toString(16),
+    };
+}
+
 // ============================================
 // 账户 ID 生成（对齐前端逻辑）
 // ============================================

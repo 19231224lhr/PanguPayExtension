@@ -9,6 +9,7 @@ import {
     getActiveAccount,
     getOnboardingStep,
     getDappPendingConnection,
+    getDappSignPendingConnection,
 } from '../../core/storage';
 import { syncAccountFromReOnline } from '../../core/auth';
 import { startTxStatusSync } from '../../core/txStatus';
@@ -125,6 +126,11 @@ async function handleUnlock(e: Event): Promise<void> {
         setTimeout(async () => {
             const step = await getOnboardingStep(accountId);
             if (step === 'complete') {
+                const pendingSign = await getDappSignPendingConnection(accountId);
+                if (pendingSign) {
+                    (window as any).navigateTo('dappSign');
+                    return;
+                }
                 const pending = await getDappPendingConnection(accountId);
                 (window as any).navigateTo(pending ? 'dappConnect' : 'home');
             } else {

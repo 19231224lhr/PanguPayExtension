@@ -65,6 +65,7 @@
       <p>演示网页连接钱包并获取当前站点授权地址。</p>
       <div>
         <button class="primary" id="connectBtn">连接钱包</button>
+        <button class="secondary" id="signConnectBtn">签名连接</button>
         <button class="secondary" id="getAccountBtn">获取地址</button>
       </div>
       <div class="status" id="status">等待操作...</div>
@@ -73,6 +74,7 @@
     <script>
       const statusEl = document.getElementById('status');
       const connectBtn = document.getElementById('connectBtn');
+      const signConnectBtn = document.getElementById('signConnectBtn');
       const getAccountBtn = document.getElementById('getAccountBtn');
 
       function logStatus(message, isWarn) {
@@ -87,6 +89,18 @@
         });
       }
 
+      async function setupEvents() {
+        await ensurePangu();
+        window.pangu.on('disconnect', (payload) => {
+          logStatus('已断开连接\\n' + JSON.stringify(payload || {}, null, 2), true);
+        });
+        window.pangu.on('accountChanged', (address) => {
+          logStatus('账户已变更\\n' + String(address));
+        });
+      }
+
+      setupEvents();
+
       connectBtn.addEventListener('click', async () => {
         try {
           await ensurePangu();
@@ -95,6 +109,20 @@
           logStatus('连接成功\\n' + JSON.stringify(result, null, 2));
         } catch (err) {
           logStatus('连接失败: ' + (err && err.message ? err.message : err), true);
+        }
+      });
+
+      signConnectBtn.addEventListener('click', async () => {
+        try {
+          await ensurePangu();
+          logStatus('签名连接中...');
+          const result = await window.pangu.connectSigned({
+            nonce: String(Date.now()),
+            message: 'PanguPay Sign-In',
+          });
+          logStatus('签名连接成功\\n' + JSON.stringify(result, null, 2));
+        } catch (err) {
+          logStatus('签名连接失败: ' + (err && err.message ? err.message : err), true);
         }
       });
 

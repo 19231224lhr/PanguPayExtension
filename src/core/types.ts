@@ -129,6 +129,7 @@ export interface GuarantorGroup {
 
 export type MessageType =
     | 'PANGU_CONNECT'
+    | 'PANGU_CONNECT_SIGN'
     | 'PANGU_DISCONNECT'
     | 'PANGU_GET_ACCOUNT'
     | 'PANGU_SEND_TRANSACTION'
@@ -136,6 +137,10 @@ export type MessageType =
     | 'PANGU_DAPP_GET_PENDING'
     | 'PANGU_DAPP_APPROVE'
     | 'PANGU_DAPP_REJECT'
+    | 'PANGU_DAPP_SIGN_GET_PENDING'
+    | 'PANGU_DAPP_SIGN_APPROVE'
+    | 'PANGU_DAPP_SIGN_REJECT'
+    | 'PANGU_DAPP_NOTIFY'
     | 'PANGU_CONNECTED'
     | 'PANGU_RESPONSE';
 
@@ -178,6 +183,7 @@ export type PageName =
     | 'history'
     | 'organization'
     | 'settings'
+    | 'dappSign'
     | 'dappConnect';
 
 export interface UIState {

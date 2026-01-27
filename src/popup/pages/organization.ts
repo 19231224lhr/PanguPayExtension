@@ -252,9 +252,6 @@ export async function renderOrganization(): Promise<void> {
         <button class="btn btn-secondary btn-block" onclick="skipOnboarding()">
           ${t.skip}
         </button>
-        <button class="btn btn-primary btn-block" onclick="completeOnboarding()">
-          ${t.enter}
-        </button>
       </div>
       `
         : `

@@ -574,6 +574,18 @@ async function connectWallet() {
 
 > 当前版本为“每个网站单独选一个地址”。首次连接会弹出插件，让用户选择授权地址。
 
+### 10.2.1 签名连接（登录）
+
+```javascript
+async function connectWithSign() {
+  const result = await window.pangu.connectSigned({
+    nonce: String(Date.now()),
+    message: 'PanguPay Sign-In',
+  });
+  console.log(result);
+}
+```
+
 ### 10.3 发送交易
 
 ```javascript

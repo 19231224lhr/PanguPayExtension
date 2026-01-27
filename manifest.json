@@ -28,7 +28,8 @@
     ],
     "permissions": [
         "storage",
-        "alarms"
+        "alarms",
+        "tabs"
     ],
     "host_permissions": [
         "http://*/*",

@@ -56,6 +56,10 @@ const pangu = {
         return sendMessage('PANGU_CONNECT');
     },
 
+    async connectSigned(options) {
+        return sendMessage('PANGU_CONNECT_SIGN', options || {});
+    },
+
     async disconnect() {
         return sendMessage('PANGU_DISCONNECT');
     },
@@ -96,6 +100,32 @@ const pangu = {
         }
     },
 };
+
+function emitEvent(event, payload) {
+    if (!eventListeners[event]) return;
+    eventListeners[event].forEach((listener) => {
+        try {
+            listener(payload);
+        } catch (err) {
+            console.warn('[PanguPay] Event handler error:', err);
+        }
+    });
+}
+
+window.addEventListener('message', (event) => {
+    if (event.source !== window) return;
+    if (!event.data || event.data.type !== 'PANGU_EVENT') return;
+    const evt = event.data.event;
+    if (!evt) return;
+    if (evt === 'disconnect') {
+        emitEvent('disconnect', {
+            origin: event.data.origin,
+        });
+    }
+    if (evt === 'accountChanged') {
+        emitEvent('accountChanged', event.data.address || '');
+    }
+});
 
 // 注入到 window 对象
 Object.defineProperty(window, 'pangu', {

@@ -20,6 +20,9 @@ import {
     saveDappPendingConnection,
     getDappPendingConnection,
     clearDappPendingConnection,
+    saveDappSignPendingConnection,
+    getDappSignPendingConnection,
+    clearDappSignPendingConnection,
     getOnboardingStep,
 } from '../core/storage';
 import type { PanguMessage, PanguResponse } from '../core/types';
@@ -29,6 +32,7 @@ import type { PanguMessage, PanguResponse } from '../core/types';
 // ========================================
 
 const CONNECT_TIMEOUT_MS = 120000;
+let uiPort: chrome.runtime.Port | null = null;
 
 type PendingConnect = {
     accountId: string;
@@ -38,6 +42,7 @@ type PendingConnect = {
 };
 
 const pendingConnects = new Map<string, PendingConnect>();
+const pendingSignConnects = new Map<string, PendingConnect>();
 
 type SiteInfo = {
     origin: string;
@@ -77,8 +82,19 @@ async function openPopupWindow(): Promise<void> {
     }
 }
 
+chrome.runtime.onConnect.addListener((port) => {
+    if (port.name !== 'pangu-ui') return;
+    uiPort = port;
+    port.onDisconnect.addListener(() => {
+        if (uiPort === port) uiPort = null;
+    });
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.__pangu_ui) return false;
+    if ((message?.type === 'PANGU_CONNECT' || message?.type === 'PANGU_CONNECT_SIGN') && !uiPort) {
+        void openPopupWindow();
+    }
     handleMessage(message, sender)
         .then(sendResponse)
         .catch((error) => {
@@ -98,6 +114,9 @@ async function handleMessage(
         case 'PANGU_CONNECT':
             return handleConnect(requestId, message, _sender);
 
+        case 'PANGU_CONNECT_SIGN':
+            return handleConnectSign(requestId, message, _sender);
+
         case 'PANGU_DISCONNECT':
             return handleDisconnect(requestId, message, _sender);
 
@@ -115,6 +134,18 @@ async function handleMessage(
 
         case 'PANGU_DAPP_REJECT':
             return handleReject(requestId, message.payload);
+
+        case 'PANGU_DAPP_SIGN_GET_PENDING':
+            return handleSignGetPending(requestId);
+
+        case 'PANGU_DAPP_SIGN_APPROVE':
+            return handleSignApprove(requestId, message.payload);
+
+        case 'PANGU_DAPP_SIGN_REJECT':
+            return handleSignReject(requestId, message.payload);
+
+        case 'PANGU_DAPP_NOTIFY':
+            return handleNotify(requestId, message.payload);
 
         default:
             return {
@@ -187,16 +218,18 @@ async function handleConnect(
     });
 
     try {
-        void chrome.runtime.sendMessage({
-            __pangu_ui: true,
-            type: 'PANGU_UI_PENDING',
-            accountId: account.accountId,
-        });
+        if (uiPort) {
+            uiPort.postMessage({ type: 'PANGU_UI_PENDING', accountId: account.accountId });
+        } else {
+            void chrome.runtime.sendMessage({
+                __pangu_ui: true,
+                type: 'PANGU_UI_PENDING',
+                accountId: account.accountId,
+            });
+        }
     } catch {
         // ignore
     }
-
-    void openPopupWindow();
 
     return new Promise((resolve) => {
         const timeoutId = setTimeout(async () => {
@@ -219,6 +252,100 @@ async function handleConnect(
     });
 }
 
+function buildDefaultSignMessage(origin: string, nonce: string): string {
+    const issuedAt = new Date().toISOString();
+    return [
+        'PanguPay Sign-In',
+        `Origin: ${origin}`,
+        `Nonce: ${nonce}`,
+        `Issued At: ${issuedAt}`,
+    ].join('\n');
+}
+
+async function handleConnectSign(
+    requestId: string,
+    message: PanguMessage,
+    sender: chrome.runtime.MessageSender
+): Promise<PanguResponse> {
+    const account = await getActiveAccount();
+    if (!account) {
+        return {
+            type: 'PANGU_RESPONSE',
+            requestId,
+            success: false,
+            error: '请先登录钱包',
+        };
+    }
+
+    const step = await getOnboardingStep(account.accountId);
+    if (step !== 'complete') {
+        return {
+            type: 'PANGU_RESPONSE',
+            requestId,
+            success: false,
+            error: '请先完成钱包初始化',
+        };
+    }
+
+    const site = resolveSiteInfo(message, sender);
+    if (!site.origin) {
+        return {
+            type: 'PANGU_RESPONSE',
+            requestId,
+            success: false,
+            error: '无法识别来源站点',
+        };
+    }
+
+    const payload = message.payload as { message?: string; nonce?: string } | null;
+    const nonce = payload?.nonce || Math.random().toString(36).slice(2);
+    const signMessage = payload?.message || buildDefaultSignMessage(site.origin, nonce);
+
+    await saveDappSignPendingConnection({
+        requestId,
+        accountId: account.accountId,
+        origin: site.origin,
+        createdAt: Date.now(),
+        title: site.title,
+        icon: site.icon,
+        message: signMessage,
+    });
+
+    try {
+        if (uiPort) {
+            uiPort.postMessage({ type: 'PANGU_UI_SIGN_PENDING', accountId: account.accountId });
+        } else {
+            void chrome.runtime.sendMessage({
+                __pangu_ui: true,
+                type: 'PANGU_UI_SIGN_PENDING',
+                accountId: account.accountId,
+            });
+        }
+    } catch {
+        // ignore
+    }
+
+    return new Promise((resolve) => {
+        const timeoutId = setTimeout(async () => {
+            pendingSignConnects.delete(requestId);
+            await clearDappSignPendingConnection(account.accountId, requestId);
+            resolve({
+                type: 'PANGU_RESPONSE',
+                requestId,
+                success: false,
+                error: '用户未响应签名请求',
+            });
+        }, CONNECT_TIMEOUT_MS);
+
+        pendingSignConnects.set(requestId, {
+            accountId: account.accountId,
+            origin: site.origin,
+            timeoutId: timeoutId as unknown as number,
+            resolve,
+        });
+    });
+}
+
 async function handleDisconnect(
     requestId: string,
     message: PanguMessage,
@@ -229,6 +356,10 @@ async function handleDisconnect(
 
     if (account && site.origin) {
         await removeDappConnection(account.accountId, site.origin);
+        await broadcastDappEvent(site.origin, {
+            event: 'disconnect',
+            origin: site.origin,
+        });
     }
     return {
         type: 'PANGU_RESPONSE',
@@ -300,6 +431,25 @@ async function handleGetPending(requestId: string): Promise<PanguResponse> {
         };
     }
     const pending = await getDappPendingConnection(account.accountId);
+    return {
+        type: 'PANGU_RESPONSE',
+        requestId,
+        success: true,
+        data: pending,
+    };
+}
+
+async function handleSignGetPending(requestId: string): Promise<PanguResponse> {
+    const account = await getActiveAccount();
+    if (!account) {
+        return {
+            type: 'PANGU_RESPONSE',
+            requestId,
+            success: false,
+            error: '未登录钱包',
+        };
+    }
+    const pending = await getDappSignPendingConnection(account.accountId);
     return {
         type: 'PANGU_RESPONSE',
         requestId,
@@ -421,6 +571,171 @@ async function handleReject(requestId: string, payload: unknown): Promise<PanguR
         requestId,
         success: true,
     };
+}
+
+async function handleSignApprove(requestId: string, payload: unknown): Promise<PanguResponse> {
+    const account = await getActiveAccount();
+    if (!account) {
+        return {
+            type: 'PANGU_RESPONSE',
+            requestId,
+            success: false,
+            error: '未登录钱包',
+        };
+    }
+
+    const data = payload as {
+        requestId?: string;
+        address?: string;
+        signature?: { R: string; S: string };
+        publicKey?: { x: string; y: string };
+    } | null;
+    const pending = await getDappSignPendingConnection(account.accountId);
+    if (!pending || !data?.requestId || pending.requestId !== data.requestId) {
+        return {
+            type: 'PANGU_RESPONSE',
+            requestId,
+            success: false,
+            error: '签名请求已失效',
+        };
+    }
+
+    const normalizedAddress = String(data.address || '').trim().toLowerCase();
+    if (!normalizedAddress) {
+        return {
+            type: 'PANGU_RESPONSE',
+            requestId,
+            success: false,
+            error: '请选择有效的钱包地址',
+        };
+    }
+
+    await setDappConnection(account.accountId, pending.origin, {
+        address: normalizedAddress,
+        title: pending.title,
+        icon: pending.icon,
+    });
+    await clearDappSignPendingConnection(account.accountId, pending.requestId);
+
+    const pendingResolver = pendingSignConnects.get(pending.requestId);
+    if (pendingResolver) {
+        clearTimeout(pendingResolver.timeoutId);
+        pendingSignConnects.delete(pending.requestId);
+        pendingResolver.resolve({
+            type: 'PANGU_RESPONSE',
+            requestId: pending.requestId,
+            success: true,
+            data: {
+                address: normalizedAddress,
+                accountId: account.accountId,
+                origin: pending.origin,
+                message: pending.message,
+                signature: data.signature,
+                publicKey: data.publicKey,
+            },
+        });
+    }
+
+    return {
+        type: 'PANGU_RESPONSE',
+        requestId,
+        success: true,
+        data: {
+            address: normalizedAddress,
+            origin: pending.origin,
+        },
+    };
+}
+
+async function handleSignReject(requestId: string, payload: unknown): Promise<PanguResponse> {
+    const account = await getActiveAccount();
+    if (!account) {
+        return {
+            type: 'PANGU_RESPONSE',
+            requestId,
+            success: false,
+            error: '未登录钱包',
+        };
+    }
+
+    const data = payload as { requestId?: string } | null;
+    const pending = await getDappSignPendingConnection(account.accountId);
+    if (!pending || !data?.requestId || pending.requestId !== data.requestId) {
+        return {
+            type: 'PANGU_RESPONSE',
+            requestId,
+            success: false,
+            error: '签名请求已失效',
+        };
+    }
+
+    await clearDappSignPendingConnection(account.accountId, pending.requestId);
+
+    const pendingResolver = pendingSignConnects.get(pending.requestId);
+    if (pendingResolver) {
+        clearTimeout(pendingResolver.timeoutId);
+        pendingSignConnects.delete(pending.requestId);
+        pendingResolver.resolve({
+            type: 'PANGU_RESPONSE',
+            requestId: pending.requestId,
+            success: false,
+            error: '用户拒绝签名',
+        });
+    }
+
+    return {
+        type: 'PANGU_RESPONSE',
+        requestId,
+        success: true,
+    };
+}
+
+async function handleNotify(requestId: string, payload: unknown): Promise<PanguResponse> {
+    const data = payload as { origin?: string; event?: string; address?: string } | null;
+    const origin = normalizeOrigin(data?.origin || '');
+    if (!origin || !data?.event) {
+        return {
+            type: 'PANGU_RESPONSE',
+            requestId,
+            success: false,
+            error: '缺少站点信息',
+        };
+    }
+    await broadcastDappEvent(origin, {
+        event: data.event,
+        origin,
+        address: data.address || '',
+    });
+    return {
+        type: 'PANGU_RESPONSE',
+        requestId,
+        success: true,
+    };
+}
+
+async function broadcastDappEvent(
+    origin: string,
+    payload: { event: string; origin: string; address?: string }
+): Promise<void> {
+    if (!origin) return;
+    const normalized = normalizeOrigin(origin);
+    try {
+        const tabs = await chrome.tabs.query({});
+        for (const tab of tabs) {
+            if (!tab.id) continue;
+            try {
+                await chrome.tabs.sendMessage(tab.id, {
+                    type: 'PANGU_EVENT',
+                    ...payload,
+                    origin: normalized,
+                });
+            } catch {
+                // ignore
+            }
+        }
+    } catch {
+        // ignore
+    }
 }
 
 async function handleSendTransaction(

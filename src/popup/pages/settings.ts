@@ -455,6 +455,14 @@ async function disconnectSite(origin: string): Promise<void> {
     const account = await getActiveAccount();
     if (!account) return;
     await removeDappConnection(account.accountId, origin);
+    try {
+        await chrome.runtime.sendMessage({
+            type: 'PANGU_DAPP_NOTIFY',
+            payload: { origin, event: 'disconnect' },
+        });
+    } catch {
+        // ignore
+    }
     (window as any).showToast('已断开连接', 'info');
     renderSettings();
 }
