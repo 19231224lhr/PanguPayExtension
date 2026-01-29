@@ -7,6 +7,7 @@ import {
     getOrganization,
     clearOrganization,
     saveOrganization,
+    saveAccount,
     getOnboardingStep,
     setOnboardingStep,
     type OrganizationChoice,
@@ -683,7 +684,10 @@ async function leaveOrganization(): Promise<void> {
     }
 
     await clearOrganization(account.accountId);
+    account.mainAddressRegistered = false;
+    await saveAccount(account);
     stopTxStatusSync();
+    await registerAddressesOnMainEntry(account);
     (window as any).showToast(t.toastLeft, 'info');
     renderOrganization();
 }

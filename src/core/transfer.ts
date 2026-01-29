@@ -72,6 +72,15 @@ function normalizeAddress(address: string): string {
     return address.replace(/^0x/i, '').toLowerCase();
 }
 
+function normalizeRecipientAddress(address: string, isCrossChain: boolean): string {
+    const trimmed = String(address || '').trim();
+    if (!trimmed) return '';
+    if (isCrossChain) {
+        return trimmed.toLowerCase();
+    }
+    return normalizeAddress(trimmed);
+}
+
 async function ensureOrgEndpoints(
     accountId: string,
     org: OrganizationChoice | null
@@ -241,7 +250,7 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
     if (!hasOrg && request.transferMode === 'cross') {
         return {
             success: false,
-            error: '未加入担保组织，无法发起跨链转账',
+            error: '跨链交易必须加入担保组织',
         };
     }
 
@@ -258,6 +267,23 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
 
     const isCrossChain = hasOrg && request.transferMode === 'cross';
     const preferTXCer = hasOrg && request.transferMode === 'quick';
+
+    if (isCrossChain) {
+        if (rawRecipients.length !== 1) {
+            return { success: false, error: '跨链交易限制' };
+        }
+        for (const recipient of rawRecipients) {
+            if (recipient.coinType !== 0) {
+                return { success: false, error: '跨链交易只能使用主货币' };
+            }
+            if (!Number.isInteger(recipient.amount)) {
+                return { success: false, error: '跨链金额必须为整数' };
+            }
+            if (!/^0x[a-fA-F0-9]{40}$/.test(String(recipient.address || '').trim())) {
+                return { success: false, error: '跨链地址必须为以太坊格式 (0x...)' };
+            }
+        }
+    }
 
     const lockedTXCerIds: string[] = [];
     try {
@@ -276,7 +302,7 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
     const recipients = rawRecipients.map((recipient) => {
         const pubKey = parseRecipientPubKey(recipient.publicKey || request.recipientPublicKey);
         return {
-            address: normalizeAddress(recipient.address),
+            address: normalizeRecipientAddress(recipient.address, isCrossChain),
             amount: recipient.amount,
             coinType: recipient.coinType,
             publicKeyX: isCrossChain ? '' : pubKey.xHex,

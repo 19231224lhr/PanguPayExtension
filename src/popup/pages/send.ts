@@ -83,6 +83,11 @@ export async function renderSend(): Promise<void> {
     }
 
     ensureRecipients();
+    if (selectedTransferMode === 'cross') {
+        recipients.forEach((recipient) => {
+            recipient.coinType = 0;
+        });
+    }
     currentAddresses = walletAddresses;
 
     if (!hasOrg && selectedTransferMode !== 'quick') {
@@ -312,6 +317,14 @@ function renderRecipientCard(recipient: RecipientDraft, index: number, isCrossMo
         ? `<div class="input-hint">胶囊地址已解析：${recipient.resolvedAddress.slice(0, 10)}...${recipient.resolvedAddress.slice(-6)}</div>`
         : '';
 
+    const coinOptions = isCrossMode
+        ? `<option value="0">PGC</option>`
+        : `
+                <option value="0">PGC</option>
+                <option value="1">BTC</option>
+                <option value="2">ETH</option>
+              `;
+
     return `
       <div class="recipient-card ${isExpanded ? 'expanded' : ''}" data-recipient-id="${recipient.id}">
         <div class="recipient-content">
@@ -337,10 +350,8 @@ function renderRecipientCard(recipient: RecipientDraft, index: number, isCrossMo
             </div>
             <div class="recipient-field">
               <span class="recipient-field-label">币种</span>
-              <select class="input recipient-coin-select" data-recipient-id="${recipient.id}" data-recipient-field="coinType">
-                <option value="0">PGC</option>
-                <option value="1">BTC</option>
-                <option value="2">ETH</option>
+              <select class="input recipient-coin-select" data-recipient-id="${recipient.id}" data-recipient-field="coinType" ${isCrossMode ? 'disabled' : ''}>
+                ${coinOptions}
               </select>
             </div>
           </div>
@@ -405,7 +416,11 @@ function bindRecipientInputHandlers(root: HTMLElement): void {
 
             const value = (fieldEl as HTMLInputElement).value;
             if (field === 'coinType') {
-                recipient.coinType = Number(value || 0);
+                if (selectedTransferMode === 'cross') {
+                    recipient.coinType = 0;
+                } else {
+                    recipient.coinType = Number(value || 0);
+                }
                 return;
             }
 
@@ -493,16 +508,26 @@ function setTransferMode(mode: TransferModeView): void {
             if (!account) return;
             const org = await getOrganization(account.accountId);
             if (!org || !org.groupId) {
-                (window as any).showToast('请先加入担保组织', 'info');
+                (window as any).showToast('跨链交易必须加入担保组织', 'info');
                 return;
             }
             selectedTransferMode = mode;
+            if (selectedTransferMode === 'cross') {
+                recipients.forEach((recipient) => {
+                    recipient.coinType = 0;
+                });
+            }
             renderSend();
         });
         return;
     }
 
     selectedTransferMode = mode;
+    if (selectedTransferMode === 'cross') {
+        recipients.forEach((recipient) => {
+            recipient.coinType = 0;
+        });
+    }
     renderSend();
 }
 
@@ -715,7 +740,8 @@ function clearRecipientFields(recipientId: string): void {
 
 function addRecipient(): void {
     const last = recipients[recipients.length - 1];
-    recipients.push(createRecipient(last ? last.coinType : 0));
+    const defaultCoinType = selectedTransferMode === 'cross' ? 0 : last ? last.coinType : 0;
+    recipients.push(createRecipient(defaultCoinType));
     renderSend();
 }
 
@@ -744,10 +770,10 @@ async function verifyRecipientAddress(recipientId: string): Promise<void> {
     const isCross = selectedTransferMode === 'cross';
     if (isCross) {
         if (!/^0x[a-fA-F0-9]{40}$/.test(raw)) {
-            (window as any).showToast('跨链地址需为 0x 开头的 40 位地址', 'error');
+            (window as any).showToast('跨链地址必须为以太坊格式 (0x...)', 'error');
             return;
         }
-        (window as any).showToast('跨链地址格式已验证', 'success');
+        (window as any).showToast('以太坊地址格式已验证', 'success');
         return;
     }
 
@@ -860,7 +886,7 @@ async function handleSend(e: Event): Promise<void> {
 
         const capsule = isCapsuleAddress(rawAddress);
         if (capsule && isCross) {
-            (window as any).showToast('跨链转账不支持胶囊地址', 'error');
+            (window as any).showToast('跨链模式不支持胶囊地址', 'error');
             return;
         }
 
@@ -883,7 +909,7 @@ async function handleSend(e: Event): Promise<void> {
         }
 
         if (isCross && coinType !== 0) {
-            (window as any).showToast('跨链转账仅支持 PGC', 'error');
+            (window as any).showToast('跨链交易只能使用主货币', 'error');
             return;
         }
 
@@ -899,7 +925,7 @@ async function handleSend(e: Event): Promise<void> {
         }
 
         if (isCross && !Number.isInteger(amountCheck.value)) {
-            (window as any).showToast('跨链转账金额必须为整数', 'error');
+            (window as any).showToast('跨链金额必须为整数', 'error');
             return;
         }
 
@@ -972,7 +998,7 @@ async function handleSend(e: Event): Promise<void> {
     }
 
     if (isCross && preparedRecipients.length !== 1) {
-        (window as any).showToast('跨链转账仅支持单个收款地址', 'error');
+        (window as any).showToast('跨链交易限制', 'error');
         return;
     }
 
@@ -1028,15 +1054,15 @@ async function handleSend(e: Event): Promise<void> {
 
     if (isCross) {
         if (selectedAddresses.length !== 1) {
-            (window as any).showToast('跨链转账仅支持单一来源地址', 'error');
+            (window as any).showToast('跨链交易只能有一个来源地址', 'error');
             return;
         }
         if (selectedAddresses[0].type !== 0) {
-            (window as any).showToast('跨链转账仅支持 PGC 地址', 'error');
+            (window as any).showToast('跨链交易只能使用主货币', 'error');
             return;
         }
         if (!changeAddresses[0]) {
-            (window as any).showToast('跨链转账需设置 PGC 找零地址', 'error');
+            (window as any).showToast('请为跨链交易选择主货币找零地址', 'error');
             return;
         }
     }
@@ -1143,9 +1169,9 @@ function validateRecipientAddressFormat(
     if (isCross) {
         const input = original || raw;
         if (!/^0x[a-fA-F0-9]{40}$/.test(input)) {
-            return { ok: false, normalized: '', error: '跨链地址需为 0x 开头的 40 位地址' };
+            return { ok: false, normalized: '', error: '跨链地址必须为以太坊格式 (0x...)' };
         }
-        return { ok: true, normalized: normalizeAddressInput(raw) };
+        return { ok: true, normalized: input.trim().toLowerCase() };
     }
 
     const normalized = normalizeAddressInput(raw);

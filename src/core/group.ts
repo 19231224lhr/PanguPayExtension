@@ -105,9 +105,27 @@ async function ensureAddressesBelongToTargetOrg(
     return { ok: true };
 }
 
+function normalizeAssignBase(endpoint: string): string {
+    const base = buildAssignNodeUrl(endpoint);
+    if (!base) return '';
+    try {
+        const url = new URL(base);
+        let pathname = url.pathname.replace(/\/+$/, '');
+        if (pathname.endsWith('/api/v1')) {
+            pathname = pathname.slice(0, -7);
+        } else if (pathname.endsWith('/api')) {
+            pathname = pathname.slice(0, -4);
+        }
+        url.pathname = pathname || '';
+        return url.toString().replace(/\/$/, '');
+    } catch {
+        return base.replace(/\/+$/, '');
+    }
+}
+
 function buildFlowApplyUrl(org: OrganizationChoice): string {
     const endpoint = org.assignAPIEndpoint || org.assignNodeUrl || '';
-    const base = endpoint ? buildAssignNodeUrl(endpoint) : API_BASE_URL;
+    const base = endpoint ? normalizeAssignBase(endpoint) : API_BASE_URL;
     return buildApiUrl(base, API_ENDPOINTS.ASSIGN_FLOW_APPLY(org.groupId));
 }
 
@@ -149,6 +167,9 @@ export async function joinGuarantorGroup(
     const userPublicKey = convertHexToPublicKey(pubXHex, pubYHex);
 
     const enriched = await enrichOrg(org);
+    if (!enriched.assignAPIEndpoint && !enriched.assignNodeUrl) {
+        return { success: false, error: '无法获取担保组织节点地址，请刷新组织列表后重试' };
+    }
 
     const requestBody: FlowApplyRequest = {
         Status: 1,
@@ -199,6 +220,8 @@ export async function leaveGuarantorGroup(
     const { x: pubXHex, y: pubYHex } = getPublicKeyHexFromPrivate(session.privKey);
     const userPublicKey = convertHexToPublicKey(pubXHex, pubYHex);
 
+    const enriched = await enrichOrg(org);
+
     const requestBody: FlowApplyRequest = {
         Status: 0,
         UserID: account.accountId,
@@ -213,7 +236,7 @@ export async function leaveGuarantorGroup(
 
     try {
         const response = await apiClient.request<FlowApplyResponse & { error?: string; message?: string }>(
-            buildFlowApplyUrl(org),
+            buildFlowApplyUrl(enriched),
             {
                 method: 'POST',
                 body: serializeForBackend(requestBody),
