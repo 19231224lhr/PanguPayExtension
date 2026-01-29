@@ -9,7 +9,15 @@ import {
     registerAddressOnComNode,
 } from '../../core/address';
 import { getPublicKeyFromPrivate, generateAddress, getPublicKeyHexFromPrivate } from '../../core/signature';
-import { getActiveAccount, getOrganization, getSessionKey, saveAccount, setSessionAddressKey } from '../../core/storage';
+import {
+    getActiveAccount,
+    getOrganization,
+    getOnboardingStep,
+    getSessionKey,
+    saveAccount,
+    setSessionAddressKey,
+    persistAddressKey,
+} from '../../core/storage';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 
 export function renderWalletImport(): void {
@@ -143,6 +151,8 @@ async function handleImport(e: Event): Promise<void> {
 
         const org = await getOrganization(account.accountId);
         const inOrg = !!org?.groupId;
+        const onboardingStep = await getOnboardingStep(account.accountId);
+        const isOnboarding = onboardingStep !== 'complete';
 
         if (isInGuarGroup(groupId)) {
             if (!inOrg) {
@@ -162,7 +172,7 @@ async function handleImport(e: Event): Promise<void> {
 
         const exists = !!account.addresses[normalizedAddress];
 
-        if (inOrg && !exists) {
+        if (inOrg && !exists && !isOnboarding) {
             const session = getSessionKey();
             if (!session || session.accountId !== account.accountId) {
                 (window as any).showToast('请先解锁账户私钥', 'error');
@@ -188,7 +198,7 @@ async function handleImport(e: Event): Promise<void> {
             }
         }
 
-        if (!inOrg && !exists) {
+        if (!inOrg && !exists && !isOnboarding) {
             const registerResult = await registerAddressOnComNode(
                 normalizedAddress,
                 pubXHex,
@@ -239,6 +249,10 @@ async function handleImport(e: Event): Promise<void> {
 
         await saveAccount(account);
         setSessionAddressKey(normalizedAddress, privateKey);
+        const session = getSessionKey();
+        if (session && session.accountId === account.accountId) {
+            await persistAddressKey(account.accountId, normalizedAddress, privateKey, session.privKey);
+        }
 
         (window as any).showToast(exists ? '地址已解锁' : '钱包导入成功', 'success');
         (window as any).navigateTo('walletManager');

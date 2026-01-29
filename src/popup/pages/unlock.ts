@@ -5,6 +5,7 @@
 import {
     getActiveAccountId,
     getEncryptedKey,
+    hydrateSessionAddressKeys,
     setSessionKey,
     getActiveAccount,
     getOnboardingStep,
@@ -102,6 +103,7 @@ async function handleUnlock(e: Event): Promise<void> {
 
         // 设置会话
         setSessionKey(accountId, privateKey);
+        await hydrateSessionAddressKeys(accountId, privateKey);
 
         // 同步账户状态与担保组织信息
         let syncedAccount = await getActiveAccount();

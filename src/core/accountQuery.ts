@@ -3,8 +3,15 @@
  */
 
 import type { UTXOData } from './blockchain';
-import { API_ENDPOINTS, buildApiUrl, clearComNodeCache, getComNodeEndpoint } from './api';
-import { parseBigIntJson } from './bigIntJson';
+import {
+    API_ENDPOINTS,
+    apiClient,
+    buildApiUrl,
+    clearComNodeCache,
+    getComNodeEndpoint,
+    getErrorMessage,
+    isApiError,
+} from './api';
 
 export interface QueryAddressRequest {
     address: string[];
@@ -199,16 +206,6 @@ export function convertToStorageUTXO(
     };
 }
 
-async function fetchWithTimeout(url: string, options: RequestInit, timeout = DEFAULT_TIMEOUT): Promise<Response> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
-    try {
-        return await fetch(url, { ...options, signal: controller.signal });
-    } finally {
-        clearTimeout(timer);
-    }
-}
-
 export async function queryAddressInfo(addresses: string[]): Promise<QueryResult<QueryAddressResponse>> {
     try {
         if (!addresses || addresses.length === 0) {
@@ -227,34 +224,24 @@ export async function queryAddressInfo(addresses: string[]): Promise<QueryResult
             address: normalizedAddresses,
         };
 
-        const response = await fetchWithTimeout(endpoint, {
+        const response = await apiClient.request<QueryAddressResponse>(endpoint, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(requestBody),
+            body: requestBody,
+            timeout: DEFAULT_TIMEOUT,
+            retries: 0,
+            useBigIntParsing: true,
+            silent: true,
         });
 
-        if (!response.ok) {
-            if (response.status === 503) {
-                clearComNodeCache();
-                return { success: false, error: 'Leader 节点暂时不可用，请稍后重试', isLeaderUnavailable: true };
-            }
-
-            const errorData = await response.json().catch(() => ({}));
-            return {
-                success: false,
-                error: (errorData as { error?: string }).error || '查询失败',
-            };
-        }
-
-        const responseText = await response.text();
-        const data = parseBigIntJson(responseText) as QueryAddressResponse;
-        return { success: true, data };
+        return { success: true, data: response.data };
     } catch (error) {
+        if (isApiError(error) && error.status === 503) {
+            clearComNodeCache();
+            return { success: false, error: 'Leader 节点暂时不可用，请稍后重试', isLeaderUnavailable: true };
+        }
         return {
             success: false,
-            error: error instanceof Error ? error.message : '网络错误',
+            error: getErrorMessage(error),
         };
     }
 }

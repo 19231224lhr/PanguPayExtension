@@ -1394,10 +1394,10 @@ export async function buildTransaction(
     totalValue += amount * (exchangeRates[coinType] || 1);
   }
 
-  // 构造利息回退分配
+  // 构造利息回退分配（对齐前端：固定使用第一个发送地址）
   const backAssign: Record<string, number> = {};
   if (fromAddresses.length > 0) {
-    backAssign[fromAddresses[0]] = 1.0;  // 利息回退给第一个发送地址
+    backAssign[fromAddresses[0]] = 1.0; // 利息回退给第一个发送地址
   }
 
   const transaction: Transaction = {
@@ -1583,43 +1583,38 @@ export async function queryTXStatus(
   groupID: string,
   assignNodeUrl?: string
 ): Promise<TXStatusResponse> {
-  const { API_BASE_URL, API_ENDPOINTS } = await import('./api');
+  const { API_BASE_URL, API_ENDPOINTS, apiClient, buildAssignNodeUrl, isApiError } = await import('./api');
 
-  const baseUrl = assignNodeUrl || API_BASE_URL;
+  const baseUrl = assignNodeUrl ? buildAssignNodeUrl(assignNodeUrl) : API_BASE_URL;
   const url = baseUrl + API_ENDPOINTS.ASSIGN_TX_STATUS(groupID, txID);
 
   console.log('[交易状态查询] URL:', url);
 
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: {
-      'Content-Type': 'application/json'
+  try {
+    const result = await apiClient.get<TXStatusResponse>(url, {
+      timeout: 5000,
+      retries: 0,
+      silent: true
+    });
+    console.log('[交易状态查询] 结果:', result);
+    return result;
+  } catch (error) {
+    // Treat 404 as a legitimate "not_found" state (common if the tx is dropped/rejected
+    // or status indexing hasn't happened yet).
+    if (isApiError(error) && error.status === 404) {
+      return {
+        tx_id: txID,
+        status: 'not_found',
+        receive_result: false,
+        result: false,
+        error_reason: 'transaction not found',
+        guar_id: '',
+        user_id: '',
+        block_height: 0
+      };
     }
-  });
-
-  // Treat 404 as a legitimate "not_found" state (common if the tx is dropped/rejected
-  // or status indexing hasn't happened yet).
-  if (response.status === 404) {
-    return {
-      tx_id: txID,
-      status: 'not_found',
-      receive_result: false,
-      result: false,
-      error_reason: 'transaction not found',
-      guar_id: '',
-      user_id: '',
-      block_height: 0
-    };
+    throw error instanceof Error ? error : new Error('查询交易状态失败');
   }
-
-  if (!response.ok) {
-    throw new Error(`查询交易状态失败: ${response.status} ${response.statusText}`);
-  }
-
-  const result = await response.json();
-  console.log('[交易状态查询] 结果:', result);
-
-  return result;
 }
 
 /**
@@ -1849,6 +1844,23 @@ export function waitForTXConfirmation(
 // 提交交易
 // ============================================================================
 
+function sanitizeResponseText(raw: string): string {
+  return raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+async function readResponseBody(response: Response): Promise<{ parsed: boolean; data: any; raw: string }> {
+  const raw = await response.text();
+  if (!raw) {
+    return { parsed: false, data: null, raw: '' };
+  }
+  try {
+    const data = JSON.parse(raw);
+    return { parsed: true, data, raw };
+  } catch {
+    return { parsed: false, data: null, raw };
+  }
+}
+
 /**
  * 提交交易到后端
  * 
@@ -1861,63 +1873,93 @@ export async function submitTransaction(
   groupID: string,
   assignNodeUrl?: string
 ): Promise<{ success: boolean; tx_id?: string; error?: string; errorCode?: string }> {
-  const { API_BASE_URL, API_ENDPOINTS } = await import('./api');
+  const { API_BASE_URL, API_ENDPOINTS, apiClient, buildAssignNodeUrl, isApiError } = await import('./api');
 
-  // 如果提供了 AssignNode URL，则使用它；否则使用默认的 API_BASE_URL
-  const baseUrl = assignNodeUrl || API_BASE_URL;
-  const url = baseUrl + API_ENDPOINTS.ASSIGN_SUBMIT_TX(groupID);
+  const normalizeBase = (value: string) => String(value || '').replace(/\/+$/, '');
+
+  // 如果提供了 AssignNode URL，则优先尝试直连路径 /assign/submit-tx，
+  // 失败时再回退到网关路径 /api/v1/{groupID}/assign/submit-tx。
+  const resolvedAssignUrl = assignNodeUrl ? buildAssignNodeUrl(assignNodeUrl) : '';
+  const baseUrl = normalizeBase(resolvedAssignUrl || API_BASE_URL);
+  const apiUrl = `${baseUrl}${API_ENDPOINTS.ASSIGN_SUBMIT_TX(groupID)}`;
+  const directUrl = `${baseUrl}/assign/submit-tx`;
+  const fallbackGatewayUrl =
+    resolvedAssignUrl && normalizeBase(API_BASE_URL) !== baseUrl
+      ? `${normalizeBase(API_BASE_URL)}${API_ENDPOINTS.ASSIGN_SUBMIT_TX(groupID)}`
+      : '';
+  const urlCandidates = resolvedAssignUrl
+    ? [directUrl, apiUrl, fallbackGatewayUrl].filter(Boolean)
+    : [apiUrl];
+
   const body = serializeUserNewTX(userNewTX);
 
-  console.log('[交易提交] AssignNode URL:', assignNodeUrl || '(using default API_BASE_URL)');
-  console.log('[交易提交] Full URL:', url);
+  console.log('[交易提交] AssignNode URL:', resolvedAssignUrl || '(using default API_BASE_URL)');
+  console.log('[交易提交] Submit candidates:', urlCandidates);
   console.log('[交易提交] Body:', body);
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body
-  });
+  let lastError: { message: string; status?: number } | null = null;
 
-  const result = await response.json();
+  for (let i = 0; i < urlCandidates.length; i += 1) {
+    const url = urlCandidates[i];
+    try {
+      const response = await apiClient.request<any>(url, {
+        method: 'POST',
+        body,
+        timeout: 10000,
+        retries: 0
+      });
 
-  if (result.success) {
-    console.log('[交易提交] 成功，TXID:', result.tx_id);
-  } else {
-    console.error('[交易提交] 失败:', result.error);
+      let result = (response.data && typeof response.data === 'object') ? response.data : null;
+      if (!result) {
+        return { success: false, error: '提交失败' };
+      }
 
-    // Parse specific error messages and add error codes for better handling
-    const errorMsg = result.error || '';
+      if (typeof result.success !== 'boolean') {
+        result.success = false;
+      }
 
-    // User not in organization - this typically means:
-    // 1. User imported an address that belongs to an org but never successfully joined
-    // 2. User's join request failed but frontend saved org info anyway
-    // 3. User was removed from the organization
-    if (errorMsg.includes('user is not in the guarantor') ||
-      errorMsg.includes('user not found in group') ||
-      errorMsg.includes('not in the guarantor organization')) {
-      console.warn('[交易提交] 用户不在担保组织内，可能需要重新加入组织');
-      result.errorCode = 'USER_NOT_IN_ORG';
-    }
+      if (!result.success && !result.error) {
+        result.error = '提交失败';
+      }
 
-    // Address revoked - address was unbound
-    if (errorMsg.includes('address revoked') || errorMsg.includes('already revoked')) {
-      result.errorCode = 'ADDRESS_REVOKED';
-    }
+      if (result.success) {
+        console.log('[交易提交] 成功，TXID:', result.tx_id);
+      } else {
+        console.error('[交易提交] 失败:', result.error);
 
-    // Signature verification failed
-    if (errorMsg.includes('signature verification')) {
-      result.errorCode = 'SIGNATURE_FAILED';
-    }
+        const errorMsg = result.error || '';
+        if (errorMsg.includes('user is not in the guarantor') ||
+          errorMsg.includes('user not found in group') ||
+          errorMsg.includes('not in the guarantor organization')) {
+          console.warn('[交易提交] 用户不在担保组织内，可能需要重新加入组织');
+          result.errorCode = 'USER_NOT_IN_ORG';
+        }
+        if (errorMsg.includes('address revoked') || errorMsg.includes('already revoked')) {
+          result.errorCode = 'ADDRESS_REVOKED';
+        }
+        if (errorMsg.includes('signature verification')) {
+          result.errorCode = 'SIGNATURE_FAILED';
+        }
+        if (errorMsg.includes('utxo already spent') || errorMsg.includes('double spend')) {
+          result.errorCode = 'UTXO_SPENT';
+        }
+      }
 
-    // UTXO already spent
-    if (errorMsg.includes('utxo already spent') || errorMsg.includes('double spend')) {
-      result.errorCode = 'UTXO_SPENT';
+      return result;
+    } catch (error) {
+      if (isApiError(error) && (error.status === 404 || error.status === 405) && i < urlCandidates.length - 1) {
+        lastError = { message: error.message, status: error.status };
+        continue;
+      }
+      lastError = { message: error instanceof Error ? error.message : '网络错误' };
+      if (i < urlCandidates.length - 1) {
+        continue;
+      }
+      return { success: false, error: lastError.message };
     }
   }
 
-  return result;
+  return { success: false, error: lastError?.message || '提交失败' };
 }
 
 

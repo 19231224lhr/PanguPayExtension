@@ -10,13 +10,11 @@ import {
 } from '../../core/storage';
 import { COIN_NAMES } from '../../core/types';
 import { GROUP_ID_NOT_EXIST, GROUP_ID_RETAIL, queryAddressGroupInfo } from '../../core/address';
-import { queryAddressBalances } from '../../core/accountQuery';
 import { isCapsuleAddress, verifyCapsuleAddress } from '../../core/capsule';
 import { buildAndSubmitTransfer, type TransferMode, type TransferRecipient } from '../../core/transfer';
 import { watchSubmittedTransaction } from '../../core/txStatus';
 import { isTXCerLocked } from '../../core/txCerLockManager';
 import { getLockedUTXOs } from '../../core/utxoLock';
-import { bigIntToHex } from '../../core/signature';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 import { enhanceCustomSelects } from '../utils/customSelect';
 
@@ -271,6 +269,7 @@ export async function renderSend(): Promise<void> {
     applyRecipientValues(app);
     enhanceCustomSelects(app);
     bindRecipientInputHandlers(app);
+    refreshChangeAddressOptions();
 
     const form = document.getElementById('sendForm') as HTMLFormElement | null;
     if (form) {
@@ -278,6 +277,7 @@ export async function renderSend(): Promise<void> {
     }
 
     updateSourceSummary();
+    attachAccountUpdateListener();
 }
 
 function renderSourceAddressRow(addr: AddressInfo): string {
@@ -366,7 +366,7 @@ function renderRecipientCard(recipient: RecipientDraft, index: number, isCrossMo
 
           <div class="recipient-actions">
             <button type="button" class="recipient-action-btn recipient-action-btn--ghost" onclick="toggleRecipientAdvanced('${recipient.id}')" ${isCrossMode ? 'disabled' : ''}>
-              <span>高级选项</span>
+              <span>${isExpanded ? '收起高级' : '高级选项'}</span>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="6 9 12 15 18 9"></polyline>
               </svg>
@@ -553,6 +553,7 @@ function toggleSourceAddress(address: string): void {
     }
     updateSourceListSelection();
     updateSourceSummary();
+    refreshChangeAddressOptions();
 }
 
 function updateSourceListSelection(): void {
@@ -603,6 +604,73 @@ function updateSourceSummary(): void {
     if (balanceValueEl) {
         balanceValueEl.textContent = summary.label;
     }
+}
+
+function refreshChangeAddressOptions(): void {
+    const changePGC = document.getElementById('chAddrPGC') as HTMLSelectElement | null;
+    const changeBTC = document.getElementById('chAddrBTC') as HTMLSelectElement | null;
+    const changeETH = document.getElementById('chAddrETH') as HTMLSelectElement | null;
+    const selects: Array<[number, HTMLSelectElement | null]> = [
+        [0, changePGC],
+        [1, changeBTC],
+        [2, changeETH],
+    ];
+
+    const selected = getSelectedAddresses();
+    const pool = selected.length ? selected : currentAddresses;
+
+    selects.forEach(([type, select]) => {
+        if (!select) return;
+        const previous = select.value;
+        const options = pool.filter((addr) => addr.type === type);
+
+        select.innerHTML = '';
+        if (!options.length) {
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = '无可用地址';
+            select.appendChild(opt);
+            select.disabled = true;
+        } else {
+            options.forEach((addr) => {
+                const opt = document.createElement('option');
+                opt.value = addr.address;
+                opt.textContent = `${addr.address.slice(0, 10)}...${addr.address.slice(-6)}`;
+                select.appendChild(opt);
+            });
+            select.disabled = false;
+            select.value = options.some((addr) => addr.address === previous) ? previous : options[0].address;
+        }
+
+        // Rebuild custom select wrapper to reflect updated options.
+        const wrapper = select.nextElementSibling as HTMLElement | null;
+        if (wrapper && wrapper.classList.contains('custom-select')) {
+            wrapper.remove();
+        }
+        delete select.dataset.customSelect;
+    });
+
+    enhanceCustomSelects(document);
+}
+
+function attachAccountUpdateListener(): void {
+    if (typeof window === 'undefined') return;
+    const existing = (window as any).__panguSendAccountUpdateHandler as EventListener | undefined;
+    if (existing) {
+        window.removeEventListener('pangu_account_updated', existing);
+    }
+
+    const handler = async (event: Event) => {
+        if ((window as any).__currentPage !== 'send') return;
+        const detail = (event as CustomEvent).detail || {};
+        const account = await getActiveAccount();
+        if (!account) return;
+        if (detail.accountId && detail.accountId !== account.accountId) return;
+        renderSend();
+    };
+
+    (window as any).__panguSendAccountUpdateHandler = handler;
+    window.addEventListener('pangu_account_updated', handler);
 }
 
 function toggleRecipientAdvanced(recipientId: string): void {
@@ -1025,8 +1093,25 @@ async function handleSend(e: Event): Promise<void> {
         }, 800);
     } catch (error) {
         console.error('[发送] 失败:', error);
-        (window as any).showToast('发送失败: ' + (error as Error).message, 'error');
+        const message = formatSendErrorMessage(error);
+        (window as any).showToast(message, 'error', '发送失败');
     }
+}
+
+function formatSendErrorMessage(error: unknown): string {
+    const raw = error instanceof Error ? error.message : String(error || '');
+    const message = raw.trim();
+    if (!message) {
+        return '交易提交失败，请稍后重试';
+    }
+    const lower = message.toLowerCase();
+    if (lower.includes("failed to execute 'json'") || lower.includes('unexpected end of json')) {
+        return '接口响应解析失败，请稍后重试';
+    }
+    if (lower.includes('network') || lower.includes('failed to fetch')) {
+        return '网络请求失败，请检查节点连接';
+    }
+    return message;
 }
 function hasChangeAddress(addresses: AddressInfo[], coinType: number): boolean {
     return addresses.some((item) => item.type === coinType);
@@ -1192,34 +1277,28 @@ async function fetchRecipientInfo(address: string): Promise<{
     publicKey?: string;
 } | null> {
     const normalized = normalizeAddressInput(address);
-    const result = await queryAddressBalances([normalized]);
-    if (!result.success || !result.data || !result.data.length) {
+    const result = await queryAddressGroupInfo(normalized);
+    if (!result.success || !result.data) {
         return null;
     }
 
-    const info = result.data.find((item) => item.address === normalized) || result.data[0];
-    if (!info) return null;
-
-    const exists = !!info.exists;
-    const groupId = String(info.groupID || '');
-    const isInGroup = !!info.isInGroup && groupId !== GROUP_ID_RETAIL && groupId !== GROUP_ID_NOT_EXIST;
+    const groupId = String(result.data.groupId || '');
+    const exists = groupId !== GROUP_ID_NOT_EXIST;
+    const isInGroup = exists && groupId !== GROUP_ID_RETAIL;
+    const type = Number(result.data.type ?? 0);
 
     let publicKey = '';
-    if (info.publicKey?.x && info.publicKey?.y) {
-        try {
-            const xHex = bigIntToHex(info.publicKey.x);
-            const yHex = bigIntToHex(info.publicKey.y);
-            if (xHex && yHex && !/^0+$/.test(xHex) && !/^0+$/.test(yHex)) {
-                publicKey = `${xHex},${yHex}`;
-            }
-        } catch {
-            publicKey = '';
+    if (result.data.publicKey?.x && result.data.publicKey?.y) {
+        const xHex = result.data.publicKey.x;
+        const yHex = result.data.publicKey.y;
+        if (xHex && yHex && !/^0+$/.test(xHex) && !/^0+$/.test(yHex)) {
+            publicKey = `${xHex},${yHex}`;
         }
     }
 
     return {
         exists,
-        type: Number(info.type ?? 0),
+        type,
         groupId,
         isInGroup,
         publicKey: publicKey || undefined,

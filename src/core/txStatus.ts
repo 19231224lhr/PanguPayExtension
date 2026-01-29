@@ -1,4 +1,4 @@
-import { buildNodeUrl } from './api';
+import { buildAssignNodeUrl } from './api';
 import { getOrganization, getTransactionHistory, updateTransactionStatus, type OrganizationChoice } from './storage';
 import { waitForTXConfirmation, type TXStatusResponse } from './txBuilder';
 import { startAccountPolling, stopAccountPolling } from './accountPolling';
@@ -64,7 +64,8 @@ async function watchTransactionStatus(
     activeWatchers.add(watchKey);
 
     try {
-        const assignUrl = org.assignNodeUrl ? buildNodeUrl(org.assignNodeUrl) : undefined;
+        const endpoint = org.assignAPIEndpoint || org.assignNodeUrl || '';
+        const assignUrl = endpoint ? buildAssignNodeUrl(endpoint) : undefined;
         const result = await waitForTXConfirmation(txHash, org.groupId, assignUrl, {
             pollInterval: 2000,
             maxWaitTime: 60000,
@@ -127,7 +128,7 @@ export async function startTxStatusSync(accountId: string): Promise<void> {
 
     const org = await getOrganization(accountId);
     if (org?.groupId) {
-        startAccountPolling(accountId, org.groupId, org.assignNodeUrl);
+        startAccountPolling(accountId, org.groupId, org.assignAPIEndpoint || org.assignNodeUrl);
     } else {
         stopAccountPolling();
         return;

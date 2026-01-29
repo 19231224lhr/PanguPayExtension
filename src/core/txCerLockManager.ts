@@ -234,6 +234,41 @@ export function isTXCerLocked(txCerId: string): boolean {
     return true;
 }
 
+export function getLockStatus(): {
+    lockedCount: number;
+    pendingCount: number;
+    locks: TXCerLock[];
+    pending: PendingTXCerUpdate[];
+} {
+    return {
+        lockedCount: lockedTXCers.size,
+        pendingCount: pendingUpdates.size,
+        locks: Array.from(lockedTXCers.values()),
+        pending: Array.from(pendingUpdates.values()),
+    };
+}
+
+export function forceUnlockAll(): void {
+    const count = lockedTXCers.size;
+    lockedTXCers.clear();
+    pendingUpdates.clear();
+    if (cleanupTimer) {
+        clearInterval(cleanupTimer);
+        cleanupTimer = null;
+    }
+    void ensureActiveAccount().then(persistLocks);
+    console.warn(`[TXCerLock] 强制解锁所有 TXCer (${count} 个)`);
+}
+
+export function lockTXCersFromWallet(
+    txCers: Record<string, number>,
+    reason: string = '构造交易中'
+): string[] {
+    const txCerIds = Object.keys(txCers || {});
+    if (txCerIds.length === 0) return [];
+    return lockTXCers(txCerIds, reason);
+}
+
 void getActiveAccountId().then((accountId) => {
     if (!accountId) return;
     void hydrateLocks(accountId);

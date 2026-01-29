@@ -57,15 +57,15 @@ function deriveKey(password: string, salt: CryptoJS.lib.WordArray): CryptoJS.lib
     });
 }
 
-export async function encryptPrivateKey(
-    privateKeyHex: string,
+async function encryptPayload(
+    payload: string,
     password: string
 ): Promise<EncryptResult> {
     const salt = randomBytes(SALT_LENGTH);
     const iv = randomBytes(IV_LENGTH);
     const key = deriveKey(password, salt);
 
-    const encrypted = CryptoJS.AES.encrypt(privateKeyHex, key, {
+    const encrypted = CryptoJS.AES.encrypt(payload, key, {
         iv: iv,
         mode: CryptoJS.mode.CTR,
         padding: CryptoJS.pad.NoPadding
@@ -78,7 +78,7 @@ export async function encryptPrivateKey(
     };
 }
 
-export async function decryptPrivateKey(
+async function decryptPayload(
     encryptedHex: string,
     salt: string,
     iv: string,
@@ -98,13 +98,44 @@ export async function decryptPrivateKey(
         padding: CryptoJS.pad.NoPadding
     });
 
-    const result = decrypted.toString(CryptoJS.enc.Utf8);
+    return decrypted.toString(CryptoJS.enc.Utf8);
+}
 
+export async function encryptPrivateKey(
+    privateKeyHex: string,
+    password: string
+): Promise<EncryptResult> {
+    return encryptPayload(privateKeyHex, password);
+}
+
+export async function decryptPrivateKey(
+    encryptedHex: string,
+    salt: string,
+    iv: string,
+    password: string
+): Promise<string> {
+    const result = await decryptPayload(encryptedHex, salt, iv, password);
     if (!result || result.length !== 64) {
         throw new Error('解密失败：密码错误');
     }
-
     return result;
+}
+
+export async function encryptJsonPayload<T>(payload: T, password: string): Promise<EncryptResult> {
+    return encryptPayload(JSON.stringify(payload), password);
+}
+
+export async function decryptJsonPayload<T>(
+    encryptedHex: string,
+    salt: string,
+    iv: string,
+    password: string
+): Promise<T> {
+    const result = await decryptPayload(encryptedHex, salt, iv, password);
+    if (!result) {
+        throw new Error('解密失败：内容为空');
+    }
+    return JSON.parse(result) as T;
 }
 
 export function validatePassword(password: string): { valid: boolean; message: string } {

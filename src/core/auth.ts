@@ -1,14 +1,21 @@
-import { API_BASE_URL, buildNodeUrl } from './api';
-import { parseBigIntJson } from './bigIntJson';
+import { API_BASE_URL, DEFAULT_TIMEOUT, apiClient, buildAggrNodeUrl, buildAssignNodeUrl } from './api';
 import { convertToStorageUTXO } from './accountQuery';
 import {
     clearOrganization,
+    getSessionAddressKey,
     saveAccount,
     saveOrganization,
     type OrganizationChoice,
     type UserAccount,
 } from './storage';
-import { bigIntToHex, serializeForBackend, signStruct, type PublicKeyNew } from './signature';
+import {
+    bigIntToHex,
+    convertHexToPublicKey,
+    getPublicKeyHexFromPrivate,
+    serializeForBackend,
+    signStruct,
+    type PublicKeyNew,
+} from './signature';
 
 export interface UserReOnlineMsg {
     UserID: string;
@@ -75,6 +82,26 @@ function normalizePublicKey(pub?: PublicKeyNew | null): PublicKeyNew | null {
     };
 }
 
+function normalizePubHex(value?: string): string {
+    const cleaned = String(value || '').trim().replace(/^0x/i, '').toLowerCase();
+    if (!cleaned) return '';
+    return cleaned.padStart(64, '0');
+}
+
+function isMissingPubHex(value?: string): boolean {
+    const normalized = normalizePubHex(value);
+    return !normalized || /^0+$/.test(normalized);
+}
+
+function derivePubFromPriv(privKey?: string): { x: string; y: string } | null {
+    if (!privKey) return null;
+    try {
+        return getPublicKeyHexFromPrivate(privKey);
+    } catch {
+        return null;
+    }
+}
+
 function extractTxCers(
     raw: AddressBackendData['TXCers']
 ): { txCers: Record<string, number>; txCerStore: Record<string, unknown> } {
@@ -118,13 +145,17 @@ function buildOrgChoice(result: ReturnUserReOnlineMsg): OrganizationChoice | nul
     const groupId = String(result.GuarantorGroupID || '');
     if (!groupId) return null;
     const boot = result.GuarGroupBootMsg || null;
-    const assignNodeUrl = boot?.AssignAPIEndpoint ? buildNodeUrl(boot.AssignAPIEndpoint) : '';
-    const aggrNodeUrl = boot?.AggrAPIEndpoint ? buildNodeUrl(boot.AggrAPIEndpoint) : '';
+    const assignAPIEndpoint = boot?.AssignAPIEndpoint || '';
+    const aggrAPIEndpoint = boot?.AggrAPIEndpoint || '';
+    const assignNodeUrl = assignAPIEndpoint ? buildAssignNodeUrl(assignAPIEndpoint) : '';
+    const aggrNodeUrl = aggrAPIEndpoint ? buildAggrNodeUrl(aggrAPIEndpoint) : '';
     return {
         groupId,
         groupName: boot?.GuarGroupName || groupId,
-        assignNodeUrl: assignNodeUrl,
-        aggrNodeUrl: aggrNodeUrl,
+        assignNodeUrl,
+        aggrNodeUrl,
+        assignAPIEndpoint,
+        aggrAPIEndpoint,
         pledgeAddress: boot?.PledgeAddress || '',
     };
 }
@@ -144,19 +175,16 @@ export async function userReOnline(
     const signature = signStruct(message as unknown as Record<string, unknown>, privateKeyHex, ['Sig']);
     message.Sig = { R: signature.R, S: signature.S };
 
-    const response = await fetch(`${API_BASE_URL}/api/v1/re-online`, {
+    const response = await apiClient.request<ReturnUserReOnlineMsg>(`${API_BASE_URL}/api/v1/re-online`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: serializeForBackend(message),
+        timeout: DEFAULT_TIMEOUT,
+        retries: 0,
+        useBigIntParsing: true,
     });
 
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(errorText || `HTTP ${response.status}`);
-    }
-
     const gatewayNotice = response.headers.get('X-Gateway-Notice') || '';
-    const result = parseBigIntJson<ReturnUserReOnlineMsg>(await response.text());
+    const result = response.data;
     if (gatewayNotice) result.GatewayNotice = gatewayNotice;
     return result;
 }
@@ -218,8 +246,24 @@ export async function syncAccountFromReOnline(
                 : Number(valuePayload?.TXCerValue ?? valuePayload?.txCerValue ?? 0) ||
                   Object.values(txCers).reduce((sum, val) => sum + Number(val || 0), 0);
         const normalizedPub = normalizePublicKey(payload.PublicKeyNew);
-        const pubXHex = existing.pubXHex || (normalizedPub ? bigIntToHex(normalizedPub.X) : undefined);
-        const pubYHex = existing.pubYHex || (normalizedPub ? bigIntToHex(normalizedPub.Y) : undefined);
+        let pubXHex = normalizePubHex(existing.pubXHex) || (normalizedPub ? bigIntToHex(normalizedPub.X) : undefined);
+        let pubYHex = normalizePubHex(existing.pubYHex) || (normalizedPub ? bigIntToHex(normalizedPub.Y) : undefined);
+
+        const isMain = account.mainAddress ? account.mainAddress.toLowerCase() === normalized : false;
+        const sessionPriv = isMain ? privateKeyHex : getSessionAddressKey(normalized);
+        if (isMissingPubHex(pubXHex) || isMissingPubHex(pubYHex)) {
+            const derived = derivePubFromPriv(sessionPriv);
+            if (derived) {
+                if (isMissingPubHex(pubXHex)) pubXHex = derived.x;
+                if (isMissingPubHex(pubYHex)) pubYHex = derived.y;
+            }
+        }
+
+        const resolvedPublicKey =
+            normalizedPub ||
+            (!isMissingPubHex(pubXHex) && !isMissingPubHex(pubYHex)
+                ? convertHexToPublicKey(pubXHex, pubYHex)
+                : existing.publicKeyNew);
 
         updated.addresses[normalized] = {
             ...existing,
@@ -236,15 +280,25 @@ export async function syncAccountFromReOnline(
                 txCerValue,
             },
             estInterest: Number(payload.EstInterest ?? payload.Interest ?? existing.estInterest ?? 0) || 0,
-            publicKeyNew: normalizedPub || existing.publicKeyNew,
+            EstInterest: Number(payload.EstInterest ?? payload.Interest ?? existing.EstInterest ?? 0) || 0,
+            gas: Number(payload.EstInterest ?? payload.Interest ?? (existing as any).gas ?? 0) || 0,
+            publicKeyNew: resolvedPublicKey,
             pubXHex: pubXHex || existing.pubXHex,
             pubYHex: pubYHex || existing.pubYHex,
         };
     }
 
     const totals: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
-    for (const info of Object.values(updated.addresses || {})) {
-        totals[info.type || 0] = (totals[info.type || 0] || 0) + (info.balance || 0);
+    const mainAddress = updated.mainAddress?.toLowerCase() || '';
+    for (const [addr, info] of Object.entries(updated.addresses || {})) {
+        if (mainAddress && addr.toLowerCase() === mainAddress) continue;
+        const rawTotal = Number(info.value?.totalValue);
+        const utxoValue = Number(info.value?.utxoValue ?? info.balance ?? 0) || 0;
+        const txCerValue =
+            Number(info.value?.txCerValue) ||
+            Object.values(info.txCers || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+        const totalValue = Number.isFinite(rawTotal) ? rawTotal : utxoValue + txCerValue;
+        totals[info.type || 0] = (totals[info.type || 0] || 0) + totalValue;
     }
     updated.totalBalance = totals;
     updated.lastLogin = Date.now();

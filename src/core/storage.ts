@@ -5,6 +5,7 @@
  */
 
 import type { TxCertificate, UTXOData } from './blockchain';
+import { decryptJsonPayload, encryptJsonPayload, type EncryptedKeyData } from './keyEncryption';
 
 // ========================================
 // 类型定义
@@ -30,6 +31,8 @@ export interface AddressInfo {
     txCers?: Record<string, number>;
     value?: { totalValue: number; utxoValue: number; txCerValue: number };
     estInterest?: number;
+    gas?: number;
+    EstInterest?: number;
     publicKeyNew?: { CurveName: string; X: number | string; Y: number | string };
     locked?: boolean;
 }
@@ -44,6 +47,7 @@ export interface UserAccount {
     organizationName?: string;
     onboardingComplete?: boolean;
     onboardingStep?: OnboardingStep;
+    mainAddressRegistered?: boolean;
     totalBalance: Record<number, number>; // coinType -> balance
     createdAt: number;
     lastLogin: number;
@@ -58,6 +62,8 @@ export interface EncryptedAccount {
     iv: string;
     mainAddress: string;
 }
+
+export interface EncryptedAddressKeys extends EncryptedKeyData { }
 
 export interface TransactionRecord {
     id: string;
@@ -86,6 +92,7 @@ const STORAGE_KEYS = {
     ACCOUNTS: 'pangu_accounts',
     ACTIVE_ACCOUNT: 'pangu_active_account',
     ENCRYPTED_KEYS: 'pangu_encrypted_keys',
+    ENCRYPTED_ADDRESS_KEYS: 'pangu_encrypted_address_keys',
     SETTINGS: 'pangu_settings',
     TX_HISTORY: 'pangu_tx_history',
     ORGANIZATION: 'pangu_organization',
@@ -139,6 +146,66 @@ export async function getAllAccounts(): Promise<UserAccount[]> {
     return accounts ? Object.values(accounts) : [];
 }
 
+export async function clearStaleTxCerData(accountId?: string): Promise<void> {
+    const accounts = await getStorageData<Record<string, UserAccount>>(STORAGE_KEYS.ACCOUNTS) || {};
+    const targets = accountId ? [accountId] : Object.keys(accounts);
+    let changed = false;
+
+    for (const id of targets) {
+        const account = accounts[id];
+        if (!account) continue;
+        let accountChanged = false;
+
+        if (account.txCerStore && Object.keys(account.txCerStore).length > 0) {
+            account.txCerStore = {};
+            accountChanged = true;
+        }
+
+        for (const info of Object.values(account.addresses || {})) {
+            if (!info) continue;
+            if (info.txCers && Object.keys(info.txCers).length > 0) {
+                info.txCers = {};
+                info.txCerCount = 0;
+                accountChanged = true;
+            }
+            if (info.value) {
+                if (info.value.txCerValue !== 0) {
+                    info.value.txCerValue = 0;
+                    accountChanged = true;
+                }
+                const baseUtxo = Number(info.value.utxoValue ?? info.balance ?? 0) || 0;
+                if (info.value.totalValue !== baseUtxo) {
+                    info.value.totalValue = baseUtxo;
+                    accountChanged = true;
+                }
+            } else {
+                info.value = {
+                    totalValue: info.balance || 0,
+                    utxoValue: info.balance || 0,
+                    txCerValue: 0,
+                };
+                accountChanged = true;
+            }
+        }
+
+        if (accountChanged) {
+            const totals: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
+            const mainAddress = account.mainAddress?.toLowerCase() || '';
+            for (const [addr, info] of Object.entries(account.addresses || {})) {
+                if (mainAddress && addr.toLowerCase() === mainAddress) continue;
+                totals[info.type || 0] = (totals[info.type || 0] || 0) + (info.balance || 0);
+            }
+            account.totalBalance = totals;
+            accounts[id] = account;
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        await setStorageData(STORAGE_KEYS.ACCOUNTS, accounts);
+    }
+}
+
 export async function deleteAccount(accountId: string): Promise<void> {
     const accounts = await getStorageData<Record<string, UserAccount>>(STORAGE_KEYS.ACCOUNTS) || {};
     delete accounts[accountId];
@@ -148,6 +215,11 @@ export async function deleteAccount(accountId: string): Promise<void> {
     const keys = await getStorageData<Record<string, EncryptedAccount>>(STORAGE_KEYS.ENCRYPTED_KEYS) || {};
     delete keys[accountId];
     await setStorageData(STORAGE_KEYS.ENCRYPTED_KEYS, keys);
+
+    const addressKeys =
+        await getStorageData<Record<string, EncryptedAddressKeys>>(STORAGE_KEYS.ENCRYPTED_ADDRESS_KEYS) || {};
+    delete addressKeys[accountId];
+    await setStorageData(STORAGE_KEYS.ENCRYPTED_ADDRESS_KEYS, addressKeys);
 
     const dappConnections =
         await getStorageData<Record<string, Record<string, DappConnection>>>(STORAGE_KEYS.DAPP_CONNECTIONS) || {};
@@ -244,6 +316,100 @@ export async function hasEncryptedKey(accountId: string): Promise<boolean> {
 }
 
 // ========================================
+// Encrypted Address Keys
+// ========================================
+
+export async function getEncryptedAddressKeys(accountId: string): Promise<EncryptedAddressKeys | null> {
+    const keys =
+        await getStorageData<Record<string, EncryptedAddressKeys>>(STORAGE_KEYS.ENCRYPTED_ADDRESS_KEYS);
+    return keys?.[accountId] || null;
+}
+
+export async function saveEncryptedAddressKeys(
+    accountId: string,
+    data: EncryptedAddressKeys | null
+): Promise<void> {
+    const keys =
+        await getStorageData<Record<string, EncryptedAddressKeys>>(STORAGE_KEYS.ENCRYPTED_ADDRESS_KEYS) || {};
+    if (data) {
+        keys[accountId] = data;
+    } else if (keys[accountId]) {
+        delete keys[accountId];
+    }
+    await setStorageData(STORAGE_KEYS.ENCRYPTED_ADDRESS_KEYS, keys);
+}
+
+async function readAddressKeyStore(
+    accountId: string,
+    accountPrivKey: string
+): Promise<Record<string, string>> {
+    const encrypted = await getEncryptedAddressKeys(accountId);
+    if (!encrypted) return {};
+    try {
+        const data = await decryptJsonPayload<Record<string, string>>(
+            encrypted.encrypted,
+            encrypted.salt,
+            encrypted.iv,
+            accountPrivKey
+        );
+        return data && typeof data === 'object' ? data : {};
+    } catch (error) {
+        console.warn('[Storage] 解密地址私钥失败:', error);
+        return {};
+    }
+}
+
+async function writeAddressKeyStore(
+    accountId: string,
+    accountPrivKey: string,
+    payload: Record<string, string>
+): Promise<void> {
+    const encrypted = await encryptJsonPayload(payload, accountPrivKey);
+    await saveEncryptedAddressKeys(accountId, encrypted);
+}
+
+export async function persistAddressKey(
+    accountId: string,
+    address: string,
+    privKey: string,
+    accountPrivKey: string
+): Promise<void> {
+    if (!accountId || !address || !privKey || !accountPrivKey) return;
+    const normalized = address.toLowerCase();
+    const store = await readAddressKeyStore(accountId, accountPrivKey);
+    store[normalized] = privKey;
+    await writeAddressKeyStore(accountId, accountPrivKey, store);
+}
+
+export async function removePersistedAddressKey(
+    accountId: string,
+    address: string,
+    accountPrivKey: string
+): Promise<void> {
+    if (!accountId || !address || !accountPrivKey) return;
+    const normalized = address.toLowerCase();
+    const store = await readAddressKeyStore(accountId, accountPrivKey);
+    if (store[normalized]) {
+        delete store[normalized];
+        await writeAddressKeyStore(accountId, accountPrivKey, store);
+    }
+}
+
+export async function hydrateSessionAddressKeys(
+    accountId: string,
+    accountPrivKey: string
+): Promise<void> {
+    if (!accountId || !accountPrivKey) return;
+    const store = await readAddressKeyStore(accountId, accountPrivKey);
+    for (const [addr, key] of Object.entries(store)) {
+        if (key) {
+            sessionAddressKeys.set(normalizeSessionAddressKey(addr), key);
+        }
+    }
+    void refreshSessionExpiry();
+}
+
+// ========================================
 // Transaction History
 // ========================================
 
@@ -323,6 +489,8 @@ export interface OrganizationChoice {
     groupName: string;
     assignNodeUrl: string;
     aggrNodeUrl: string;
+    assignAPIEndpoint?: string;
+    aggrAPIEndpoint?: string;
     pledgeAddress: string;
 }
 

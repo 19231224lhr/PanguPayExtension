@@ -4,10 +4,15 @@ import {
     DEFAULT_RETRY_COUNT,
     DEFAULT_TIMEOUT,
     RETRY_DELAY,
+    apiClient,
     buildApiUrl,
-    buildNodeUrl,
+    buildAggrNodeUrl,
+    buildAssignNodeUrl,
     clearComNodeCache,
     getComNodeEndpoint,
+    getGroupInfo,
+    getErrorMessage,
+    isApiError,
 } from './api';
 import {
     buildNormalTransaction,
@@ -17,7 +22,14 @@ import {
     type UserNewTX,
 } from './txBuilder';
 import { buildTxUserFromAccount, syncAccountAddresses } from './walletSync';
-import { getOrganization, saveTransaction, type TransactionRecord, type UserAccount } from './storage';
+import {
+    getOrganization,
+    saveOrganization,
+    saveTransaction,
+    type OrganizationChoice,
+    type TransactionRecord,
+    type UserAccount,
+} from './storage';
 import { lockUTXOs } from './utxoLock';
 import { lockTXCers, markTXCersSubmitted, unlockTXCers } from './txCerLockManager';
 import { COIN_NAMES } from './types';
@@ -60,6 +72,42 @@ function normalizeAddress(address: string): string {
     return address.replace(/^0x/i, '').toLowerCase();
 }
 
+async function ensureOrgEndpoints(
+    accountId: string,
+    org: OrganizationChoice | null
+): Promise<OrganizationChoice | null> {
+    if (!org?.groupId) return org;
+    if (org.assignNodeUrl && org.aggrNodeUrl) return org;
+
+    try {
+        const info = await getGroupInfo(org.groupId);
+        if (!info.success || !info.data) return org;
+        const data = info.data as {
+            assign_api_endpoint?: string;
+            aggr_api_endpoint?: string;
+            pledge_address?: string;
+            group_name?: string;
+        };
+        const assignAPIEndpoint = org.assignAPIEndpoint || data.assign_api_endpoint || '';
+        const aggrAPIEndpoint = org.aggrAPIEndpoint || data.aggr_api_endpoint || '';
+        const updated = {
+            ...org,
+            groupName: org.groupName || data.group_name || org.groupId,
+            assignAPIEndpoint,
+            aggrAPIEndpoint,
+            assignNodeUrl:
+                org.assignNodeUrl || (assignAPIEndpoint ? buildAssignNodeUrl(assignAPIEndpoint) : ''),
+            aggrNodeUrl:
+                org.aggrNodeUrl || (aggrAPIEndpoint ? buildAggrNodeUrl(aggrAPIEndpoint) : ''),
+            pledgeAddress: org.pledgeAddress || data.pledge_address || '',
+        };
+        await saveOrganization(accountId, updated);
+        return updated;
+    } catch {
+        return org;
+    }
+}
+
 function parseRecipientPubKey(input?: string): { xHex: string; yHex: string } {
     if (!input) return { xHex: '', yHex: '' };
     const trimmed = input.trim().replace(/^0x/i, '');
@@ -94,16 +142,6 @@ function collectUsedTxCerIds(userTx: UserNewTX): string[] {
     return used;
 }
 
-async function fetchWithTimeout(url: string, options: RequestInit, timeout: number): Promise<Response> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
-    try {
-        return await fetch(url, { ...options, signal: controller.signal });
-    } finally {
-        clearTimeout(timer);
-    }
-}
-
 async function postWithRetry(
     url: string,
     body: string,
@@ -111,40 +149,43 @@ async function postWithRetry(
 ): Promise<{ ok: boolean; data: any; status: number }> {
     const timeout = options.timeout ?? DEFAULT_TIMEOUT;
     const retries = options.retries ?? DEFAULT_RETRY_COUNT;
-    let lastError: Error | null = null;
 
-    for (let attempt = 0; attempt <= retries; attempt += 1) {
-        try {
-            const response = await fetchWithTimeout(
-                url,
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body,
-                },
-                timeout
-            );
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok && response.status >= 500 && attempt < retries) {
-                await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY * (attempt + 1)));
-                continue;
-            }
-            return { ok: response.ok, data, status: response.status };
-        } catch (error) {
-            lastError = error instanceof Error ? error : new Error('网络错误');
-            if (attempt < retries) {
-                await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY * (attempt + 1)));
-                continue;
-            }
-        }
+    try {
+        const response = await apiClient.request<any>(url, {
+            method: 'POST',
+            body,
+            timeout,
+            retries,
+        });
+        return { ok: response.ok, data: response.data, status: response.status };
+    } catch (error) {
+        const status = isApiError(error) ? error.status || 0 : 0;
+        const message = isApiError(error) ? error.message : getErrorMessage(error);
+        return { ok: false, data: { error: message || '网络错误' }, status };
     }
-
-    return { ok: false, data: { error: lastError?.message || '网络错误' }, status: 0 };
 }
 
-function mapTransferErrorMessage(raw: string): string {
+function mapTransferErrorMessage(raw: string, errorCode?: string): string {
     const message = raw || '提交失败';
     const lower = message.toLowerCase();
+
+    if (errorCode === 'USER_NOT_IN_ORG') {
+        return (
+            '您的账户未在后端担保组织中注册。这可能是因为：\n' +
+            '1. 您导入的地址已属于其他组织\n' +
+            '2. 加入组织时发生了错误\n' +
+            '请尝试退出当前组织并重新加入。'
+        );
+    }
+    if (errorCode === 'ADDRESS_REVOKED') {
+        return '使用的地址已被解绑，请选择其他地址';
+    }
+    if (errorCode === 'SIGNATURE_FAILED') {
+        return '签名验证失败，请检查私钥是否正确';
+    }
+    if (errorCode === 'UTXO_SPENT') {
+        return 'UTXO 已被使用，请刷新页面后重试';
+    }
 
     if (lower.includes('user is not in the guarantor') || lower.includes('not in the guarantor organization')) {
         return '用户不在担保组织内，请退出后重新加入';
@@ -194,7 +235,8 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
     }
 
     const account = await syncAccountAddresses(request.account, Array.from(addressesToSync));
-    const org = await getOrganization(account.accountId);
+    let org = await getOrganization(account.accountId);
+    org = await ensureOrgEndpoints(account.accountId, org);
     const hasOrg = !!org?.groupId;
     if (!hasOrg && request.transferMode === 'cross') {
         return {
@@ -208,8 +250,8 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         user.orgNumber = org.groupId;
         user.guarGroup = {
             groupID: org.groupId,
-            assignAPIEndpoint: org.assignNodeUrl || '',
-            aggrAPIEndpoint: org.aggrNodeUrl || '',
+            assignAPIEndpoint: org.assignAPIEndpoint || org.assignNodeUrl || '',
+            aggrAPIEndpoint: org.aggrAPIEndpoint || org.aggrNodeUrl || '',
             pledgeAddress: org.pledgeAddress || '',
         };
     }
@@ -315,12 +357,16 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         if (lockedTXCerIds.length > 0) {
             unlockTXCers(lockedTXCerIds, false);
         }
-        return {
-            success: false,
-            error: mapTransferErrorMessage(
-                response.data?.error || response.data?.message || '提交失败'
-            ),
-        };
+        const failureReason = mapTransferErrorMessage(
+            response.data?.error || response.data?.message || '提交失败'
+        );
+        for (const record of txRecords) {
+            record.status = 'failed';
+            record.failureReason = failureReason;
+            record.txHash = aggregate?.TXHash;
+            await saveTransaction(account.accountId, record);
+        }
+        return { success: false, error: failureReason };
     }
 
     if (!userTx || !hasOrg) {
@@ -330,7 +376,8 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         return { success: false, error: '交易数据不完整' };
     }
 
-    const assignUrl = org.assignNodeUrl ? buildNodeUrl(org.assignNodeUrl) : API_BASE_URL;
+    const assignEndpoint = org.assignAPIEndpoint || org.assignNodeUrl || '';
+    const assignUrl = assignEndpoint ? buildAssignNodeUrl(assignEndpoint) : API_BASE_URL;
     let response: Awaited<ReturnType<typeof submitTransaction>> | null = null;
     try {
         response = await submitTransaction(userTx, org.groupId, assignUrl);
@@ -338,10 +385,14 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         if (lockedTXCerIds.length > 0) {
             unlockTXCers(lockedTXCerIds, false);
         }
-        return {
-            success: false,
-            error: mapTransferErrorMessage((error as Error).message || '提交失败'),
-        };
+        const failureReason = mapTransferErrorMessage((error as Error).message || '提交失败');
+        for (const record of txRecords) {
+            record.status = 'failed';
+            record.failureReason = failureReason;
+            record.txHash = userTx.TX.TXID;
+            await saveTransaction(account.accountId, record);
+        }
+        return { success: false, error: failureReason };
     }
 
     if (response?.success) {
@@ -405,8 +456,15 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
     if (lockedTXCerIds.length > 0) {
         unlockTXCers(lockedTXCerIds, false);
     }
+    const failureReason = mapTransferErrorMessage(response?.error || '提交失败', (response as any)?.errorCode);
+    for (const record of txRecords) {
+        record.status = 'failed';
+        record.failureReason = failureReason;
+        record.txHash = userTx.TX.TXID;
+        await saveTransaction(account.accountId, record);
+    }
     return {
         success: false,
-        error: mapTransferErrorMessage(response?.error || '提交失败'),
+        error: failureReason,
     };
 }

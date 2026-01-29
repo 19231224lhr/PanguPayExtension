@@ -8,6 +8,7 @@ import {
     getSessionKey,
     getOnboardingStep,
     hydrateSession,
+    clearStaleTxCerData,
     getDappPendingConnection,
     getDappSignPendingConnection,
 } from '../core/storage';
@@ -306,6 +307,7 @@ async function init(): Promise<void> {
     try {
         await applyStoredSettings();
         await hydrateSession();
+        await clearStaleTxCerData();
 
         // 检查是否有账户
         const accounts = await getAllAccounts();

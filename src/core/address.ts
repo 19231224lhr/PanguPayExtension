@@ -1,21 +1,32 @@
 import {
     API_BASE_URL,
     API_ENDPOINTS,
+    DEFAULT_TIMEOUT,
+    apiClient,
     buildApiUrl,
-    buildNodeUrl,
+    buildAssignNodeUrl,
     clearComNodeCache,
     getComNodeEndpoint,
+    getErrorMessage,
+    isApiError,
 } from './api';
-import { parseBigIntJson } from './bigIntJson';
 import {
     convertHexToPublicKey,
     getTimestamp,
     serializeForBackend,
     signStruct,
+    bigIntToHex,
     type EcdsaSignature,
     type PublicKeyNew,
 } from './signature';
-import { getOrganization, getSessionKey, type OrganizationChoice } from './storage';
+import {
+    getOrganization,
+    getSessionAddressKey,
+    getSessionKey,
+    saveAccount,
+    type OrganizationChoice,
+    type UserAccount,
+} from './storage';
 
 export interface UserNewAddressInfo {
     NewAddress: string;
@@ -89,7 +100,8 @@ function normalizeAddress(address: string): string {
 }
 
 function buildAssignNewAddressUrl(org: OrganizationChoice): string {
-    const base = org.assignNodeUrl ? buildNodeUrl(org.assignNodeUrl) : API_BASE_URL;
+    const endpoint = org.assignAPIEndpoint || org.assignNodeUrl || '';
+    const base = endpoint ? buildAssignNodeUrl(endpoint) : API_BASE_URL;
     return buildApiUrl(base, API_ENDPOINTS.ASSIGN_NEW_ADDRESS(org.groupId));
 }
 
@@ -124,37 +136,18 @@ export async function createNewAddressOnBackendWithPriv(
 
         requestBody.Sig = signStruct(requestBody as unknown as Record<string, unknown>, accountPrivHex, ['Sig']);
 
-        const response = await fetch(buildAssignNewAddressUrl(org), {
+        const response = await apiClient.request<NewAddressResponse>(buildAssignNewAddressUrl(org), {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                Accept: 'application/json',
-            },
             body: serializeForBackend(requestBody),
+            timeout: DEFAULT_TIMEOUT,
+            retries: 0,
         });
 
-        let responseData: NewAddressResponse = { success: response.ok };
-        try {
-            responseData = await response.json();
-        } catch {
-            responseData = {
-                success: response.ok,
-                message: response.ok ? 'Address created' : `HTTP ${response.status}`,
-            };
-        }
-
-        if (!response.ok) {
-            return {
-                success: false,
-                error: responseData.error || responseData.message || `HTTP ${response.status}`,
-            };
-        }
-
-        return { success: true, data: responseData };
+        return { success: true, data: response.data };
     } catch (error) {
         return {
             success: false,
-            error: error instanceof Error ? error.message : '创建地址失败',
+            error: getErrorMessage(error),
         };
     }
 }
@@ -182,48 +175,28 @@ export async function registerAddressOnComNode(
 
         requestBody.Sig = signStruct(requestBody as unknown as Record<string, unknown>, privHex, ['Sig']);
 
-        const response = await fetch(buildApiUrl(comNodeURL, API_ENDPOINTS.COM_REGISTER_ADDRESS), {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                Accept: 'application/json',
-            },
-            body: serializeForBackend(requestBody),
-        });
+        const response = await apiClient.request<RegisterAddressResponse>(
+            buildApiUrl(comNodeURL, API_ENDPOINTS.COM_REGISTER_ADDRESS),
+            {
+                method: 'POST',
+                body: serializeForBackend(requestBody),
+                timeout: DEFAULT_TIMEOUT,
+                retries: 0,
+            }
+        );
 
-        let responseData: RegisterAddressResponse = { success: response.ok };
-        try {
-            const data = await response.json();
-            responseData = {
-                ...data,
-                success: typeof (data as RegisterAddressResponse).success === 'boolean' ? data.success : response.ok,
-            };
-        } catch {
-            responseData = {
-                success: response.ok,
-                message: response.ok ? 'Address registered' : `HTTP ${response.status}`,
-            };
-        }
-
-        if (!response.ok) {
-            return {
-                success: false,
-                error: responseData.error || responseData.message || `HTTP ${response.status}`,
-            };
-        }
-
-        return { success: true, data: responseData };
+        return { success: true, data: response.data };
     } catch (error) {
         return {
             success: false,
-            error: error instanceof Error ? error.message : '地址注册失败',
+            error: getErrorMessage(error),
         };
     }
 }
 
 export async function queryAddressGroupInfo(
     address: string
-): Promise<{ success: boolean; data?: { groupId: string; type: number }; error?: string }> {
+): Promise<{ success: boolean; data?: { groupId: string; type: number; publicKey?: { x: string; y: string } }; error?: string }> {
     try {
         const comNodeURL = await getComNodeEndpoint();
         if (!comNodeURL) {
@@ -231,33 +204,43 @@ export async function queryAddressGroupInfo(
         }
 
         const normalized = normalizeAddress(address);
-        const response = await fetch(buildApiUrl(comNodeURL, API_ENDPOINTS.COM_QUERY_ADDRESS_GROUP), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ address: [normalized] }),
-        });
-
-        if (!response.ok) {
-            if (response.status === 503) {
-                clearComNodeCache();
+        const response = await apiClient.request<QueryAddressGroupResponse>(
+            buildApiUrl(comNodeURL, API_ENDPOINTS.COM_QUERY_ADDRESS_GROUP),
+            {
+                method: 'POST',
+                body: { address: [normalized] },
+                timeout: DEFAULT_TIMEOUT,
+                retries: 0,
+                useBigIntParsing: true,
+                silent: true,
             }
-            const data = await response.json().catch(() => ({}));
-            return {
-                success: false,
-                error: data.error || data.message || `HTTP ${response.status}`,
-            };
-        }
+        );
 
-        const data = parseBigIntJson<QueryAddressGroupResponse>(await response.text());
+        const data = response.data;
         const info = data?.Addresstogroup?.[normalized];
         const groupId = info?.GroupID || GROUP_ID_NOT_EXIST;
         const type = typeof info?.Type === 'number' ? info.Type : Number(info?.Type ?? 0);
+        let publicKey: { x: string; y: string } | undefined;
+        if (info?.PublicKey?.X !== undefined && info?.PublicKey?.Y !== undefined) {
+            try {
+                const xHex = bigIntToHex(info.PublicKey.X);
+                const yHex = bigIntToHex(info.PublicKey.Y);
+                if (!/^0+$/.test(xHex) && !/^0+$/.test(yHex)) {
+                    publicKey = { x: xHex, y: yHex };
+                }
+            } catch {
+                publicKey = undefined;
+            }
+        }
 
-        return { success: true, data: { groupId, type } };
+        return { success: true, data: { groupId, type, publicKey } };
     } catch (error) {
+        if (isApiError(error) && error.status === 503) {
+            clearComNodeCache();
+        }
         return {
             success: false,
-            error: error instanceof Error ? error.message : '查询失败',
+            error: getErrorMessage(error),
         };
     }
 }
@@ -298,30 +281,20 @@ export async function unbindAddressOnBackend(
 
         requestBody.Sig = signStruct(requestBody as unknown as Record<string, unknown>, session.privKey, ['Sig']);
 
-        const base = org.assignNodeUrl ? buildNodeUrl(org.assignNodeUrl) : API_BASE_URL;
+        const endpoint = org.assignAPIEndpoint || org.assignNodeUrl || '';
+        const base = endpoint ? buildAssignNodeUrl(endpoint) : API_BASE_URL;
         const url = buildApiUrl(base, API_ENDPOINTS.ASSIGN_UNBIND_ADDRESS(org.groupId));
 
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                Accept: 'application/json',
-            },
-            body: serializeForBackend(requestBody),
-        });
-
-        let responseData: UnbindAddressResponse = { success: response.ok };
         try {
-            responseData = await response.json();
-        } catch {
-            responseData = {
-                success: response.ok,
-                message: response.ok ? 'Address unbound' : `HTTP ${response.status}`,
-            };
-        }
-
-        if (!response.ok) {
-            const errorMsg = responseData.error || responseData.message || `HTTP ${response.status}`;
+            const response = await apiClient.request<UnbindAddressResponse>(url, {
+                method: 'POST',
+                body: serializeForBackend(requestBody),
+                timeout: DEFAULT_TIMEOUT,
+                retries: 0,
+            });
+            return { success: true, data: response.data };
+        } catch (error) {
+            const errorMsg = getErrorMessage(error);
             if (
                 errorMsg.includes('user is not in the guarantor') ||
                 errorMsg.includes('user not found in group') ||
@@ -332,12 +305,123 @@ export async function unbindAddressOnBackend(
             }
             return { success: false, error: errorMsg };
         }
-
-        return { success: true, data: responseData };
     } catch (error) {
         return {
             success: false,
-            error: error instanceof Error ? error.message : '解绑地址失败',
+            error: getErrorMessage(error),
         };
+    }
+}
+
+type ToastType = 'success' | 'error' | 'info' | 'warning';
+
+function getToastHandler():
+    | ((message: string, type?: ToastType, title?: string, duration?: number) => void)
+    | null {
+    if (typeof window === 'undefined') return null;
+    const anyWindow = window as any;
+    if (anyWindow?.PanguPay?.ui?.showToast) return anyWindow.PanguPay.ui.showToast;
+    if (anyWindow?.showToast) return anyWindow.showToast;
+    return null;
+}
+
+function notifyToast(message: string, type: ToastType): void {
+    const handler = getToastHandler();
+    if (!handler) return;
+    handler(message, type);
+}
+
+export async function registerAddressesOnMainEntry(account: UserAccount): Promise<void> {
+    if (!account || account.mainAddressRegistered) return;
+
+    const addressMap = account.addresses || {};
+    const addresses = Object.keys(addressMap);
+    const errors: string[] = [];
+    let hadErrors = false;
+
+    if (addresses.length === 0) {
+        return;
+    }
+
+    const org = await getOrganization(account.accountId);
+
+    if (org?.groupId) {
+        const session = getSessionKey();
+        if (!session || session.accountId !== account.accountId) {
+            notifyToast('请先解锁账户私钥', 'warning');
+            return;
+        }
+
+        for (const addr of addresses) {
+            const meta = addressMap[addr];
+            const pubXHex = meta?.pubXHex || '';
+            const pubYHex = meta?.pubYHex || '';
+            const addressType = Number(meta?.type ?? 0);
+            if (!pubXHex || !pubYHex) {
+                continue;
+            }
+
+            const result = await createNewAddressOnBackendWithPriv(
+                account.accountId,
+                addr,
+                pubXHex,
+                pubYHex,
+                addressType,
+                session.privKey,
+                org
+            );
+
+            if (!result.success) {
+                errors.push(result.error);
+                hadErrors = true;
+                continue;
+            }
+            const successFlag = typeof result.data?.success === 'boolean' ? result.data.success : true;
+            if (!successFlag) {
+                const msg = result.data?.error || result.data?.message || '地址注册失败';
+                errors.push(msg);
+                hadErrors = true;
+            }
+        }
+    } else {
+        for (const addr of addresses) {
+            const meta = addressMap[addr];
+            const pubXHex = meta?.pubXHex || '';
+            const pubYHex = meta?.pubYHex || '';
+            const privHex = getSessionAddressKey(addr) || meta?.privHex || '';
+            const addressType = Number(meta?.type ?? 0);
+            if (!pubXHex || !pubYHex || !privHex) {
+                continue;
+            }
+
+            const result = await registerAddressOnComNode(
+                addr,
+                pubXHex,
+                pubYHex,
+                privHex,
+                addressType
+            );
+
+            if (!result.success) {
+                errors.push(result.error);
+                hadErrors = true;
+                continue;
+            }
+            const successFlag = typeof result.data?.success === 'boolean' ? result.data.success : true;
+            if (!successFlag) {
+                const msg = result.data?.error || result.data?.message || '地址注册失败';
+                errors.push(msg);
+                hadErrors = true;
+            }
+        }
+    }
+
+    if (errors.length > 0) {
+        notifyToast(errors[0], 'error');
+    }
+
+    if (!hadErrors) {
+        account.mainAddressRegistered = true;
+        await saveAccount(account);
     }
 }

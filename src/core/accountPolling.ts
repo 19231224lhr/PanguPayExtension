@@ -1,4 +1,12 @@
-import { API_BASE_URL, API_ENDPOINTS, buildApiUrl, buildNodeUrl } from './api';
+import {
+    API_BASE_URL,
+    API_ENDPOINTS,
+    apiClient,
+    buildApiUrl,
+    buildAssignNodeUrl,
+    isNetworkError,
+    isTimeoutError,
+} from './api';
 import { parseBigIntJson } from './bigIntJson';
 import {
     getAccount,
@@ -14,6 +22,7 @@ import {
 import { COIN_NAMES } from './types';
 import type { TxCertificate, UTXOData } from './blockchain';
 import { cacheTXCerUpdate, shouldBlockTXCerUpdate, unlockTXCers } from './txCerLockManager';
+import { unlockUTXOs } from './utxoLock';
 
 type TxStatusPayload = {
     tx_id: string;
@@ -147,6 +156,14 @@ function dispatchAccountUpdate(accountId: string): void {
     window.dispatchEvent(event);
 }
 
+function dispatchHistoryUpdate(accountId: string, txHash: string, status: string): void {
+    if (typeof window === 'undefined') return;
+    const event = new CustomEvent('pangu_tx_history_updated', {
+        detail: { accountId, txHash, status },
+    });
+    window.dispatchEvent(event);
+}
+
 function recalcAddressBalance(info: AddressInfo): void {
     const utxos = info.utxos || {};
     const txCerValue = Object.values(info.txCers || {}).reduce((sum, value) => sum + (value || 0), 0);
@@ -163,28 +180,57 @@ function recalcAddressBalance(info: AddressInfo): void {
 
 function recalcTotals(account: UserAccount): void {
     const totals: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
-    for (const info of Object.values(account.addresses || {})) {
-        totals[info.type || 0] = (totals[info.type || 0] || 0) + (info.balance || 0);
+    const mainAddress = account.mainAddress?.toLowerCase() || '';
+    for (const [addr, info] of Object.entries(account.addresses || {})) {
+        if (mainAddress && addr.toLowerCase() === mainAddress) continue;
+        const rawTotal = Number(info.value?.totalValue);
+        const utxoValue = Number(info.value?.utxoValue ?? info.balance ?? 0) || 0;
+        const txCerValue =
+            Number(info.value?.txCerValue) ||
+            Object.values(info.txCers || {}).reduce((sum, value) => sum + (Number(value) || 0), 0);
+        const totalValue = Number.isFinite(rawTotal) ? rawTotal : utxoValue + txCerValue;
+        totals[info.type || 0] = (totals[info.type || 0] || 0) + totalValue;
     }
     account.totalBalance = totals;
     account.lastLogin = Date.now();
 }
 
-async function maybeAddReceiveRecord(accountId: string, address: string, utxo: UTXOData): Promise<void> {
+async function maybeAddReceiveRecord(
+    accountId: string,
+    address: string,
+    utxo: UTXOData,
+    utxoId?: string,
+    transferMode?: TransactionRecord['transferMode']
+): Promise<boolean> {
     const txHash = utxo.UTXO?.TXID || utxo.TXID || '';
-    if (!txHash) return;
+    if (!txHash) return false;
 
     const history = await getTransactionHistory(accountId);
-    if (history.some((item) => item.txHash === txHash && item.type === 'receive')) {
-        return;
+    const outgoing = history.filter((item) => item.txHash === txHash && item.type === 'send');
+    if (outgoing.length > 0) {
+        const normalizedAddr = normalizeAddress(address);
+        const amount = Number(utxo.Value || 0) || 0;
+        const matchesRecipient = outgoing.some((item) => {
+            const toAddr = normalizeAddress(item.to || '');
+            const amt = Number(item.amount || 0) || 0;
+            return toAddr === normalizedAddr && Math.abs(amt - amount) < 1e-8;
+        });
+        if (!matchesRecipient) {
+            return false;
+        }
+    }
+
+    const recordId = utxoId ? `in_${utxoId}` : `in_${txHash}`;
+    if (history.some((item) => item.id === recordId)) {
+        return false;
     }
 
     const fromAddress = utxo.UTXO?.TXInputsNormal?.[0]?.FromAddress || '';
     const record: TransactionRecord = {
-        id: `in_${txHash}`,
+        id: recordId,
         type: 'receive',
         status: 'success',
-        transferMode: 'incoming',
+        transferMode: transferMode || 'incoming',
         amount: utxo.Value || 0,
         coinType: utxo.Type || 0,
         currency: COIN_NAMES[utxo.Type as keyof typeof COIN_NAMES] || 'PGC',
@@ -204,6 +250,7 @@ async function maybeAddReceiveRecord(accountId: string, address: string, utxo: U
             })
         );
     }
+    return true;
 }
 
 async function applyConfirmedTxIds(accountId: string, update: AccountUpdateInfo): Promise<void> {
@@ -212,9 +259,12 @@ async function applyConfirmedTxIds(accountId: string, update: AccountUpdateInfo)
 
     for (const txId of confirmed) {
         if (!txId) continue;
-        await updateTransactionStatus(accountId, txId, 'success', {
+        const changed = await updateTransactionStatus(accountId, txId, 'success', {
             blockNumber: update.BlockHeight || 0,
         });
+        if (changed) {
+            dispatchHistoryUpdate(accountId, txId, 'success');
+        }
     }
 }
 
@@ -224,7 +274,10 @@ function applyAddressInterest(account: UserAccount, update: AccountUpdateInfo): 
         const normalized = normalizeAddress(address);
         const info = account.addresses[normalized];
         if (!info) continue;
-        info.estInterest = Number(interest) || 0;
+        const next = Number(interest) || 0;
+        info.estInterest = next;
+        (info as any).EstInterest = next;
+        (info as any).gas = next;
     }
 }
 
@@ -234,7 +287,12 @@ function applyUsedTxCerInterest(account: UserAccount, update: AccountUpdateInfo)
         const normalized = normalizeAddress(used.ToAddress);
         const info = account.addresses[normalized];
         if (!info) continue;
-        info.estInterest = (info.estInterest || 0) + (used.ToInterest || 0);
+        const base =
+            Number((info as any).EstInterest ?? info.estInterest ?? (info as any).gas ?? 0) || 0;
+        const next = base + (used.ToInterest || 0);
+        info.estInterest = next;
+        (info as any).EstInterest = next;
+        (info as any).gas = next;
     }
 }
 
@@ -252,6 +310,11 @@ function removeTxCer(account: UserAccount, txCerId: string): void {
     }
 }
 
+function formatTxCerId(txCerId: string): string {
+    if (!txCerId) return '';
+    return txCerId.length > 8 ? `${txCerId.slice(0, 8)}...` : txCerId;
+}
+
 function processTxCerChange(account: UserAccount, change: TXCerChangeToUser): void {
     const txCerId = change.TXCerID;
     if (!txCerId) return;
@@ -261,10 +324,22 @@ function processTxCerChange(account: UserAccount, change: TXCerChangeToUser): vo
         return;
     }
 
-    if (change.Status === 0 || change.Status === 1) {
-        removeTxCer(account, txCerId);
-        unlockTXCers([txCerId], false);
-        return;
+    switch (change.Status) {
+        case 0:
+            removeTxCer(account, txCerId);
+            unlockTXCers([txCerId], false);
+            notifyToast(`TXCer ${formatTxCerId(txCerId)} 已转换为 UTXO`, 'success');
+            return;
+        case 1:
+            removeTxCer(account, txCerId);
+            unlockTXCers([txCerId], false);
+            notifyToast(`TXCer ${formatTxCerId(txCerId)} 验证失败`, 'error');
+            return;
+        case 2:
+            notifyToast(`TXCer ${formatTxCerId(txCerId)} 已解除怀疑`, 'info');
+            return;
+        default:
+            console.warn('[AccountPolling] Unknown TXCer status:', change.Status);
     }
 }
 
@@ -321,7 +396,36 @@ async function processAccountUpdate(account: UserAccount, update: AccountUpdateI
                 if (info.utxos[backendId]) delete info.utxos[backendId];
                 if (info.utxos[utxoId]) continue;
                 info.utxos[utxoId] = utxo;
-                void maybeAddReceiveRecord(account.accountId, normalized, utxo);
+                const exTxCerIds = utxo?.UTXO?.ExTXCerID || [];
+                if (Array.isArray(exTxCerIds) && exTxCerIds.length > 0) {
+                    for (const txCerId of exTxCerIds) {
+                        if (txCerId) {
+                            removeTxCer(account, String(txCerId));
+                        }
+                    }
+                }
+                const tx = utxo.UTXO;
+                const fromAddress = tx?.TXInputsNormal?.[0]?.FromAddress || '';
+                const isCrossChainInbound =
+                    tx?.TXType === 7 || fromAddress === 'Lightweight Computing Zone';
+                const inferredMode: TransactionRecord['transferMode'] = isCrossChainInbound
+                    ? 'cross'
+                    : tx?.TXType === 8
+                      ? 'normal'
+                      : 'quick';
+                const added = await maybeAddReceiveRecord(
+                    account.accountId,
+                    normalized,
+                    utxo,
+                    utxoId,
+                    inferredMode
+                );
+                if (added) {
+                    notifyToast(
+                        isCrossChainInbound ? '收到跨链转账交易' : '收到转账交易',
+                        'success'
+                    );
+                }
             }
 
             recalcAddressBalance(info);
@@ -331,6 +435,13 @@ async function processAccountUpdate(account: UserAccount, update: AccountUpdateI
     if (Array.isArray(update.WalletChangeData?.Out) && update.WalletChangeData.Out.length > 0) {
         const outIds = update.WalletChangeData.Out;
         const normalizedIds = outIds.map(normalizeUtxoId);
+
+        // Unlock spent UTXOs (match frontend behavior).
+        try {
+            await unlockUTXOs([...normalizedIds, ...outIds]);
+        } catch (error) {
+            console.warn('[AccountPolling] Failed to unlock UTXOs:', error);
+        }
 
         for (const info of Object.values(account.addresses || {})) {
             if (!info.utxos) continue;
@@ -357,14 +468,13 @@ async function pollAccountUpdates(force = false): Promise<void> {
         const baseUrl = activeAssignUrl || API_BASE_URL;
         const endpoint = buildApiUrl(baseUrl, API_ENDPOINTS.ASSIGN_ACCOUNT_UPDATE(activeGroupId));
         const url = `${endpoint}?userID=${activeAccountId}&consume=true`;
-        const response = await fetch(url, { method: 'GET' });
-        if (!response.ok) {
-            consecutiveFailures += 1;
-            return;
-        }
-
+        const data = await apiClient.get<AccountUpdateResponse>(url, {
+            timeout: 5000,
+            retries: 0,
+            silent: true,
+            useBigIntParsing: true,
+        });
         consecutiveFailures = 0;
-        const data = parseBigIntJson<AccountUpdateResponse>(await response.text());
         if (!data.success || !data.updates?.length) return;
 
         const account = await getAccount(activeAccountId);
@@ -378,6 +488,9 @@ async function pollAccountUpdates(force = false): Promise<void> {
         dispatchAccountUpdate(account.accountId);
     } catch (error) {
         consecutiveFailures += 1;
+        if (isNetworkError(error) || isTimeoutError(error)) {
+            // ignore, handled by retry/backoff
+        }
         if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
             stopAccountPolling();
         }
@@ -396,14 +509,13 @@ async function pollTXCerChanges(force = false): Promise<void> {
         const baseUrl = activeAssignUrl || API_BASE_URL;
         const endpoint = buildApiUrl(baseUrl, API_ENDPOINTS.ASSIGN_TXCER_CHANGE(activeGroupId));
         const url = `${endpoint}?userID=${activeAccountId}&limit=10&consume=true`;
-        const response = await fetch(url, { method: 'GET' });
-        if (!response.ok) {
-            txCerFailures += 1;
-            return;
-        }
-
+        const data = await apiClient.get<TXCerChangeResponse>(url, {
+            timeout: 5000,
+            retries: 0,
+            silent: true,
+            useBigIntParsing: true,
+        });
         txCerFailures = 0;
-        const data = parseBigIntJson<TXCerChangeResponse>(await response.text());
         if (!data.success || !data.changes?.length) return;
 
         const account = await getAccount(activeAccountId);
@@ -436,14 +548,13 @@ async function pollCrossOrgTXCers(force = false): Promise<void> {
         const baseUrl = activeAssignUrl || API_BASE_URL;
         const endpoint = buildApiUrl(baseUrl, API_ENDPOINTS.ASSIGN_CROSS_ORG_TXCER(activeGroupId));
         const url = `${endpoint}?userID=${activeAccountId}&limit=10&consume=true`;
-        const response = await fetch(url, { method: 'GET' });
-        if (!response.ok) {
-            crossOrgFailures += 1;
-            return;
-        }
-
+        const data = await apiClient.get<CrossOrgTXCerResponse>(url, {
+            timeout: 5000,
+            retries: 0,
+            silent: true,
+            useBigIntParsing: true,
+        });
         crossOrgFailures = 0;
-        const data = parseBigIntJson<CrossOrgTXCerResponse>(await response.text());
         if (!data.success || !data.txcers?.length) return;
 
         const account = await getAccount(activeAccountId);
@@ -601,6 +712,16 @@ function startSSESync(): void {
                     detail: data,
                 });
                 window.dispatchEvent(customEvent);
+                if (activeAccountId && data?.tx_id && data?.status) {
+                    void updateTransactionStatus(activeAccountId, data.tx_id, data.status as any, {
+                        blockNumber: data.block_height || 0,
+                        failureReason: data.status === 'failed' ? data.error_reason || '' : undefined,
+                    }).then((changed) => {
+                        if (changed) {
+                            dispatchHistoryUpdate(activeAccountId, data.tx_id, data.status);
+                        }
+                    });
+                }
             } catch (error) {
                 console.error('[AccountSSE] Failed to parse tx_status_change:', error);
             }
@@ -628,7 +749,7 @@ export function startAccountPolling(
     if (!accountId || !groupId) return;
     activeAccountId = accountId;
     activeGroupId = groupId;
-    activeAssignUrl = assignNodeUrl ? buildNodeUrl(assignNodeUrl) : API_BASE_URL;
+    activeAssignUrl = assignNodeUrl ? buildAssignNodeUrl(assignNodeUrl) : API_BASE_URL;
     consecutiveFailures = 0;
     hasShownAssignNodeConnectedToast = false;
     hasShownAssignNodeDisconnectedToast = false;

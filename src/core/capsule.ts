@@ -4,8 +4,15 @@
 
 import { ec as EC } from 'elliptic';
 import { sha256 } from 'js-sha256';
-import { API_BASE_URL, API_ENDPOINTS, buildApiUrl, buildNodeUrl, getComNodeEndpoint } from './api';
-import { parseBigIntJson } from './bigIntJson';
+import {
+    API_BASE_URL,
+    API_ENDPOINTS,
+    DEFAULT_TIMEOUT,
+    apiClient,
+    buildApiUrl,
+    buildAssignNodeUrl,
+    getComNodeEndpoint,
+} from './api';
 import { getOrganization, getSessionAddressKey, getSessionKey, type OrganizationChoice } from './storage';
 import {
     bigIntToHex,
@@ -143,7 +150,8 @@ function buildCacheKey(orgId: string, address: string): string {
 }
 
 function buildAssignCapsuleUrl(org: OrganizationChoice): string {
-    const base = org.assignNodeUrl ? buildNodeUrl(org.assignNodeUrl) : API_BASE_URL;
+    const endpoint = org.assignAPIEndpoint || org.assignNodeUrl || '';
+    const base = endpoint ? buildAssignNodeUrl(endpoint) : API_BASE_URL;
     return buildApiUrl(base, API_ENDPOINTS.ASSIGN_CAPSULE_GENERATE(org.groupId));
 }
 
@@ -184,19 +192,13 @@ export async function requestCapsuleAddress(accountId: string, address: string):
         ? buildAssignCapsuleUrl(org as OrganizationChoice)
         : buildApiUrl(await getComNodeEndpoint(), API_ENDPOINTS.COM_CAPSULE_GENERATE);
 
-    const response = await fetch(apiUrl, {
+    const response = await apiClient.request<CapsuleAddressReply & { error?: string; message?: string }>(apiUrl, {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-        },
         body: serializeForBackend(requestBody),
+        timeout: DEFAULT_TIMEOUT,
+        retries: 0,
     });
-
-    const data = (await response.json()) as CapsuleAddressReply & { error?: string; message?: string };
-    if (!response.ok) {
-        throw new Error(data.error || data.message || '网络请求失败');
-    }
+    const data = response.data;
     if (!data.Success) {
         throw new Error(data.ErrorMsg || '生成胶囊地址失败');
     }
@@ -237,11 +239,11 @@ async function fetchOrgPublicKey(orgId: string): Promise<PublicKeyNew> {
         if (!comNodeUrl) {
             throw new Error('ComNode 端点不可用');
         }
-        const response = await fetch(buildApiUrl(comNodeUrl, API_ENDPOINTS.COM_PUBLIC_KEY));
-        if (!response.ok) {
-            throw new Error('获取委员会公钥失败');
-        }
-        const data = parseBigIntJson<OrgPublicKeyResponse>(await response.text());
+        const data = await apiClient.get<OrgPublicKeyResponse>(buildApiUrl(comNodeUrl, API_ENDPOINTS.COM_PUBLIC_KEY), {
+            timeout: DEFAULT_TIMEOUT,
+            retries: 0,
+            useBigIntParsing: true,
+        });
         if (!data?.public_key) {
             throw new Error('未返回组织公钥');
         }
@@ -249,11 +251,14 @@ async function fetchOrgPublicKey(orgId: string): Promise<PublicKeyNew> {
         return data.public_key;
     }
 
-    const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.ORG_PUBLIC_KEY}?org_id=${encodeURIComponent(orgId)}`);
-    if (!response.ok) {
-        throw new Error('获取组织公钥失败');
-    }
-    const data = parseBigIntJson<OrgPublicKeyResponse>(await response.text());
+    const data = await apiClient.get<OrgPublicKeyResponse>(
+        `${API_BASE_URL}${API_ENDPOINTS.ORG_PUBLIC_KEY}?org_id=${encodeURIComponent(orgId)}`,
+        {
+            timeout: DEFAULT_TIMEOUT,
+            retries: 0,
+            useBigIntParsing: true,
+        }
+    );
     if (!data?.public_key) {
         throw new Error('未返回组织公钥');
     }

@@ -14,13 +14,16 @@ import {
 import {
     API_BASE_URL,
     API_ENDPOINTS,
+    apiClient,
+    buildAggrNodeUrl,
     buildApiUrl,
-    buildNodeUrl,
+    buildAssignNodeUrl,
     getGroupInfo,
     getGroupList,
     type GroupListItem,
     type GroupListResponse,
 } from '../../core/api';
+import { registerAddressesOnMainEntry } from '../../core/address';
 import { joinGuarantorGroup, leaveGuarantorGroup } from '../../core/group';
 import { startTxStatusSync, stopTxStatusSync } from '../../core/txStatus';
 import { getActiveLanguage } from '../utils/appSettings';
@@ -31,6 +34,8 @@ interface UiGroup {
     groupName: string;
     assignNodeUrl: string;
     aggrNodeUrl: string;
+    assignAPIEndpoint: string;
+    aggrAPIEndpoint: string;
     pledgeAddress: string;
     memberCount: number;
 }
@@ -193,13 +198,17 @@ function normalizeGroupDetail(groupId: string, raw: Record<string, any>): GroupD
 }
 
 function buildDetailFromOrg(org: OrganizationChoice): GroupDetailInfo {
+    const assignEndpoint = org.assignAPIEndpoint || org.assignNodeUrl || '';
+    const aggrEndpoint = org.aggrAPIEndpoint || org.aggrNodeUrl || '';
+    const assignNodeUrl = assignEndpoint ? buildAssignNodeUrl(assignEndpoint) : org.assignNodeUrl;
+    const aggrNodeUrl = aggrEndpoint ? buildAggrNodeUrl(aggrEndpoint) : org.aggrNodeUrl;
     return {
         groupId: org.groupId,
         groupName: org.groupName || org.groupId,
-        assignNode: formatNodeAddress(org.assignNodeUrl),
-        aggrNode: formatNodeAddress(org.aggrNodeUrl),
-        assignAPIEndpoint: org.assignNodeUrl || '',
-        aggrAPIEndpoint: org.aggrNodeUrl || '',
+        assignNode: formatNodeAddress(assignNodeUrl || ''),
+        aggrNode: formatNodeAddress(aggrNodeUrl || ''),
+        assignAPIEndpoint: org.assignAPIEndpoint || org.assignNodeUrl || '',
+        aggrAPIEndpoint: org.aggrAPIEndpoint || org.aggrNodeUrl || '',
         pledgeAddress: org.pledgeAddress || '',
     };
 }
@@ -311,13 +320,17 @@ export async function renderOrganization(): Promise<void> {
                     const groupId = (group as GroupListItem).group_id || (group as any).groupId || '';
                     if (!groupId) return null;
                     const groupName = (group as any).group_name || (group as any).groupName || groupId;
-                    const assignEndpoint = (group as any).assign_api_endpoint || (group as any).assignNodeUrl || '';
-                    const aggrEndpoint = (group as any).aggr_api_endpoint || (group as any).aggrNodeUrl || '';
+                    const assignEndpoint =
+                        (group as any).assign_api_endpoint || (group as any).assignNodeUrl || '';
+                    const aggrEndpoint =
+                        (group as any).aggr_api_endpoint || (group as any).aggrNodeUrl || '';
                     return {
                         groupId,
                         groupName,
-                        assignNodeUrl: assignEndpoint ? buildNodeUrl(assignEndpoint) : '',
-                        aggrNodeUrl: aggrEndpoint ? buildNodeUrl(aggrEndpoint) : '',
+                        assignAPIEndpoint: assignEndpoint,
+                        aggrAPIEndpoint: aggrEndpoint,
+                        assignNodeUrl: assignEndpoint ? buildAssignNodeUrl(assignEndpoint) : '',
+                        aggrNodeUrl: aggrEndpoint ? buildAggrNodeUrl(aggrEndpoint) : '',
                         pledgeAddress: (group as any).pledge_address || (group as any).pledgeAddress || '',
                         memberCount: (group as any).member_count || (group as any).memberCount || 0,
                     } as UiGroup;
@@ -425,7 +438,7 @@ export async function renderOrganization(): Promise<void> {
                   </div>
                   <div class="org-card-actions">
                     ${currentOrg?.groupId !== group.groupId ? `
-                    <button class="btn btn-primary btn-sm" onclick="joinOrganization('${group.groupId}', '${group.groupName}', '${group.assignNodeUrl}', '${group.aggrNodeUrl}', '${group.pledgeAddress}')">
+                    <button class="btn btn-primary btn-sm" onclick="joinOrganization('${group.groupId}', '${group.groupName}', '${group.assignAPIEndpoint}', '${group.aggrAPIEndpoint}', '${group.pledgeAddress}')">
                       ${t.join}
                     </button>
                     ` : ''}
@@ -567,17 +580,15 @@ async function handleOrgSearch(): Promise<void> {
         let payload: Record<string, any> | null = null;
 
         if (currentOrg?.groupId) {
-            const base = currentOrg.assignNodeUrl ? buildNodeUrl(currentOrg.assignNodeUrl) : API_BASE_URL;
+            const endpoint = currentOrg.assignAPIEndpoint || currentOrg.assignNodeUrl || '';
+            const base = endpoint ? buildAssignNodeUrl(endpoint) : API_BASE_URL;
             const url = buildApiUrl(
                 base,
                 `${API_ENDPOINTS.ASSIGN_GROUP_INFO(currentOrg.groupId)}?groupId=${encodeURIComponent(groupId)}`
             );
             try {
-                const response = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' } });
-                if (response.ok) {
-                    const data = await response.json();
-                    payload = (data as any)?.group_msg || (data as any)?.GroupMsg || (data as any)?.data || data;
-                }
+                const data = await apiClient.get<any>(url, { timeout: 5000, retries: 0, silent: true });
+                payload = data?.group_msg || data?.GroupMsg || data?.data || data;
             } catch (error) {
                 console.warn('[组织查询] AssignNode 查询失败，改用 BootNode:', error);
             }
@@ -612,8 +623,8 @@ async function handleOrgSearch(): Promise<void> {
 async function joinOrganization(
     groupId: string,
     groupName: string,
-    assignNodeUrl: string,
-    aggrNodeUrl: string,
+    assignAPIEndpoint: string,
+    aggrAPIEndpoint: string,
     pledgeAddress: string
 ) {
     const t = getText();
@@ -622,11 +633,15 @@ async function joinOrganization(
     const step = await getOnboardingStep(account.accountId);
     const wasOnboarding = step === 'organization';
 
+    const assignNodeUrl = assignAPIEndpoint ? buildAssignNodeUrl(assignAPIEndpoint) : '';
+    const aggrNodeUrl = aggrAPIEndpoint ? buildAggrNodeUrl(aggrAPIEndpoint) : '';
     const org: OrganizationChoice = {
         groupId,
         groupName,
         assignNodeUrl,
         aggrNodeUrl,
+        assignAPIEndpoint,
+        aggrAPIEndpoint,
         pledgeAddress,
     };
 
@@ -643,6 +658,7 @@ async function joinOrganization(
     void startTxStatusSync(account.accountId);
 
     if (wasOnboarding) {
+        await registerAddressesOnMainEntry(account);
         await setOnboardingStep(account.accountId, 'complete');
         (window as any).navigateTo('home');
         return;

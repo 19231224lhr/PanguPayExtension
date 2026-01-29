@@ -1,4 +1,14 @@
-import { API_BASE_URL, API_ENDPOINTS, buildApiUrl, buildNodeUrl, getGroupInfo } from './api';
+import {
+    API_BASE_URL,
+    API_ENDPOINTS,
+    DEFAULT_TIMEOUT,
+    apiClient,
+    buildAggrNodeUrl,
+    buildApiUrl,
+    buildAssignNodeUrl,
+    getErrorMessage,
+    getGroupInfo,
+} from './api';
 import { isInGuarGroup, queryAddressGroupInfo } from './address';
 import {
     getSessionKey,
@@ -54,11 +64,17 @@ async function enrichOrg(org: OrganizationChoice): Promise<OrganizationChoice> {
         group_name?: string;
     };
 
+    const assignAPIEndpoint = org.assignAPIEndpoint || data.assign_api_endpoint || '';
+    const aggrAPIEndpoint = org.aggrAPIEndpoint || data.aggr_api_endpoint || '';
     return {
         ...org,
         groupName: org.groupName || data.group_name || org.groupId,
-        assignNodeUrl: org.assignNodeUrl || (data.assign_api_endpoint ? buildNodeUrl(data.assign_api_endpoint) : ''),
-        aggrNodeUrl: org.aggrNodeUrl || (data.aggr_api_endpoint ? buildNodeUrl(data.aggr_api_endpoint) : ''),
+        assignAPIEndpoint,
+        aggrAPIEndpoint,
+        assignNodeUrl:
+            org.assignNodeUrl || (assignAPIEndpoint ? buildAssignNodeUrl(assignAPIEndpoint) : ''),
+        aggrNodeUrl:
+            org.aggrNodeUrl || (aggrAPIEndpoint ? buildAggrNodeUrl(aggrAPIEndpoint) : ''),
         pledgeAddress: org.pledgeAddress || data.pledge_address || '',
     };
 }
@@ -90,7 +106,8 @@ async function ensureAddressesBelongToTargetOrg(
 }
 
 function buildFlowApplyUrl(org: OrganizationChoice): string {
-    const base = org.assignNodeUrl ? buildNodeUrl(org.assignNodeUrl) : API_BASE_URL;
+    const endpoint = org.assignAPIEndpoint || org.assignNodeUrl || '';
+    const base = endpoint ? buildAssignNodeUrl(endpoint) : API_BASE_URL;
     return buildApiUrl(base, API_ENDPOINTS.ASSIGN_FLOW_APPLY(org.groupId));
 }
 
@@ -145,31 +162,29 @@ export async function joinGuarantorGroup(
 
     requestBody.UserSig = signStruct(requestBody as unknown as Record<string, unknown>, session.privKey, ['UserSig']);
 
-    const response = await fetch(buildFlowApplyUrl(enriched), {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-        },
-        body: serializeForBackend(requestBody),
-    });
+    try {
+        const response = await apiClient.request<FlowApplyResponse & { error?: string; message?: string }>(
+            buildFlowApplyUrl(enriched),
+            {
+                method: 'POST',
+                body: serializeForBackend(requestBody),
+                timeout: DEFAULT_TIMEOUT,
+                retries: 0,
+            }
+        );
+        const data = response.data;
 
-    const data = (await response.json()) as FlowApplyResponse & { error?: string; message?: string };
-    if (!response.ok) {
-        return {
-            success: false,
-            error: data.error || data.message || `HTTP ${response.status}`,
-        };
+        if (!data.result) {
+            return {
+                success: false,
+                error: data.error || data.message || '加入担保组织失败',
+            };
+        }
+
+        return { success: true, org: enriched };
+    } catch (error) {
+        return { success: false, error: getErrorMessage(error) };
     }
-
-    if (!data.result) {
-        return {
-            success: false,
-            error: data.error || data.message || '加入担保组织失败',
-        };
-    }
-
-    return { success: true, org: enriched };
 }
 
 export async function leaveGuarantorGroup(
@@ -196,29 +211,27 @@ export async function leaveGuarantorGroup(
 
     requestBody.UserSig = signStruct(requestBody as unknown as Record<string, unknown>, session.privKey, ['UserSig']);
 
-    const response = await fetch(buildFlowApplyUrl(org), {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-        },
-        body: serializeForBackend(requestBody),
-    });
+    try {
+        const response = await apiClient.request<FlowApplyResponse & { error?: string; message?: string }>(
+            buildFlowApplyUrl(org),
+            {
+                method: 'POST',
+                body: serializeForBackend(requestBody),
+                timeout: DEFAULT_TIMEOUT,
+                retries: 0,
+            }
+        );
+        const data = response.data;
 
-    const data = (await response.json()) as FlowApplyResponse & { error?: string; message?: string };
-    if (!response.ok) {
-        return {
-            success: false,
-            error: data.error || data.message || `HTTP ${response.status}`,
-        };
+        if (!data.result) {
+            return {
+                success: false,
+                error: data.error || data.message || '退出担保组织失败',
+            };
+        }
+
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: getErrorMessage(error) };
     }
-
-    if (!data.result) {
-        return {
-            success: false,
-            error: data.error || data.message || '退出担保组织失败',
-        };
-    }
-
-    return { success: true };
 }

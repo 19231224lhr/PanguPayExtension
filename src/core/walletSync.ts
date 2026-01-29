@@ -2,6 +2,7 @@ import type { AddressData, User } from './txUser';
 import type { UserAccount } from './storage';
 import { getSessionAddressKey, getSessionKey, saveAccount } from './storage';
 import { buildAddressBalanceInfo, convertToStorageUTXO, queryAddressInfo } from './accountQuery';
+import { convertHexToPublicKey, getPublicKeyHexFromPrivate } from './signature';
 
 function toHexFromDec(value: number | string): string {
     try {
@@ -9,6 +10,26 @@ function toHexFromDec(value: number | string): string {
         return bi.toString(16).padStart(64, '0');
     } catch {
         return '';
+    }
+}
+
+function normalizePubHex(value?: string): string {
+    const cleaned = String(value || '').trim().replace(/^0x/i, '').toLowerCase();
+    if (!cleaned) return '';
+    return cleaned.padStart(64, '0');
+}
+
+function isMissingPubHex(value?: string): boolean {
+    const normalized = normalizePubHex(value);
+    return !normalized || /^0+$/.test(normalized);
+}
+
+function derivePubFromPriv(privKey?: string): { x: string; y: string } | null {
+    if (!privKey) return null;
+    try {
+        return getPublicKeyHexFromPrivate(privKey);
+    } catch {
+        return null;
     }
 }
 
@@ -35,6 +56,10 @@ export async function syncAccountAddresses(
             utxoCount: 0,
             txCerCount: 0,
         };
+        const existingTxCerValue = Object.values(existing.txCers || {}).reduce(
+            (sum, value) => sum + (Number(value) || 0),
+            0
+        );
 
         const utxos: Record<string, ReturnType<typeof convertToStorageUTXO>> = {};
         const rawUtxos = info.utxos || {};
@@ -42,12 +67,30 @@ export async function syncAccountAddresses(
             utxos[key] = convertToStorageUTXO(key, utxo, normalized);
         }
 
-        const pubXHex =
-            existing.pubXHex ||
+        let pubXHex =
+            normalizePubHex(existing.pubXHex) ||
             toHexFromDec(data?.PublicKeyNew?.X || info.publicKey.x || '0');
-        const pubYHex =
-            existing.pubYHex ||
+        let pubYHex =
+            normalizePubHex(existing.pubYHex) ||
             toHexFromDec(data?.PublicKeyNew?.Y || info.publicKey.y || '0');
+
+        const isMain = account.mainAddress
+            ? account.mainAddress.toLowerCase() === normalized
+            : false;
+        const sessionPriv = isMain ? getSessionKey()?.privKey : getSessionAddressKey(normalized);
+        if (isMissingPubHex(pubXHex) || isMissingPubHex(pubYHex)) {
+            const derived = derivePubFromPriv(sessionPriv);
+            if (derived) {
+                if (isMissingPubHex(pubXHex)) pubXHex = derived.x;
+                if (isMissingPubHex(pubYHex)) pubYHex = derived.y;
+            }
+        }
+
+        const resolvedPublicKey =
+            data?.PublicKeyNew ||
+            (!isMissingPubHex(pubXHex) && !isMissingPubHex(pubYHex)
+                ? convertHexToPublicKey(pubXHex, pubYHex)
+                : existing.publicKeyNew);
 
         account.addresses[normalized] = {
             ...existing,
@@ -55,16 +98,18 @@ export async function syncAccountAddresses(
             type: info.type || existing.type || 0,
             balance: info.balance || 0,
             utxoCount: info.utxoCount || 0,
-            txCerCount: existing.txCerCount || 0,
+            txCerCount: Object.keys(existing.txCers || {}).length,
             utxos,
             txCers: existing.txCers || {},
             value: {
-                totalValue: info.totalAssets || 0,
+                totalValue: (info.balance || 0) + existingTxCerValue,
                 utxoValue: info.balance || 0,
-                txCerValue: 0,
+                txCerValue: existingTxCerValue,
             },
             estInterest: info.interest || 0,
-            publicKeyNew: data?.PublicKeyNew,
+            EstInterest: info.interest || 0,
+            gas: info.interest || 0,
+            publicKeyNew: resolvedPublicKey,
             pubXHex,
             pubYHex,
         };
@@ -72,8 +117,16 @@ export async function syncAccountAddresses(
     }
 
     const totals: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
-    for (const info of Object.values(account.addresses || {})) {
-        totals[info.type || 0] = (totals[info.type || 0] || 0) + (info.balance || 0);
+    const mainAddress = account.mainAddress?.toLowerCase() || '';
+    for (const [addr, info] of Object.entries(account.addresses || {})) {
+        if (mainAddress && addr.toLowerCase() === mainAddress) continue;
+        const rawTotal = Number(info.value?.totalValue);
+        const utxoValue = Number(info.value?.utxoValue ?? info.balance ?? 0) || 0;
+        const txCerValue =
+            Number(info.value?.txCerValue) ||
+            Object.values(info.txCers || {}).reduce((sum, value) => sum + (Number(value) || 0), 0);
+        const totalValue = Number.isFinite(rawTotal) ? rawTotal : utxoValue + txCerValue;
+        totals[info.type || 0] = (totals[info.type || 0] || 0) + totalValue;
     }
     account.totalBalance = totals;
     account.lastLogin = Date.now();

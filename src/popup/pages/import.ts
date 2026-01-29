@@ -4,7 +4,16 @@
 
 import { getPublicKeyFromPrivate, generateAddress, generateAccountIdFromPrivate } from '../../core/signature';
 import { encryptPrivateKey } from '../../core/keyEncryption';
-import { getAccount, getOnboardingStep, saveAccount, saveEncryptedKey, setActiveAccount, setSessionKey, type UserAccount } from '../../core/storage';
+import {
+    getAccount,
+    getOnboardingStep,
+    hydrateSessionAddressKeys,
+    saveAccount,
+    saveEncryptedKey,
+    setActiveAccount,
+    setSessionKey,
+    type UserAccount,
+} from '../../core/storage';
 import { startTxStatusSync } from '../../core/txStatus';
 import { syncAccountFromReOnline } from '../../core/auth';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
@@ -225,6 +234,7 @@ async function handleImport(e: Event): Promise<void> {
         });
         await setActiveAccount(accountId);
         setSessionKey(accountId, privateKey);
+        await hydrateSessionAddressKeys(accountId, privateKey);
 
         try {
             const syncResult = await syncAccountFromReOnline(account, privateKey);
