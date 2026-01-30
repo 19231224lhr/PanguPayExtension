@@ -383,9 +383,10 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         if (lockedTXCerIds.length > 0) {
             unlockTXCers(lockedTXCerIds, false);
         }
-        const failureReason = mapTransferErrorMessage(
-            response.data?.error || response.data?.message || '提交失败'
-        );
+        const failureReason =
+            response.status === 503
+                ? 'Leader 节点暂时不可用，请稍后重试'
+                : mapTransferErrorMessage(response.data?.error || response.data?.message || '提交失败');
         for (const record of txRecords) {
             record.status = 'failed';
             record.failureReason = failureReason;
