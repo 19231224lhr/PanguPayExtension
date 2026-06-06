@@ -48,6 +48,7 @@ function sendMessage(type, payload) {
 const eventListeners = {
     accountChanged: [],
     disconnect: [],
+    txStatus: [],
 };
 
 // 创建 PanguPay 钱包对象
@@ -124,6 +125,14 @@ window.addEventListener('message', (event) => {
     }
     if (evt === 'accountChanged') {
         emitEvent('accountChanged', event.data.address || '');
+    }
+    if (evt === 'txStatus') {
+        emitEvent('txStatus', {
+            txId: event.data.txId,
+            status: event.data.status,
+            mode: event.data.mode,
+            origin: event.data.origin,
+        });
     }
 });
 

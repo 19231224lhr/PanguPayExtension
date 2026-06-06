@@ -11,6 +11,7 @@ import {
 } from './api';
 import { isInGuarGroup, queryAddressGroupInfo } from './address';
 import {
+    hasAddressProtocolMetadata,
     getSessionKey,
     getWalletAddresses,
     type OrganizationChoice,
@@ -20,9 +21,11 @@ import {
     convertHexToPublicKey,
     getCustomEpochTimestamp,
     getPublicKeyHexFromPrivate,
+    publicKeyEnvelopeFromHex,
     serializeForBackend,
     signStruct,
     type EcdsaSignature,
+    type PublicKeyEnvelope,
     type PublicKeyNew,
 } from './signature';
 
@@ -32,7 +35,16 @@ export interface FlowApplyRequest {
     UserPeerID: string;
     GuarGroupID: string;
     UserPublicKey: PublicKeyNew;
-    AddressMsg: Record<string, { AddressData: { PublicKeyNew: PublicKeyNew } }>;
+    SignPublicKeyV2: PublicKeyEnvelope;
+    AddressMsg: Record<string, {
+        AddressData: {
+            PublicKeyNew: PublicKeyNew;
+            SignPublicKeyV2?: PublicKeyEnvelope | null;
+            SeedAnchor?: number[] | string;
+            SeedChainStep?: number;
+            DefaultSpendAlgorithm?: string;
+        };
+    }>;
     TimeStamp: number;
     UserSig?: EcdsaSignature;
 }
@@ -129,15 +141,20 @@ function buildFlowApplyUrl(org: OrganizationChoice): string {
     return buildApiUrl(base, API_ENDPOINTS.ASSIGN_FLOW_APPLY(org.groupId));
 }
 
-function buildAddressMsg(account: UserAccount): Record<string, { AddressData: { PublicKeyNew: PublicKeyNew } }> {
-    const addressMsg: Record<string, { AddressData: { PublicKeyNew: PublicKeyNew } }> = {};
+function buildAddressMsg(account: UserAccount): FlowApplyRequest['AddressMsg'] {
+    const addressMsg: FlowApplyRequest['AddressMsg'] = {};
     const addresses = getWalletAddresses(account);
     for (const addr of addresses) {
         const pub = ensurePublicKey(addr.pubXHex, addr.pubYHex);
         if (!pub) continue;
+        if (!hasAddressProtocolMetadata(addr)) continue;
         addressMsg[addr.address] = {
             AddressData: {
                 PublicKeyNew: pub,
+                SignPublicKeyV2: addr.signPublicKeyV2,
+                SeedAnchor: addr.seedAnchor,
+                SeedChainStep: addr.seedChainStep,
+                DefaultSpendAlgorithm: addr.defaultSpendAlgorithm,
             },
         };
     }
@@ -165,6 +182,7 @@ export async function joinGuarantorGroup(
 
     const { x: pubXHex, y: pubYHex } = getPublicKeyHexFromPrivate(session.privKey);
     const userPublicKey = convertHexToPublicKey(pubXHex, pubYHex);
+    const signPublicKeyV2 = publicKeyEnvelopeFromHex(pubXHex, pubYHex);
 
     const enriched = await enrichOrg(org);
     if (!enriched.assignAPIEndpoint && !enriched.assignNodeUrl) {
@@ -177,6 +195,7 @@ export async function joinGuarantorGroup(
         UserPeerID: '',
         GuarGroupID: enriched.groupId,
         UserPublicKey: userPublicKey,
+        SignPublicKeyV2: signPublicKeyV2,
         AddressMsg: addressMsg,
         TimeStamp: getCustomEpochTimestamp(),
     };
@@ -219,6 +238,7 @@ export async function leaveGuarantorGroup(
 
     const { x: pubXHex, y: pubYHex } = getPublicKeyHexFromPrivate(session.privKey);
     const userPublicKey = convertHexToPublicKey(pubXHex, pubYHex);
+    const signPublicKeyV2 = publicKeyEnvelopeFromHex(pubXHex, pubYHex);
 
     const enriched = await enrichOrg(org);
 
@@ -228,6 +248,7 @@ export async function leaveGuarantorGroup(
         UserPeerID: '',
         GuarGroupID: org.groupId,
         UserPublicKey: userPublicKey,
+        SignPublicKeyV2: signPublicKeyV2,
         AddressMsg: {},
         TimeStamp: getCustomEpochTimestamp(),
     };

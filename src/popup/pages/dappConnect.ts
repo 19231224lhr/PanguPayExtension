@@ -11,6 +11,15 @@ import {
 } from '../../core/storage';
 import { COIN_NAMES } from '../../core/types';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
+import {
+    bindNavigation,
+    escapeHtml,
+    renderDappSiteCard,
+    renderEmptyState,
+    renderHeaderBar,
+    renderNotice,
+    shortAddress,
+} from '../utils/ui';
 
 const TEXT = {
     'zh-CN': {
@@ -75,20 +84,14 @@ export async function renderDappConnect(): Promise<void> {
     if (!account || !pending) {
         app.innerHTML = `
       <div class="page dapp-connect">
-        <header class="header">
-          <button class="header-btn" onclick="navigateTo('home')">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M19 12H5M12 19l-7-7 7-7"/>
-            </svg>
-          </button>
-          <span style="font-weight: 600;">${t.title}</span>
-          <div style="width: 32px;"></div>
-        </header>
+        ${renderHeaderBar({ title: t.title, backPage: 'home' })}
         <div class="page-content">
-          <div class="card" style="text-align: center; padding: 24px;">
-            <div style="font-weight: 600; margin-bottom: 8px;">${t.empty}</div>
-            <button class="btn btn-primary" onclick="navigateTo('home')">${t.backHome}</button>
-          </div>
+          ${renderEmptyState({
+              title: t.empty,
+              description: t.subtitle,
+              iconName: 'globe',
+              actionsHtml: `<button class="btn btn-primary btn-block" type="button" data-nav="home">${escapeHtml(t.backHome)}</button>`,
+          })}
         </div>
       </div>
     `;
@@ -96,6 +99,7 @@ export async function renderDappConnect(): Promise<void> {
         bindInlineHandlers(app, {
             navigateTo: (page: string) => (window as any).navigateTo(page),
         });
+        bindNavigation(app);
         return;
     }
 
@@ -112,34 +116,24 @@ export async function renderDappConnect(): Promise<void> {
 
     app.innerHTML = `
     <div class="page dapp-connect">
-      <header class="header">
-        <button class="header-btn" onclick="navigateTo('home')">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <span style="font-weight: 600;">${t.title}</span>
-        <div style="width: 32px;"></div>
-      </header>
+      ${renderHeaderBar({ title: t.title, backPage: 'home' })}
 
       <div class="page-content">
-        <div class="card dapp-site-card">
-          <div class="dapp-site-info">
-            <div class="dapp-site-icon">
-              ${siteIcon ? `<img src="${siteIcon}" alt="${siteName}" />` : '<span>🌐</span>'}
-            </div>
-            <div class="dapp-site-text">
-              <div class="dapp-site-title">${siteName}</div>
-              <div class="dapp-site-origin">${pending.origin}</div>
-            </div>
-          </div>
-          <div class="dapp-site-hint">${t.subtitle}</div>
-        </div>
+        ${renderDappSiteCard({
+            title: siteName,
+            origin: pending.origin,
+            iconUrl: siteIcon,
+            hint: t.subtitle,
+            badge: t.siteLabel,
+        })}
+        ${renderNotice('info', t.siteLabel, settings.language === 'en'
+            ? 'This permission only exposes the selected wallet address.'
+            : '本次授权仅向站点暴露所选钱包地址，不签名、不发起交易。')}
         ${
             pendingCount > 1
-                ? `<div style="margin: 6px 4px 12px; color: var(--text-muted); font-size: 12px;">
-                    还有 ${pendingCount - 1} 个待处理连接请求
-                  </div>`
+                ? `<div class="queue-hint">${escapeHtml(settings.language === 'en'
+                    ? `${pendingCount - 1} more pending connection request(s)`
+                    : `还有 ${pendingCount - 1} 个待处理连接请求`)}</div>`
                 : ''
         }
 
@@ -156,14 +150,14 @@ export async function renderDappConnect(): Promise<void> {
                               return `
                 <button class="list-item dapp-address-item" data-address="${addr.address}">
                   <div class="list-item-icon">
-                    <span style="font-weight: 600;">${coinLabel}</span>
+                    <span class="address-coin-label">${coinLabel}</span>
                   </div>
                   <div class="list-item-content">
                     <div class="list-item-title">
-                      ${formatAddress(addr.address)}
-                      <span class="tag tag--neutral">${sourceLabel}</span>
+                      ${escapeHtml(formatAddress(addr.address))}
+                      <span class="tag tag--neutral">${escapeHtml(sourceLabel)}</span>
                     </div>
-                    <div class="list-item-subtitle">${t.addressType}：${coinLabel}</div>
+                    <div class="list-item-subtitle">${escapeHtml(t.addressType)}：${escapeHtml(coinLabel)} · ${escapeHtml(shortAddress(addr.address))}</div>
                   </div>
                   <div class="dapp-address-radio"></div>
                 </button>
@@ -190,6 +184,7 @@ export async function renderDappConnect(): Promise<void> {
     bindInlineHandlers(app, {
         navigateTo: (page: string) => (window as any).navigateTo(page),
     });
+    bindNavigation(app);
 
     const approveBtn = document.getElementById('dappApproveBtn') as HTMLButtonElement | null;
     const rejectBtn = document.getElementById('dappRejectBtn') as HTMLButtonElement | null;

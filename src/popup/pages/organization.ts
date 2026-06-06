@@ -29,6 +29,7 @@ import { joinGuarantorGroup, leaveGuarantorGroup } from '../../core/group';
 import { startTxStatusSync, stopTxStatusSync } from '../../core/txStatus';
 import { getActiveLanguage } from '../utils/appSettings';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
+import { bindNavigation, renderHeaderBar } from '../utils/ui';
 
 interface UiGroup {
     groupId: string;
@@ -350,7 +351,7 @@ export async function renderOrganization(): Promise<void> {
 
     if (orgSearchState === 'loading') {
         searchStateBlock = `
-          <div class="loading-container" style="padding: 16px 0;">
+          <div class="loading-container org-loading-container">
             <div class="loading-spinner"></div>
             <div>${t.searchLoading}</div>
           </div>
@@ -369,14 +370,14 @@ export async function renderOrganization(): Promise<void> {
         `;
     } else if (orgSearchState === 'notfound') {
         searchStateBlock = `
-          <div class="empty-state" style="padding: 24px 12px;">
+          <div class="empty-state empty-state--compact">
             <div class="empty-title">${t.searchNotFound}</div>
             <div class="empty-desc">${t.searchDesc}</div>
           </div>
         `;
     } else {
         searchStateBlock = `
-          <div class="empty-state" style="padding: 24px 12px;">
+          <div class="empty-state empty-state--compact">
             <div class="empty-title">${t.searchEmptyTitle}</div>
             <div class="empty-desc">${t.searchEmptyDesc}</div>
           </div>
@@ -385,15 +386,7 @@ export async function renderOrganization(): Promise<void> {
 
     app.innerHTML = `
     <div class="page">
-      <header class="header">
-        <button class="header-btn" onclick="navigateTo('${isOnboarding ? 'walletManager' : 'home'}')">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <span style="font-weight: 600;">${t.header}</span>
-        <div style="width: 32px;"></div>
-      </header>
+      ${renderHeaderBar({ title: t.header, backPage: isOnboarding ? 'walletManager' : 'home' })}
       
       <div class="page-content">
         ${onboardingBanner}
@@ -406,7 +399,7 @@ export async function renderOrganization(): Promise<void> {
           </button>
         </div>
 
-        <div class="org-pane" style="display: ${orgViewMode === 'list' ? 'block' : 'none'};">
+        <div class="org-pane ${orgViewMode === 'list' ? 'is-active' : ''}">
           <div class="org-status-card">
             <div class="org-status-main">
               <div class="org-status-icon ${currentOrg ? 'org-status-icon--joined' : 'org-status-icon--empty'}">
@@ -457,7 +450,7 @@ export async function renderOrganization(): Promise<void> {
                 </div>
               </div>
             `).join('') : `
-              <div class="empty-state" style="padding: 24px 12px;">
+              <div class="empty-state empty-state--compact">
                 <div class="empty-title">${t.emptyTitle}</div>
                 <div class="empty-desc">${groupLoadError || t.emptyDesc}</div>
               </div>
@@ -474,7 +467,7 @@ export async function renderOrganization(): Promise<void> {
           </div>
         </div>
 
-        <div class="org-pane" style="display: ${orgViewMode === 'detail' ? 'block' : 'none'};">
+        <div class="org-pane ${orgViewMode === 'detail' ? 'is-active' : ''}">
           <div class="org-section-title">${t.myOrgTitle}</div>
           ${myOrgDetail ? `
             <div class="org-card">
@@ -492,13 +485,13 @@ export async function renderOrganization(): Promise<void> {
               ${renderDetailList(myOrgDetail, t)}
             </div>
           ` : `
-            <div class="empty-state" style="padding: 24px 12px;">
+            <div class="empty-state empty-state--compact">
               <div class="empty-title">${t.myOrgEmptyTitle}</div>
               <div class="empty-desc">${t.myOrgEmptyDesc}</div>
             </div>
           `}
 
-          <div class="org-section-title" style="margin-top: 16px;">${t.searchTitle}</div>
+          <div class="org-section-title org-section-title--spaced">${t.searchTitle}</div>
           <div class="org-search-card">
             <div class="org-search-desc">${t.searchDesc}</div>
             <div class="org-search-row">
@@ -528,6 +521,7 @@ export async function renderOrganization(): Promise<void> {
         skipOnboarding,
         completeOnboarding,
     });
+    bindNavigation(app);
 
     const searchInputEl = document.getElementById('orgSearchInput') as HTMLInputElement | null;
     if (searchInputEl) {

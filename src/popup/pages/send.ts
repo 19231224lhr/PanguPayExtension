@@ -17,6 +17,7 @@ import { isTXCerLocked } from '../../core/txCerLockManager';
 import { getLockedUTXOs } from '../../core/utxoLock';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 import { enhanceCustomSelects } from '../utils/customSelect';
+import { bindNavigation, escapeHtml, renderHeaderBar, renderNotice, shortAddress } from '../utils/ui';
 
 type TransferModeView = 'quick' | 'cross' | 'pledge';
 
@@ -103,15 +104,7 @@ export async function renderSend(): Promise<void> {
 
     app.innerHTML = `
     <div class="page send-page">
-      <header class="header">
-        <button class="header-btn" onclick="navigateTo('home')">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <span style="font-weight: 600;">转账交易</span>
-        <div style="width: 32px;"></div>
-      </header>
+      ${renderHeaderBar({ title: '转账交易', backPage: 'home' })}
 
       <div class="page-content">
         <div class="transfer-panel">
@@ -162,7 +155,7 @@ export async function renderSend(): Promise<void> {
               </div>
               <div class="tx-addr-list">
                 ${currentAddresses.length === 0 ? `
-                  <div class="empty-state" style="padding: 16px;">
+                  <div class="empty-state empty-state--compact">
                     <div class="empty-desc">暂无可用地址</div>
                   </div>
                 ` : currentAddresses.map((addr) => renderSourceAddressRow(addr)).join('')}
@@ -270,6 +263,7 @@ export async function renderSend(): Promise<void> {
         toggleAdvancedOptions,
         verifyRecipientAddress,
     });
+    bindNavigation(app);
 
     applyRecipientValues(app);
     enhanceCustomSelects(app);
@@ -356,7 +350,7 @@ function renderRecipientCard(recipient: RecipientDraft, index: number, isCrossMo
             </div>
           </div>
 
-          <div class="recipient-details" ${isCrossMode ? 'style="display:none"' : ''}>
+          <div class="recipient-details ${isCrossMode ? 'is-hidden' : ''}">
             <div class="recipient-details-inner">
               <div class="recipient-field">
                 <span class="recipient-field-label">公钥</span>
@@ -523,11 +517,6 @@ function setTransferMode(mode: TransferModeView): void {
     }
 
     selectedTransferMode = mode;
-    if (selectedTransferMode === 'cross') {
-        recipients.forEach((recipient) => {
-            recipient.coinType = 0;
-        });
-    }
     renderSend();
 }
 
@@ -1074,15 +1063,16 @@ async function handleSend(e: Event): Promise<void> {
         return;
     }
 
-    if (extraGas > 0) {
-        const confirmed = await showConfirmModal(
-            '确认Gas兑换',
-            `将使用 ${extraGas} PGC 兑换本次交易 Gas，是否继续？`,
-            '确认',
-            '取消'
-        );
+        const confirmed = await showTransactionReviewModal({
+            transferMode,
+            fromAddresses: selectedAddresses,
+            recipients: preparedRecipients,
+            changeAddresses,
+            txGas,
+            transferGas: totalTransferGas,
+            extraGas,
+        });
         if (!confirmed) return;
-    }
 
         const result = await buildAndSubmitTransfer({
             account,
@@ -1331,6 +1321,173 @@ async function fetchRecipientInfo(address: string): Promise<{
     };
 }
 
+interface TransactionReviewOptions {
+    transferMode: TransferMode;
+    fromAddresses: AddressInfo[];
+    recipients: TransferRecipient[];
+    changeAddresses: Record<number, string>;
+    txGas: number;
+    transferGas: number;
+    extraGas: number;
+}
+
+function formatTransferModeLabel(mode: TransferMode): string {
+    if (mode === 'cross') return '跨组转账';
+    if (mode === 'quick') return '快速转账';
+    return '普通转账';
+}
+
+function formatReviewAmount(value: number, coinType = 0): string {
+    const decimals = getDisplayDecimals(coinType);
+    return Number(value || 0).toLocaleString('zh-CN', {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: Math.min(8, decimals),
+    });
+}
+
+function renderAddressProtocolBadges(addr: AddressInfo): string {
+    const badges: string[] = [];
+    if (addr.readOnly) badges.push('<span class="status-badge status-badge--warning">ReadOnly</span>');
+    if (addr.seedRepairRequired) badges.push('<span class="status-badge status-badge--danger">Seed Repair</span>');
+    if (addr.pendingSeedStep !== undefined) badges.push('<span class="status-badge status-badge--info">Pending Seed</span>');
+    if (addr.registrationState) {
+        const tone =
+            addr.registrationState === 'registered'
+                ? 'success'
+                : addr.registrationState === 'failed'
+                  ? 'danger'
+                  : addr.registrationState === 'pending'
+                    ? 'warning'
+                    : 'neutral';
+        badges.push(`<span class="status-badge status-badge--${tone}">${escapeHtml(addr.registrationState)}</span>`);
+    }
+    return badges.length ? `<div class="protocol-badges">${badges.join('')}</div>` : '';
+}
+
+function summarizeRecipientsByCoin(recipientsToReview: TransferRecipient[], extraGas: number): Array<[number, number]> {
+    const totals = new Map<number, number>();
+    recipientsToReview.forEach((recipient) => {
+        const type = Number(recipient.coinType || 0);
+        totals.set(type, (totals.get(type) || 0) + Number(recipient.amount || 0));
+    });
+    if (extraGas > 0) {
+        totals.set(0, (totals.get(0) || 0) + extraGas);
+    }
+    return Array.from(totals.entries());
+}
+
+function showTransactionReviewModal(options: TransactionReviewOptions): Promise<boolean> {
+    return new Promise((resolve) => {
+        const modal = openModal('确认交易');
+        const totals = summarizeRecipientsByCoin(options.recipients, options.extraGas);
+        const changeRows = totals
+            .map(([type]) => {
+                const address = options.changeAddresses[type] || '';
+                const coinLabel = COIN_NAMES[type as keyof typeof COIN_NAMES] || 'PGC';
+                return `
+                  <div class="summary-row">
+                    <span>${escapeHtml(coinLabel)} 找零</span>
+                    <strong title="${escapeHtml(address)}">${escapeHtml(address ? shortAddress(address) : '--')}</strong>
+                  </div>
+                `;
+            })
+            .join('');
+
+        modal.body.innerHTML = `
+          <div class="transaction-summary">
+            ${renderNotice('warning', '提交前核对', '请确认来源地址、收款地址、币种、金额、Gas 和找零地址。交易提交后无法从插件撤回。')}
+            <section class="summary-item">
+              <div class="summary-row">
+                <span>交易模式</span>
+                <strong>${escapeHtml(formatTransferModeLabel(options.transferMode))}</strong>
+              </div>
+            </section>
+
+            <section>
+              <div class="list-title">来源地址</div>
+              <div class="summary-list">
+                ${options.fromAddresses
+                    .map((addr) => {
+                        const coinLabel = COIN_NAMES[addr.type as keyof typeof COIN_NAMES] || 'PGC';
+                        return `
+                          <div class="summary-item">
+                            <div class="summary-row">
+                              <span>${escapeHtml(coinLabel)}</span>
+                              <strong>${escapeHtml(formatReviewAmount(getAvailableBalanceForAddress(addr), addr.type))}</strong>
+                            </div>
+                            <div class="summary-item-sub">${escapeHtml(addr.address)}</div>
+                            ${renderAddressProtocolBadges(addr)}
+                          </div>
+                        `;
+                    })
+                    .join('')}
+              </div>
+            </section>
+
+            <section>
+              <div class="list-title">收款方</div>
+              <div class="summary-list">
+                ${options.recipients
+                    .map((recipient, index) => {
+                        const coinLabel = COIN_NAMES[recipient.coinType as keyof typeof COIN_NAMES] || 'PGC';
+                        return `
+                          <div class="summary-item">
+                            <div class="summary-item-title">收款方 ${index + 1} · ${escapeHtml(formatReviewAmount(recipient.amount, recipient.coinType))} ${escapeHtml(coinLabel)}</div>
+                            <div class="summary-item-sub">${escapeHtml(recipient.address)}</div>
+                          </div>
+                        `;
+                    })
+                    .join('')}
+              </div>
+            </section>
+
+            <section>
+              <div class="list-title">币种合计</div>
+              <div class="summary-list">
+                ${totals
+                    .map(([type, amount]) => {
+                        const coinLabel = COIN_NAMES[type as keyof typeof COIN_NAMES] || 'PGC';
+                        return `
+                          <div class="summary-item">
+                            <div class="summary-row">
+                              <span>${escapeHtml(coinLabel)}</span>
+                              <strong>${escapeHtml(formatReviewAmount(amount, type))} ${escapeHtml(coinLabel)}</strong>
+                            </div>
+                          </div>
+                        `;
+                    })
+                    .join('')}
+              </div>
+            </section>
+
+            <section class="summary-item">
+              <div class="summary-row"><span>交易 Gas</span><strong>${escapeHtml(formatReviewAmount(options.txGas))}</strong></div>
+              <div class="summary-row"><span>转移 Gas</span><strong>${escapeHtml(formatReviewAmount(options.transferGas))}</strong></div>
+              <div class="summary-row"><span>额外 Gas</span><strong>${escapeHtml(formatReviewAmount(options.extraGas))} PGC</strong></div>
+            </section>
+
+            <section class="summary-item">
+              <div class="list-title">找零地址</div>
+              ${changeRows}
+            </section>
+          </div>
+        `;
+        modal.footer.innerHTML = `
+          <button class="btn btn-secondary" id="reviewCancelBtn" type="button">取消</button>
+          <button class="btn btn-primary" id="reviewConfirmBtn" type="button">确认并提交交易</button>
+        `;
+        modal.footer.style.display = 'grid';
+        modal.footer.style.gridTemplateColumns = '1fr 1.25fr';
+
+        const close = (confirmed: boolean) => {
+            modal.close();
+            resolve(confirmed);
+        };
+        modal.overlay.querySelector('#reviewCancelBtn')?.addEventListener('click', () => close(false));
+        modal.overlay.querySelector('#reviewConfirmBtn')?.addEventListener('click', () => close(true));
+    });
+}
+
 function openModal(title: string): { overlay: HTMLDivElement; body: HTMLElement; footer: HTMLElement; close: () => void } {
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
@@ -1375,14 +1532,14 @@ function showConfirmModal(
     return new Promise((resolve) => {
         const modal = openModal(title);
         modal.body.innerHTML = `
-          <div class="delete-confirm" style="background: var(--bg-secondary);">
+          <div class="delete-confirm delete-confirm--plain">
             <div class="delete-confirm-icon">!</div>
             <div class="delete-confirm-title">${message}</div>
           </div>
         `;
         modal.footer.innerHTML = `
-          <button class="btn btn-secondary" id="confirmCancelBtn" type="button" style="flex: 1;">${cancelLabel}</button>
-          <button class="btn btn-primary" id="confirmOkBtn" type="button" style="flex: 1;">${confirmLabel}</button>
+          <button class="btn btn-secondary modal-action" id="confirmCancelBtn" type="button">${cancelLabel}</button>
+          <button class="btn btn-primary modal-action" id="confirmOkBtn" type="button">${confirmLabel}</button>
         `;
         modal.footer.style.display = 'flex';
 

@@ -1,10 +1,10 @@
 /**
  * Background Service Worker
  * 
- * 扩展后台脚本，处理：
- * - 消息通信
- * - 状态管理
- * - 定时任务
+ * Extension background script:
+ * - message transport
+ * - session and DApp state
+ * - scheduled tasks
  */
 
 import {
@@ -25,12 +25,20 @@ import {
     getDappSignPendingConnection,
     getDappSignPendingConnectionById,
     clearDappSignPendingConnection,
+    saveDappPendingTransaction,
+    getDappPendingTransaction,
+    getDappPendingTransactionById,
+    clearDappPendingTransaction,
     getOnboardingStep,
+    type DappPendingTransaction,
+    type DappTransactionRequest,
 } from '../core/storage';
 import type { PanguMessage, PanguResponse } from '../core/types';
+import { buildAndSubmitTransfer, type TransferMode, type TransferRecipient } from '../core/transfer';
+import { queryAddressGroupInfo } from '../core/address';
 
 // ========================================
-// 消息处理
+// 娑堟伅澶勭悊
 // ========================================
 
 const CONNECT_TIMEOUT_MS = 120000;
@@ -45,6 +53,7 @@ type PendingConnect = {
 
 const pendingConnects = new Map<string, PendingConnect>();
 const pendingSignConnects = new Map<string, PendingConnect>();
+const pendingTransactions = new Map<string, PendingConnect>();
 
 type SiteInfo = {
     origin: string;
@@ -94,7 +103,12 @@ chrome.runtime.onConnect.addListener((port) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.__pangu_ui) return false;
-    if ((message?.type === 'PANGU_CONNECT' || message?.type === 'PANGU_CONNECT_SIGN') && !uiPort) {
+    if (
+        (message?.type === 'PANGU_CONNECT' ||
+            message?.type === 'PANGU_CONNECT_SIGN' ||
+            message?.type === 'PANGU_SEND_TRANSACTION') &&
+        !uiPort
+    ) {
         void openPopupWindow();
     }
     handleMessage(message, sender)
@@ -102,7 +116,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         .catch((error) => {
             sendResponse({ success: false, error: error.message });
         });
-    return true; // 保持消息通道打开
+    return true; // keep the async message channel open
 });
 
 async function handleMessage(
@@ -126,7 +140,7 @@ async function handleMessage(
             return handleGetAccount(requestId, message, _sender);
 
         case 'PANGU_SEND_TRANSACTION':
-            return handleSendTransaction(requestId, message.payload);
+            return handleSendTransaction(requestId, message, _sender);
 
         case 'PANGU_DAPP_GET_PENDING':
             return handleGetPending(requestId);
@@ -145,6 +159,15 @@ async function handleMessage(
 
         case 'PANGU_DAPP_SIGN_REJECT':
             return handleSignReject(requestId, message.payload);
+
+        case 'PANGU_DAPP_TX_GET_PENDING':
+            return handleTxGetPending(requestId);
+
+        case 'PANGU_DAPP_TX_APPROVE':
+            return handleTxApprove(requestId, message.payload);
+
+        case 'PANGU_DAPP_TX_REJECT':
+            return handleTxReject(requestId, message.payload);
 
         case 'PANGU_DAPP_NOTIFY':
             return handleNotify(requestId, message.payload);
@@ -167,7 +190,7 @@ async function handleConnect(
     const account = await getActiveAccount();
 
     if (!account) {
-        // 打开 popup 让用户登录
+        // Open popup and let the user log in.
         return {
             type: 'PANGU_RESPONSE',
             requestId,
@@ -728,6 +751,187 @@ async function handleSignReject(requestId: string, payload: unknown): Promise<Pa
     };
 }
 
+async function handleTxGetPending(requestId: string): Promise<PanguResponse> {
+    const account = await getActiveAccount();
+    if (!account) {
+        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Wallet is not logged in' };
+    }
+    const pending = await getDappPendingTransaction(account.accountId);
+    return { type: 'PANGU_RESPONSE', requestId, success: true, data: pending };
+}
+
+async function enrichDappRecipients(request: DappTransactionRequest): Promise<TransferRecipient[]> {
+    const recipients = request.recipients || [];
+    const out: TransferRecipient[] = [];
+    for (const recipient of recipients) {
+        const query = await queryAddressGroupInfo(recipient.to);
+        const meta = query.success ? query.data : undefined;
+        const publicKey = recipient.publicKey || (meta?.publicKey ? `${meta.publicKey.x},${meta.publicKey.y}` : '');
+        out.push({
+            address: recipient.to,
+            amount: Number(recipient.amount || 0),
+            coinType: Number(recipient.coinType ?? request.coinType ?? meta?.type ?? 0),
+            publicKey,
+            orgId: recipient.orgId || meta?.groupId || '',
+            seedAnchor: meta?.seedAnchor,
+            seedChainStep: meta?.seedChainStep,
+            defaultSpendAlgorithm: meta?.defaultSpendAlgorithm,
+        });
+    }
+    return out;
+}
+
+async function failPendingDappTransaction(
+    accountId: string,
+    pending: DappPendingTransaction,
+    error: string
+): Promise<void> {
+    await clearDappPendingTransaction(accountId, pending.requestId);
+    const pendingResolver = pendingTransactions.get(pending.requestId);
+    if (pendingResolver) {
+        clearTimeout(pendingResolver.timeoutId);
+        pendingTransactions.delete(pending.requestId);
+        pendingResolver.resolve({
+            type: 'PANGU_RESPONSE',
+            requestId: pending.requestId,
+            success: false,
+            error,
+        });
+    }
+    await broadcastDappEvent(pending.origin, {
+        event: 'txStatus',
+        origin: pending.origin,
+        status: 'failed',
+        mode: pending.request.mode || 'normal',
+    });
+}
+
+async function handleTxApprove(requestId: string, payload: unknown): Promise<PanguResponse> {
+    const account = await getActiveAccount();
+    if (!account) {
+        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Wallet is not logged in' };
+    }
+
+    const data = payload as { requestId?: string } | null;
+    if (!data?.requestId) {
+        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Transaction request expired' };
+    }
+
+    const pending = await getDappPendingTransactionById(account.accountId, data.requestId);
+    if (!pending) {
+        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Transaction request expired' };
+    }
+
+    const connection = await getDappConnection(account.accountId, pending.origin);
+    if (!connection?.address) {
+        const error = 'Site is not connected';
+        await failPendingDappTransaction(account.accountId, pending, error);
+        return { type: 'PANGU_RESPONSE', requestId, success: false, error };
+    }
+
+    const mode = (pending.request.mode || 'normal') as TransferMode;
+    let recipients: TransferRecipient[] = [];
+    try {
+        recipients = await enrichDappRecipients(pending.request);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : 'Transaction recipient lookup failed';
+        await failPendingDappTransaction(account.accountId, pending, message);
+        return { type: 'PANGU_RESPONSE', requestId, success: false, error: message };
+    }
+    const coinTypes = new Set(recipients.map((item) => Number(item.coinType || 0)));
+    const changeAddresses: Record<number, string> = {};
+    for (const coinType of coinTypes) {
+        changeAddresses[coinType] = connection.address;
+    }
+
+    let submitResult: Awaited<ReturnType<typeof buildAndSubmitTransfer>>;
+    try {
+        submitResult = await buildAndSubmitTransfer({
+            account,
+            fromAddresses: [connection.address],
+            toAddress: recipients[0]?.address || '',
+            amount: recipients[0]?.amount || 0,
+            coinType: recipients[0]?.coinType || 0,
+            transferMode: mode,
+            recipients,
+            gas: Number(pending.request.gas || 0),
+            extraGas: Number(pending.request.extraGas || 0),
+            changeAddresses,
+        });
+    } catch (error) {
+        const message = error instanceof Error ? error.message : 'Transaction submit failed';
+        await failPendingDappTransaction(account.accountId, pending, message);
+        return { type: 'PANGU_RESPONSE', requestId, success: false, error: message };
+    }
+
+    if (!submitResult.success) {
+        const error = submitResult.error || 'Transaction submit failed';
+        await failPendingDappTransaction(account.accountId, pending, error);
+        return {
+            type: 'PANGU_RESPONSE',
+            requestId,
+            success: false,
+            error,
+        };
+    }
+
+    await clearDappPendingTransaction(account.accountId, pending.requestId);
+    const responseData = { txId: submitResult.txId, mode, status: 'submitted' };
+
+    const pendingResolver = pendingTransactions.get(pending.requestId);
+    if (pendingResolver) {
+        clearTimeout(pendingResolver.timeoutId);
+        pendingTransactions.delete(pending.requestId);
+        pendingResolver.resolve({
+            type: 'PANGU_RESPONSE',
+            requestId: pending.requestId,
+            success: true,
+            data: responseData,
+        });
+    }
+
+    await broadcastDappEvent(pending.origin, {
+        event: 'txStatus',
+        origin: pending.origin,
+        txId: submitResult.txId,
+        status: 'submitted',
+        mode,
+    });
+
+    return { type: 'PANGU_RESPONSE', requestId, success: true, data: responseData };
+}
+
+async function handleTxReject(requestId: string, payload: unknown): Promise<PanguResponse> {
+    const account = await getActiveAccount();
+    if (!account) {
+        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Wallet is not logged in' };
+    }
+
+    const data = payload as { requestId?: string } | null;
+    if (!data?.requestId) {
+        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Transaction request expired' };
+    }
+    const pending = await getDappPendingTransactionById(account.accountId, data.requestId);
+    if (!pending) {
+        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Transaction request expired' };
+    }
+
+    await clearDappPendingTransaction(account.accountId, pending.requestId);
+    const pendingResolver = pendingTransactions.get(pending.requestId);
+    if (pendingResolver) {
+        clearTimeout(pendingResolver.timeoutId);
+        pendingTransactions.delete(pending.requestId);
+        pendingResolver.resolve({
+            type: 'PANGU_RESPONSE',
+            requestId: pending.requestId,
+            success: false,
+            error: 'User rejected transaction',
+        });
+    }
+
+    return { type: 'PANGU_RESPONSE', requestId, success: true };
+}
+
 async function handleNotify(requestId: string, payload: unknown): Promise<PanguResponse> {
     const data = payload as { origin?: string; event?: string; address?: string } | null;
     const origin = normalizeOrigin(data?.origin || '');
@@ -736,7 +940,7 @@ async function handleNotify(requestId: string, payload: unknown): Promise<PanguR
             type: 'PANGU_RESPONSE',
             requestId,
             success: false,
-            error: '缺少站点信息',
+            error: '缂哄皯绔欑偣淇℃伅',
         };
     }
     await broadcastDappEvent(origin, {
@@ -753,7 +957,7 @@ async function handleNotify(requestId: string, payload: unknown): Promise<PanguR
 
 async function broadcastDappEvent(
     origin: string,
-    payload: { event: string; origin: string; address?: string }
+    payload: { event: string; origin: string; address?: string; txId?: string; status?: string; mode?: string }
 ): Promise<void> {
     if (!origin) return;
     const normalized = normalizeOrigin(origin);
@@ -776,35 +980,125 @@ async function broadcastDappEvent(
     }
 }
 
-async function handleSendTransaction(
-    requestId: string,
-    _payload: unknown
-): Promise<PanguResponse> {
-    // 交易需要用户确认，打开 popup
-    // 这里返回需要确认的提示
+function normalizeDappTxRequest(payload: unknown): DappTransactionRequest {
+    const raw = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
+    const recipients = Array.isArray(raw.recipients)
+        ? raw.recipients
+              .map((item) => {
+                  const entry = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
+                  return {
+                      to: String(entry.to || entry.address || '').trim(),
+                      amount: Number(entry.amount || 0),
+                      coinType: Number(entry.coinType ?? raw.coinType ?? 0),
+                      publicKey: entry.publicKey ? String(entry.publicKey) : undefined,
+                      orgId: entry.orgId ? String(entry.orgId) : undefined,
+                  };
+              })
+              .filter((item) => item.to && item.amount > 0)
+        : [];
+
+    if (recipients.length === 0 && raw.to && Number(raw.amount || 0) > 0) {
+        recipients.push({
+            to: String(raw.to).trim(),
+            amount: Number(raw.amount || 0),
+            coinType: Number(raw.coinType ?? 0),
+            publicKey: raw.publicKey ? String(raw.publicKey) : undefined,
+            orgId: raw.orgId ? String(raw.orgId) : undefined,
+        });
+    }
+
+    const mode = raw.mode === 'cross' || raw.mode === 'quick' || raw.mode === 'normal' ? raw.mode : 'normal';
+
     return {
-        type: 'PANGU_RESPONSE',
-        requestId,
-        success: false,
-        error: '请在钱包弹窗中确认交易',
+        to: raw.to ? String(raw.to) : undefined,
+        amount: raw.amount != null ? Number(raw.amount) : undefined,
+        coinType: Number(raw.coinType ?? 0),
+        mode,
+        gas: Number(raw.gas ?? 0),
+        extraGas: Number(raw.extraGas ?? 0),
+        publicKey: raw.publicKey ? String(raw.publicKey) : undefined,
+        orgId: raw.orgId ? String(raw.orgId) : undefined,
+        recipients,
     };
 }
 
+async function handleSendTransaction(
+    requestId: string,
+    message: PanguMessage,
+    sender: chrome.runtime.MessageSender
+): Promise<PanguResponse> {
+    const account = await getActiveAccount();
+    if (!account || !(await hasActiveSession(account.accountId))) {
+        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Wallet is locked' };
+    }
+
+    const site = resolveSiteInfo(message, sender);
+    if (!site.origin) {
+        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Cannot resolve site origin' };
+    }
+
+    const connection = await getDappConnection(account.accountId, site.origin);
+    if (!connection?.address) {
+        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Site is not connected' };
+    }
+
+    const request = normalizeDappTxRequest(message.payload);
+    if (!request.recipients || request.recipients.length === 0) {
+        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Transaction recipient is missing' };
+    }
+
+    await saveDappPendingTransaction({
+        requestId,
+        accountId: account.accountId,
+        origin: site.origin,
+        createdAt: Date.now(),
+        title: site.title,
+        icon: site.icon,
+        request,
+    });
+
+    try {
+        if (uiPort) {
+            uiPort.postMessage({ type: 'PANGU_UI_TX_PENDING', accountId: account.accountId });
+        } else {
+            void chrome.runtime
+                .sendMessage({ __pangu_ui: true, type: 'PANGU_UI_TX_PENDING', accountId: account.accountId })
+                .catch(() => {});
+        }
+    } catch {
+        // ignore
+    }
+
+    return new Promise((resolve) => {
+        const timeoutId = setTimeout(async () => {
+            pendingTransactions.delete(requestId);
+            await clearDappPendingTransaction(account.accountId, requestId);
+            resolve({ type: 'PANGU_RESPONSE', requestId, success: false, error: 'User did not confirm transaction' });
+        }, CONNECT_TIMEOUT_MS);
+
+        pendingTransactions.set(requestId, {
+            accountId: account.accountId,
+            origin: site.origin,
+            timeoutId: timeoutId as unknown as number,
+            resolve,
+        });
+    });
+}
 // ========================================
-// 自动锁定
+// 鑷姩閿佸畾
 // ========================================
 
 chrome.alarms.create('autoLock', { periodInMinutes: 1 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === 'autoLock') {
-        // 检查是否需要自动锁定
-        // 可以根据设置的自动锁定时间来决定
+        // 妫€鏌ユ槸鍚﹂渶瑕佽嚜鍔ㄩ攣瀹?
+        // 鍙互鏍规嵁璁剧疆鐨勮嚜鍔ㄩ攣瀹氭椂闂存潵鍐冲畾
     }
 });
 
 // ========================================
-// 安装/更新事件
+// Install/update events
 // ========================================
 
 chrome.runtime.onInstalled.addListener((details) => {
@@ -815,5 +1109,6 @@ chrome.runtime.onInstalled.addListener((details) => {
     }
 });
 
-// 导出空对象使其成为模块
+// 瀵煎嚭绌哄璞′娇鍏舵垚涓烘ā鍧?
 export { };
+

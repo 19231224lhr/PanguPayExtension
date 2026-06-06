@@ -8,12 +8,14 @@ import {
     type OrganizationChoice,
     type UserAccount,
 } from './storage';
+import type { TxCertificate } from './blockchain';
 import {
     bigIntToHex,
     convertHexToPublicKey,
     getPublicKeyHexFromPrivate,
     serializeForBackend,
     signStruct,
+    type PublicKeyEnvelope,
     type PublicKeyNew,
 } from './signature';
 
@@ -67,6 +69,10 @@ interface AddressBackendData {
     EstInterest?: number;
     Interest?: number;
     PublicKeyNew?: PublicKeyNew;
+    SignPublicKeyV2?: PublicKeyEnvelope;
+    SeedAnchor?: number[] | string;
+    SeedChainStep?: number | string;
+    DefaultSpendAlgorithm?: string;
 }
 
 function normalizeAddress(address: string): string {
@@ -104,9 +110,9 @@ function derivePubFromPriv(privKey?: string): { x: string; y: string } | null {
 
 function extractTxCers(
     raw: AddressBackendData['TXCers']
-): { txCers: Record<string, number>; txCerStore: Record<string, unknown> } {
+): { txCers: Record<string, number>; txCerStore: Record<string, TxCertificate> } {
     const txCers: Record<string, number> = {};
-    const txCerStore: Record<string, unknown> = {};
+    const txCerStore: Record<string, TxCertificate> = {};
 
     if (!raw) return { txCers, txCerStore };
 
@@ -116,7 +122,7 @@ function extractTxCers(
             if (!txCer?.TXCerID) continue;
             const value = Number(txCer.Value ?? 0) || 0;
             txCers[txCer.TXCerID] = value;
-            txCerStore[txCer.TXCerID] = txCer;
+            txCerStore[txCer.TXCerID] = txCer as TxCertificate;
         }
         return { txCers, txCerStore };
     }
@@ -134,7 +140,7 @@ function extractTxCers(
         }
         const numericValue = Number(txCer.Value ?? 0) || 0;
         txCers[txCer.TXCerID] = numericValue;
-        txCerStore[txCer.TXCerID] = txCer;
+        txCerStore[txCer.TXCerID] = txCer as TxCertificate;
     }
 
     return { txCers, txCerStore };
@@ -173,7 +179,7 @@ export async function userReOnline(
     };
 
     const signature = signStruct(message as unknown as Record<string, unknown>, privateKeyHex, ['Sig']);
-    message.Sig = { R: signature.R, S: signature.S };
+    message.Sig = { R: BigInt(signature.R ?? 0), S: BigInt(signature.S ?? 0) };
 
     const response = await apiClient.request<ReturnUserReOnlineMsg>(`${API_BASE_URL}/api/v1/re-online`, {
         method: 'POST',
@@ -252,7 +258,7 @@ export async function syncAccountFromReOnline(
         const isMain = account.mainAddress ? account.mainAddress.toLowerCase() === normalized : false;
         const sessionPriv = isMain ? privateKeyHex : getSessionAddressKey(normalized);
         if (isMissingPubHex(pubXHex) || isMissingPubHex(pubYHex)) {
-            const derived = derivePubFromPriv(sessionPriv);
+            const derived = derivePubFromPriv(sessionPriv || undefined);
             if (derived) {
                 if (isMissingPubHex(pubXHex)) pubXHex = derived.x;
                 if (isMissingPubHex(pubYHex)) pubYHex = derived.y;
@@ -262,7 +268,7 @@ export async function syncAccountFromReOnline(
         const resolvedPublicKey =
             normalizedPub ||
             (!isMissingPubHex(pubXHex) && !isMissingPubHex(pubYHex)
-                ? convertHexToPublicKey(pubXHex, pubYHex)
+                ? convertHexToPublicKey(pubXHex!, pubYHex!)
                 : existing.publicKeyNew);
 
         updated.addresses[normalized] = {
@@ -285,6 +291,14 @@ export async function syncAccountFromReOnline(
             publicKeyNew: resolvedPublicKey,
             pubXHex: pubXHex || existing.pubXHex,
             pubYHex: pubYHex || existing.pubYHex,
+            signPublicKeyV2: payload.SignPublicKeyV2 || existing.signPublicKeyV2,
+            seedAnchor: payload.SeedAnchor || existing.seedAnchor,
+            seedChainStep: Number(payload.SeedChainStep ?? existing.seedChainStep ?? 0) || existing.seedChainStep,
+            defaultSpendAlgorithm: payload.DefaultSpendAlgorithm || existing.defaultSpendAlgorithm,
+            registrationState: payload.SignPublicKeyV2 || existing.registrationState === 'registered'
+                ? 'registered'
+                : existing.registrationState,
+            lastProtocolSyncAt: Date.now(),
         };
     }
 

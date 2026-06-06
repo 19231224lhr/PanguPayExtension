@@ -4,8 +4,22 @@
  * 将 localStorage 操作替换为 chrome.storage.local
  */
 
-import type { TxCertificate, UTXOData } from './blockchain';
+import type { PublicKeyEnvelope, TxCertificate, UTXOData } from './blockchain';
 import { decryptJsonPayload, encryptJsonPayload, type EncryptedKeyData } from './keyEncryption';
+import {
+    AlgorithmECDSAP256,
+    convertPublicKeyToHex,
+    decodeBackendBytes,
+    getPublicKeyHexFromPrivate,
+    publicKeyEnvelopeFromHex,
+    type PublicKeyNew,
+} from './signature';
+import { deriveAddressKeypairFromAddressRootSeed } from './addressRootSeed';
+import {
+    DefaultSeedChainLength,
+    buildInitialSeedMetaFromPrivateKey,
+    recoverDeterministicSeedChainStateFromPrivateKey,
+} from './seedChain';
 
 // ========================================
 // 类型定义
@@ -33,8 +47,36 @@ export interface AddressInfo {
     estInterest?: number;
     gas?: number;
     EstInterest?: number;
-    publicKeyNew?: { CurveName: string; X: number | string; Y: number | string };
+    publicKeyNew?: PublicKeyNew | null;
     locked?: boolean;
+    addressRootSeedHex?: string;
+    signPublicKeyV2?: PublicKeyEnvelope | null;
+    seedAnchor?: number[] | string;
+    seedChainStep?: number;
+    defaultSpendAlgorithm?: string;
+    registrationState?: AddressRegistrationState;
+    registrationError?: string;
+    seedLocalState?: AddressSeedLocalState | null;
+    readOnly?: boolean;
+    seedRepairRequired?: boolean;
+    pendingSeedStep?: number;
+    pendingNextSeedStep?: number;
+    pendingSeedTxId?: string;
+    pendingSeedAt?: number;
+    lastProtocolSyncAt?: number;
+}
+
+export type AddressRegistrationState = 'unknown' | 'pending' | 'registered' | 'failed';
+
+export interface AddressSeedLocalState {
+    mode: 'deterministic_p256';
+    chainLength: number;
+    step: number;
+    generation?: number;
+    source: 'plain' | 'session' | 'missing';
+    available: boolean;
+    requiresUnlock?: boolean;
+    lastRecoveredAt?: number;
 }
 
 export interface UserAccount {
@@ -99,8 +141,342 @@ const STORAGE_KEYS = {
     DAPP_CONNECTIONS: 'pangu_dapp_connections',
     DAPP_PENDING: 'pangu_dapp_pending',
     DAPP_SIGN_PENDING: 'pangu_dapp_sign_pending',
+    DAPP_TX_PENDING: 'pangu_dapp_tx_pending',
     SESSION: 'pangu_session',
 };
+
+function normalizeHexString(value: unknown): string {
+    return String(value || '').trim().replace(/^0x/i, '').toLowerCase();
+}
+
+function decodeOptionalBytes(value: unknown): number[] {
+    try {
+        return decodeBackendBytes(value);
+    } catch {
+        return [];
+    }
+}
+
+function normalizeAddressValue(value: unknown, fallbackBalance = 0): { totalValue: number; utxoValue: number; txCerValue: number } {
+    const raw = (value && typeof value === 'object') ? value as Record<string, unknown> : {};
+    const totalValue = Number(raw.totalValue ?? raw.TotalValue ?? fallbackBalance) || 0;
+    const utxoValue = Number(raw.utxoValue ?? raw.UTXOValue ?? fallbackBalance) || 0;
+    const txCerValue = Number(raw.txCerValue ?? raw.TXCerValue ?? 0) || 0;
+    return { totalValue, utxoValue, txCerValue };
+}
+
+function isRegistrationState(value: unknown): value is AddressRegistrationState {
+    return value === 'unknown' || value === 'pending' || value === 'registered' || value === 'failed';
+}
+
+function isEmptyPublicKeyEnvelope(value: PublicKeyEnvelope | null | undefined): boolean {
+    if (!value) return true;
+    if (!String(value.Algorithm || '').trim()) return true;
+    return decodeOptionalBytes(value.PublicKey).length === 0;
+}
+
+function normalizeStoredPublicKey(
+    value: unknown,
+    fallbackPubXHex?: string,
+    fallbackPubYHex?: string
+): PublicKeyNew | null {
+    const raw = value && typeof value === 'object' ? value as Record<string, unknown> : null;
+    const pubXHex = normalizeHexString(raw?.XHex ?? fallbackPubXHex);
+    const pubYHex = normalizeHexString(raw?.YHex ?? fallbackPubYHex);
+    const x = raw?.X != null ? String(raw.X) : undefined;
+    const y = raw?.Y != null ? String(raw.Y) : undefined;
+
+    if ((!x || !y) && pubXHex && pubYHex) {
+        return {
+            CurveName: String(raw?.CurveName || raw?.Curve || 'P256'),
+            X: BigInt(`0x${pubXHex}`).toString(10),
+            Y: BigInt(`0x${pubYHex}`).toString(10),
+        };
+    }
+
+    if (!x || !y) return null;
+    return {
+        CurveName: String(raw?.CurveName || raw?.Curve || 'P256'),
+        X: x,
+        Y: y,
+    };
+}
+
+function reconcileAddressRootSeedDerivedData(address: string, current: Record<string, unknown>): Record<string, unknown> {
+    const normalizedAddress = normalizeHexString(address);
+    const rootSeedHex = normalizeHexString(current.addressRootSeedHex);
+    if (!rootSeedHex) return current;
+
+    const preferredType = Number(current.type ?? current.Type ?? 0);
+    const candidateTypes = [preferredType, 0, 1, 2].filter((item, index, arr) => arr.indexOf(item) === index);
+    for (const candidateType of candidateTypes) {
+        try {
+            const derived = deriveAddressKeypairFromAddressRootSeed(rootSeedHex, candidateType);
+            if (normalizeHexString(derived.address) !== normalizedAddress) continue;
+            return {
+                ...current,
+                type: candidateType,
+                privHex: current.privHex || derived.privHex,
+                pubXHex: current.pubXHex || derived.pubXHex,
+                pubYHex: current.pubYHex || derived.pubYHex,
+                addressRootSeedHex: derived.addressRootSeedHex,
+            };
+        } catch {
+            // Try the next possible type.
+        }
+    }
+
+    return current;
+}
+
+function getAddressPrivateRecoveryMaterial(
+    account: UserAccount,
+    address: string,
+    addrData: Partial<AddressInfo>
+): { privHex: string; source: 'plain' | 'session' | 'missing' } {
+    const normalized = normalizeHexString(address);
+    const mainAddress = normalizeHexString(account.mainAddress);
+    const plain = normalizeHexString(addrData.privHex);
+    if (plain) return { privHex: plain, source: 'plain' };
+
+    const sessionAddressPriv = getSessionAddressKey(normalized);
+    if (sessionAddressPriv) return { privHex: normalizeHexString(sessionAddressPriv), source: 'session' };
+
+    const session = getSessionKey();
+    if (session?.accountId === account.accountId && normalized && normalized === mainAddress) {
+        return { privHex: normalizeHexString(session.privKey), source: 'session' };
+    }
+
+    return { privHex: '', source: 'missing' };
+}
+
+function recoverAddressProtocolState(
+    account: UserAccount,
+    address: string,
+    addrData: Partial<AddressInfo>
+): {
+    seedAnchor?: number[];
+    seedChainStep?: number;
+    defaultSpendAlgorithm?: string;
+    seedLocalState: AddressSeedLocalState;
+    readOnly: boolean;
+    seedRepairRequired: boolean;
+} {
+    const chainLength = Number(addrData.seedLocalState?.chainLength || DefaultSeedChainLength) || DefaultSeedChainLength;
+    const providedAnchor = decodeOptionalBytes(addrData.seedAnchor);
+    const rawStep = Number(addrData.seedChainStep ?? addrData.seedLocalState?.step ?? 0);
+    const providedStep = Number.isFinite(rawStep) && rawStep >= 0 ? rawStep : 0;
+    const material = getAddressPrivateRecoveryMaterial(account, address, addrData);
+    const now = Date.now();
+
+    if (material.privHex) {
+        try {
+            if (providedAnchor.length > 0 && providedStep >= 0 && providedStep <= chainLength) {
+                const recovered = recoverDeterministicSeedChainStateFromPrivateKey(
+                    material.privHex,
+                    chainLength,
+                    providedStep,
+                    providedAnchor
+                );
+                return {
+                    seedAnchor: providedAnchor,
+                    seedChainStep: providedStep,
+                    defaultSpendAlgorithm: String(addrData.defaultSpendAlgorithm || '').trim() || AlgorithmECDSAP256,
+                    seedLocalState: {
+                        mode: 'deterministic_p256',
+                        chainLength,
+                        step: providedStep,
+                        generation: recovered.generation,
+                        source: material.source,
+                        available: true,
+                        lastRecoveredAt: now,
+                    },
+                    readOnly: false,
+                    seedRepairRequired: false,
+                };
+            }
+
+            const initial = buildInitialSeedMetaFromPrivateKey(material.privHex);
+            return {
+                seedAnchor: providedAnchor.length > 0 ? providedAnchor : [...initial.seedAnchor],
+                seedChainStep: providedStep > 0 ? providedStep : initial.seedChainStep,
+                defaultSpendAlgorithm: String(addrData.defaultSpendAlgorithm || '').trim() || initial.defaultSpendAlgorithm,
+                seedLocalState: {
+                    mode: 'deterministic_p256',
+                    chainLength,
+                    step: providedStep > 0 ? providedStep : initial.seedChainStep,
+                    generation: initial.state.generation,
+                    source: material.source,
+                    available: true,
+                    lastRecoveredAt: now,
+                },
+                readOnly: false,
+                seedRepairRequired: false,
+            };
+        } catch (error) {
+            console.warn(`[Storage] Failed to recover seed state for ${address}:`, error);
+        }
+    }
+
+    const hasRemoteSeedMeta = providedAnchor.length > 0 && providedStep > 0;
+    return {
+        seedAnchor: providedAnchor.length > 0 ? providedAnchor : undefined,
+        seedChainStep: providedStep > 0 ? providedStep : undefined,
+        defaultSpendAlgorithm: String(addrData.defaultSpendAlgorithm || '').trim() || (hasRemoteSeedMeta ? AlgorithmECDSAP256 : undefined),
+        seedLocalState: {
+            mode: 'deterministic_p256',
+            chainLength,
+            step: providedStep > 0 ? providedStep : chainLength,
+            source: 'missing',
+            available: false,
+            requiresUnlock: true,
+        },
+        readOnly: hasRemoteSeedMeta,
+        seedRepairRequired: hasRemoteSeedMeta,
+    };
+}
+
+export function getAccountPublicKeyHex(account: Partial<UserAccount> | null | undefined): { x: string; y: string } | null {
+    const session = getSessionKey();
+    if (account?.accountId && session?.accountId === account.accountId && session.privKey) {
+        try {
+            return getPublicKeyHexFromPrivate(session.privKey);
+        } catch {
+            return null;
+        }
+    }
+    return null;
+}
+
+export function getAccountSignPublicKeyV2(account: Partial<UserAccount> | null | undefined): PublicKeyEnvelope | null {
+    const accountPub = getAccountPublicKeyHex(account);
+    if (!accountPub) return null;
+    return publicKeyEnvelopeFromHex(accountPub.x, accountPub.y);
+}
+
+export function hasAddressProtocolMetadata(addrData: Partial<AddressInfo> | null | undefined): boolean {
+    if (!addrData) return false;
+    return (
+        !isEmptyPublicKeyEnvelope(addrData.signPublicKeyV2 || undefined) &&
+        decodeOptionalBytes(addrData.seedAnchor).length > 0 &&
+        Number(addrData.seedChainStep || 0) > 0 &&
+        !!String(addrData.defaultSpendAlgorithm || '').trim()
+    );
+}
+
+export function getAddressProtocolIssues(address: string, addrData: Partial<AddressInfo> | null | undefined): string[] {
+    if (!addrData) return [`${address}: missing local address metadata`];
+    const issues: string[] = [];
+    if (!addrData.pubXHex || !addrData.pubYHex) issues.push(`${address}: missing address public key`);
+    if (isEmptyPublicKeyEnvelope(addrData.signPublicKeyV2 || undefined)) issues.push(`${address}: missing SignPublicKeyV2`);
+    if (decodeOptionalBytes(addrData.seedAnchor).length === 0) issues.push(`${address}: missing SeedAnchor`);
+    if (Number(addrData.seedChainStep || 0) <= 0) issues.push(`${address}: invalid SeedChainStep`);
+    if (!String(addrData.defaultSpendAlgorithm || '').trim()) issues.push(`${address}: missing DefaultSpendAlgorithm`);
+    if (addrData.seedRepairRequired) issues.push(`${address}: local seed state missing`);
+    if (addrData.readOnly) issues.push(`${address}: address is read-only`);
+    if (addrData.pendingSeedStep || addrData.pendingNextSeedStep) issues.push(`${address}: pending seed step not confirmed`);
+    return issues;
+}
+
+export function normalizeAddressDataForStorage(
+    address: string,
+    addrData: Partial<AddressInfo> | null | undefined,
+    account: UserAccount,
+    options: { syncTime?: number } = {}
+): AddressInfo {
+    const current = reconcileAddressRootSeedDerivedData(address, (addrData || {}) as Record<string, unknown>);
+    const normalizedAddress = normalizeHexString((current.address as string) || address);
+    let pubXHex = normalizeHexString(current.pubXHex);
+    let pubYHex = normalizeHexString(current.pubYHex);
+    const publicKeyNew = normalizeStoredPublicKey(current.publicKeyNew ?? current.PublicKeyNew, pubXHex, pubYHex);
+
+    if ((!pubXHex || !pubYHex) && publicKeyNew?.X != null && publicKeyNew?.Y != null) {
+        try {
+            const converted = convertPublicKeyToHex(publicKeyNew);
+            pubXHex = pubXHex || converted.x;
+            pubYHex = pubYHex || converted.y;
+        } catch {
+            // Leave malformed legacy public keys unset.
+        }
+    }
+
+    const protocolState = recoverAddressProtocolState(account, normalizedAddress, current as Partial<AddressInfo>);
+    const accountSignPublicKeyV2 = getAccountSignPublicKeyV2(account);
+    const existingSignPublicKeyV2 = current.signPublicKeyV2 as PublicKeyEnvelope | undefined;
+    const signPublicKeyV2 = !isEmptyPublicKeyEnvelope(existingSignPublicKeyV2)
+        ? existingSignPublicKeyV2
+        : accountSignPublicKeyV2;
+
+    let registrationState: AddressRegistrationState = 'unknown';
+    if (isRegistrationState(current.registrationState)) {
+        registrationState = current.registrationState;
+    } else if (current.registrationError) {
+        registrationState = 'failed';
+    }
+
+    const balance = Number(current.balance ?? (current.Value as any)?.UTXOValue ?? 0) || 0;
+    const value = normalizeAddressValue(current.value ?? current.Value, balance);
+    return {
+        address: normalizedAddress,
+        type: Number(current.type ?? current.Type ?? 0) || 0,
+        balance,
+        utxoCount: Number(current.utxoCount ?? Object.keys((current.utxos ?? current.UTXO ?? {}) as Record<string, unknown>).length) || 0,
+        txCerCount: Number(current.txCerCount ?? Object.keys((current.txCers ?? current.TXCers ?? {}) as Record<string, unknown>).length) || 0,
+        source: (current.source as AddressInfo['source']) || undefined,
+        privHex: normalizeHexString(current.privHex) || undefined,
+        pubXHex: pubXHex || undefined,
+        pubYHex: pubYHex || undefined,
+        utxos: ((current.utxos ?? current.UTXO) as Record<string, UTXOData>) || {},
+        txCers: ((current.txCers ?? current.TXCers) as Record<string, number>) || {},
+        value,
+        estInterest: Number(current.estInterest ?? current.EstInterest ?? current.Interest ?? current.gas ?? 0) || 0,
+        gas: Number(current.gas ?? current.estInterest ?? current.EstInterest ?? current.Interest ?? 0) || 0,
+        EstInterest: Number(current.EstInterest ?? current.estInterest ?? current.Interest ?? current.gas ?? 0) || 0,
+        publicKeyNew: publicKeyNew || undefined,
+        locked: Boolean(current.locked) || Boolean(protocolState.readOnly),
+        addressRootSeedHex: normalizeHexString(current.addressRootSeedHex) || undefined,
+        signPublicKeyV2: signPublicKeyV2 || undefined,
+        seedAnchor: protocolState.seedAnchor && protocolState.seedAnchor.length > 0 ? protocolState.seedAnchor : undefined,
+        seedChainStep: protocolState.seedChainStep,
+        defaultSpendAlgorithm: protocolState.defaultSpendAlgorithm,
+        registrationState,
+        registrationError: registrationState === 'registered' ? undefined : (current.registrationError ? String(current.registrationError) : undefined),
+        seedLocalState: protocolState.seedLocalState,
+        readOnly: Boolean(current.readOnly) || protocolState.readOnly,
+        seedRepairRequired: Boolean(current.seedRepairRequired) || protocolState.seedRepairRequired,
+        pendingSeedStep: Number(current.pendingSeedStep || 0) || undefined,
+        pendingNextSeedStep: Number(current.pendingNextSeedStep || 0) || undefined,
+        pendingSeedTxId: current.pendingSeedTxId ? String(current.pendingSeedTxId) : undefined,
+        pendingSeedAt: Number(current.pendingSeedAt || 0) || undefined,
+        lastProtocolSyncAt: Number(current.lastProtocolSyncAt || options.syncTime || 0) || undefined,
+    };
+}
+
+export function normalizeAccountForStorage(account: UserAccount): UserAccount {
+    const normalized: UserAccount = {
+        ...account,
+        mainAddress: normalizeHexString(account.mainAddress),
+        addresses: {},
+        txCerStore: { ...(account.txCerStore || {}) },
+        totalBalance: { 0: 0, 1: 0, 2: 0, ...(account.totalBalance || {}) },
+    };
+    for (const [rawAddress, info] of Object.entries(account.addresses || {})) {
+        const address = normalizeHexString(info?.address || rawAddress);
+        if (!address) continue;
+        normalized.addresses[address] = normalizeAddressDataForStorage(address, info, normalized);
+        if (
+            normalized.addresses[address].pendingNextSeedStep &&
+            normalized.addresses[address].seedChainStep &&
+            Number(normalized.addresses[address].seedChainStep) === Number(normalized.addresses[address].pendingNextSeedStep)
+        ) {
+            normalized.addresses[address].pendingSeedStep = undefined;
+            normalized.addresses[address].pendingNextSeedStep = undefined;
+            normalized.addresses[address].pendingSeedTxId = undefined;
+            normalized.addresses[address].pendingSeedAt = undefined;
+        }
+    }
+    return normalized;
+}
 
 // ========================================
 // Storage Functions
@@ -132,18 +508,36 @@ export async function removeStorageData(key: string): Promise<void> {
 
 export async function saveAccount(account: UserAccount): Promise<void> {
     const accounts = await getStorageData<Record<string, UserAccount>>(STORAGE_KEYS.ACCOUNTS) || {};
-    accounts[account.accountId] = account;
+    accounts[account.accountId] = normalizeAccountForStorage(account);
     await setStorageData(STORAGE_KEYS.ACCOUNTS, accounts);
 }
 
 export async function getAccount(accountId: string): Promise<UserAccount | null> {
     const accounts = await getStorageData<Record<string, UserAccount>>(STORAGE_KEYS.ACCOUNTS);
-    return accounts?.[accountId] || null;
+    const account = accounts?.[accountId] || null;
+    if (!account) return null;
+    const normalized = normalizeAccountForStorage(account);
+    if (JSON.stringify(normalized) !== JSON.stringify(account)) {
+        const nextAccounts = { ...(accounts || {}), [accountId]: normalized };
+        await setStorageData(STORAGE_KEYS.ACCOUNTS, nextAccounts);
+    }
+    return normalized;
 }
 
 export async function getAllAccounts(): Promise<UserAccount[]> {
     const accounts = await getStorageData<Record<string, UserAccount>>(STORAGE_KEYS.ACCOUNTS);
-    return accounts ? Object.values(accounts) : [];
+    if (!accounts) return [];
+    const normalizedAccounts: Record<string, UserAccount> = {};
+    let changed = false;
+    for (const [accountId, account] of Object.entries(accounts)) {
+        const normalized = normalizeAccountForStorage(account);
+        normalizedAccounts[accountId] = normalized;
+        if (JSON.stringify(normalized) !== JSON.stringify(account)) changed = true;
+    }
+    if (changed) {
+        await setStorageData(STORAGE_KEYS.ACCOUNTS, normalizedAccounts);
+    }
+    return Object.values(normalizedAccounts);
 }
 
 export async function clearStaleTxCerData(accountId?: string): Promise<void> {
@@ -240,6 +634,13 @@ export async function deleteAccount(accountId: string): Promise<void> {
     if (dappSignPending[accountId]) {
         delete dappSignPending[accountId];
         await setStorageData(STORAGE_KEYS.DAPP_SIGN_PENDING, dappSignPending);
+    }
+
+    const dappTxPending =
+        await getStorageData<Record<string, DappPendingTransaction>>(STORAGE_KEYS.DAPP_TX_PENDING) || {};
+    if (dappTxPending[accountId]) {
+        delete dappTxPending[accountId];
+        await setStorageData(STORAGE_KEYS.DAPP_TX_PENDING, dappTxPending);
     }
 }
 
@@ -543,6 +944,36 @@ export interface DappSignPendingConnection {
     message: string;
 }
 
+export interface DappTransactionRecipient {
+    to: string;
+    amount: number;
+    coinType?: number;
+    publicKey?: string;
+    orgId?: string;
+}
+
+export interface DappTransactionRequest {
+    to?: string;
+    amount?: number;
+    coinType?: number;
+    mode?: 'normal' | 'quick' | 'cross';
+    gas?: number;
+    extraGas?: number;
+    publicKey?: string;
+    orgId?: string;
+    recipients?: DappTransactionRecipient[];
+}
+
+export interface DappPendingTransaction {
+    requestId: string;
+    accountId: string;
+    origin: string;
+    createdAt: number;
+    title?: string;
+    icon?: string;
+    request: DappTransactionRequest;
+}
+
 function normalizeOrigin(origin: string): string {
     return String(origin || '').trim().toLowerCase();
 }
@@ -762,6 +1193,70 @@ export async function clearDappSignPendingConnection(accountId: string, requestI
         delete store[accountId];
     }
     await setStorageData(STORAGE_KEYS.DAPP_SIGN_PENDING, store);
+}
+
+export async function saveDappPendingTransaction(pending: DappPendingTransaction): Promise<void> {
+    if (!pending?.accountId) return;
+    const raw = await getStorageData<Record<string, unknown>>(STORAGE_KEYS.DAPP_TX_PENDING);
+    const { store } = normalizePendingStore<DappPendingTransaction>(raw);
+    if (!store[pending.accountId]) store[pending.accountId] = {};
+    store[pending.accountId][pending.requestId] = pending;
+    await setStorageData(STORAGE_KEYS.DAPP_TX_PENDING, store);
+}
+
+export async function getDappPendingTransaction(accountId: string): Promise<DappPendingTransaction | null> {
+    if (!accountId) return null;
+    const raw = await getStorageData<Record<string, unknown>>(STORAGE_KEYS.DAPP_TX_PENDING);
+    const { store, migrated } = normalizePendingStore<DappPendingTransaction>(raw);
+    if (migrated) {
+        await setStorageData(STORAGE_KEYS.DAPP_TX_PENDING, store);
+    }
+    const accountPending = store[accountId] || {};
+    const list = Object.values(accountPending).sort((a, b) => a.createdAt - b.createdAt);
+    return list[0] || null;
+}
+
+export async function getDappPendingTransactions(accountId: string): Promise<DappPendingTransaction[]> {
+    if (!accountId) return [];
+    const raw = await getStorageData<Record<string, unknown>>(STORAGE_KEYS.DAPP_TX_PENDING);
+    const { store, migrated } = normalizePendingStore<DappPendingTransaction>(raw);
+    if (migrated) {
+        await setStorageData(STORAGE_KEYS.DAPP_TX_PENDING, store);
+    }
+    const accountPending = store[accountId] || {};
+    return Object.values(accountPending).sort((a, b) => a.createdAt - b.createdAt);
+}
+
+export async function getDappPendingTransactionById(
+    accountId: string,
+    requestId: string
+): Promise<DappPendingTransaction | null> {
+    if (!accountId || !requestId) return null;
+    const raw = await getStorageData<Record<string, unknown>>(STORAGE_KEYS.DAPP_TX_PENDING);
+    const { store, migrated } = normalizePendingStore<DappPendingTransaction>(raw);
+    if (migrated) {
+        await setStorageData(STORAGE_KEYS.DAPP_TX_PENDING, store);
+    }
+    return store?.[accountId]?.[requestId] || null;
+}
+
+export async function clearDappPendingTransaction(accountId: string, requestId?: string): Promise<void> {
+    if (!accountId) return;
+    const raw = await getStorageData<Record<string, unknown>>(STORAGE_KEYS.DAPP_TX_PENDING);
+    const { store } = normalizePendingStore<DappPendingTransaction>(raw);
+    const accountPending = store[accountId];
+    if (!accountPending) return;
+    if (!requestId) {
+        delete store[accountId];
+        await setStorageData(STORAGE_KEYS.DAPP_TX_PENDING, store);
+        return;
+    }
+    if (!accountPending[requestId]) return;
+    delete accountPending[requestId];
+    if (Object.keys(accountPending).length === 0) {
+        delete store[accountId];
+    }
+    await setStorageData(STORAGE_KEYS.DAPP_TX_PENDING, store);
 }
 
 // ========================================

@@ -717,7 +717,7 @@ async function showCapsuleReceive(address: string): Promise<void> {
     }
   } catch (error) {
     modal.body.innerHTML = `
-          <div class="empty-state" style="padding: 24px 8px;">
+          <div class="empty-state empty-state--compact">
             <div class="empty-title">${t.createFailed}</div>
             <div class="empty-desc">${(error as Error).message}</div>
           </div>
@@ -746,7 +746,7 @@ function showExportKey(address: string): void {
       <div class="capsule-block">
         <div class="capsule-label">${t.keyHex}</div>
         <div class="capsule-code">${privKey}</div>
-        <div class="capsule-hint" style="color: var(--warning);">${t.keyHint}</div>
+        <div class="capsule-hint secret-warning">${t.keyHint}</div>
       </div>
     `;
   modal.footer.innerHTML = `
@@ -774,8 +774,8 @@ function confirmDeleteAddress(): Promise<boolean> {
           </div>
         `;
     modal.footer.innerHTML = `
-          <button class="btn btn-secondary" id="deleteCancelBtn" type="button" style="flex: 1;">取消</button>
-          <button class="btn btn-danger" id="deleteConfirmBtn" type="button" style="flex: 1;">删除</button>
+          <button class="btn btn-secondary modal-action" id="deleteCancelBtn" type="button">取消</button>
+          <button class="btn btn-danger modal-action" id="deleteConfirmBtn" type="button">删除</button>
         `;
     modal.footer.style.display = 'flex';
 

@@ -79,7 +79,7 @@ export async function syncAccountAddresses(
             : false;
         const sessionPriv = isMain ? getSessionKey()?.privKey : getSessionAddressKey(normalized);
         if (isMissingPubHex(pubXHex) || isMissingPubHex(pubYHex)) {
-            const derived = derivePubFromPriv(sessionPriv);
+            const derived = derivePubFromPriv(sessionPriv || undefined);
             if (derived) {
                 if (isMissingPubHex(pubXHex)) pubXHex = derived.x;
                 if (isMissingPubHex(pubYHex)) pubYHex = derived.y;
@@ -112,6 +112,14 @@ export async function syncAccountAddresses(
             publicKeyNew: resolvedPublicKey,
             pubXHex,
             pubYHex,
+            signPublicKeyV2: (data as any)?.SignPublicKeyV2 || existing.signPublicKeyV2,
+            seedAnchor: (data as any)?.SeedAnchor || existing.seedAnchor,
+            seedChainStep: Number((data as any)?.SeedChainStep ?? existing.seedChainStep ?? 0) || existing.seedChainStep,
+            defaultSpendAlgorithm: (data as any)?.DefaultSpendAlgorithm || existing.defaultSpendAlgorithm,
+            registrationState: (data as any)?.SignPublicKeyV2 || existing.registrationState === 'registered'
+                ? 'registered'
+                : existing.registrationState,
+            lastProtocolSyncAt: Date.now(),
         };
 
     }
@@ -153,8 +161,30 @@ export function buildTxUserFromAccount(account: UserAccount): User {
             pubXHex: info.pubXHex,
             pubYHex: info.pubYHex,
             locked: info.locked,
-            publicKeyNew: info.publicKeyNew,
+            publicKeyNew: info.publicKeyNew || undefined,
+            addressRootSeedHex: info.addressRootSeedHex,
+            signPublicKeyV2: info.signPublicKeyV2,
+            seedAnchor: info.seedAnchor,
+            seedChainStep: info.seedChainStep,
+            defaultSpendAlgorithm: info.defaultSpendAlgorithm,
+            registrationState: info.registrationState,
+            seedRepairRequired: info.seedRepairRequired,
+            readOnly: info.readOnly,
+            seedLocalState: info.seedLocalState,
+            pendingSeedStep: info.pendingSeedStep,
+            pendingNextSeedStep: info.pendingNextSeedStep,
+            pendingSeedTxId: info.pendingSeedTxId,
+            pendingSeedAt: info.pendingSeedAt,
         };
+    }
+
+    let accountPub = { x: '', y: '' };
+    if (accountPriv) {
+        try {
+            accountPub = getPublicKeyHexFromPrivate(accountPriv);
+        } catch {
+            accountPub = { x: '', y: '' };
+        }
     }
 
     return {
@@ -163,8 +193,8 @@ export function buildTxUserFromAccount(account: UserAccount): User {
         orgNumber: account.organizationId || '',
         keys: {
             privHex: accountPriv,
-            pubXHex: '',
-            pubYHex: '',
+            pubXHex: accountPub.x,
+            pubYHex: accountPub.y,
         },
         wallet: {
             addressMsg,

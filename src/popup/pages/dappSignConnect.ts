@@ -14,6 +14,15 @@ import {
 import { COIN_NAMES } from '../../core/types';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 import { getPublicKeyHexFromPrivate, signMessage } from '../../core/signature';
+import {
+    bindNavigation,
+    escapeHtml,
+    renderDappSiteCard,
+    renderEmptyState,
+    renderHeaderBar,
+    renderNotice,
+    shortAddress,
+} from '../utils/ui';
 
 const TEXT = {
     'zh-CN': {
@@ -81,26 +90,21 @@ export async function renderDappSignConnect(): Promise<void> {
     if (!account || !pending) {
         app.innerHTML = `
       <div class="page dapp-connect">
-        <header class="header">
-          <button class="header-btn" onclick="navigateTo('home')">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M19 12H5M12 19l-7-7 7-7"/>
-            </svg>
-          </button>
-          <span style="font-weight: 600;">${t.title}</span>
-          <div style="width: 32px;"></div>
-        </header>
+        ${renderHeaderBar({ title: t.title, backPage: 'home' })}
         <div class="page-content">
-          <div class="card" style="text-align: center; padding: 24px;">
-            <div style="font-weight: 600; margin-bottom: 8px;">${t.empty}</div>
-            <button class="btn btn-primary" onclick="navigateTo('home')">${t.backHome}</button>
-          </div>
+          ${renderEmptyState({
+              title: t.empty,
+              description: t.subtitle,
+              iconName: 'key',
+              actionsHtml: `<button class="btn btn-primary btn-block" type="button" data-nav="home">${escapeHtml(t.backHome)}</button>`,
+          })}
         </div>
       </div>
     `;
         bindInlineHandlers(app, {
             navigateTo: (page: string) => (window as any).navigateTo(page),
         });
+        bindNavigation(app);
         return;
     }
 
@@ -117,34 +121,25 @@ export async function renderDappSignConnect(): Promise<void> {
 
     app.innerHTML = `
     <div class="page dapp-connect dapp-sign">
-      <header class="header">
-        <button class="header-btn" onclick="navigateTo('home')">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <span style="font-weight: 600;">${t.title}</span>
-        <div style="width: 32px;"></div>
-      </header>
+      ${renderHeaderBar({ title: t.title, backPage: 'home' })}
 
       <div class="page-content">
-        <div class="card dapp-site-card">
-          <div class="dapp-site-info">
-            <div class="dapp-site-icon">
-              ${siteIcon ? `<img src="${siteIcon}" alt="${siteName}" />` : '<span>🌐</span>'}
-            </div>
-            <div class="dapp-site-text">
-              <div class="dapp-site-title">${siteName}</div>
-              <div class="dapp-site-origin">${pending.origin}</div>
-            </div>
-          </div>
-          <div class="dapp-site-hint">${t.subtitle}</div>
-        </div>
+        ${renderDappSiteCard({
+            title: siteName,
+            origin: pending.origin,
+            iconUrl: siteIcon,
+            hint: t.subtitle,
+            badge: settings.language === 'en' ? 'Signature' : '签名',
+        })}
+        ${renderNotice('warning', settings.language === 'en' ? 'Signature request' : '签名请求',
+            settings.language === 'en'
+                ? 'Only sign if you trust this site and recognize the message below.'
+                : '请确认站点可信，并核对下方签名内容后再继续。')}
         ${
             pendingCount > 1
-                ? `<div style="margin: 6px 4px 12px; color: var(--text-muted); font-size: 12px;">
-                    还有 ${pendingCount - 1} 个待处理签名请求
-                  </div>`
+                ? `<div class="queue-hint">${escapeHtml(settings.language === 'en'
+                    ? `${pendingCount - 1} more pending signature request(s)`
+                    : `还有 ${pendingCount - 1} 个待处理签名请求`)}</div>`
                 : ''
         }
 
@@ -163,14 +158,14 @@ export async function renderDappSignConnect(): Promise<void> {
                                   addr.address
                               }" ${unlocked ? '' : 'disabled'}>
                   <div class="list-item-icon">
-                    <span style="font-weight: 600;">${coinLabel}</span>
+                    <span class="address-coin-label">${coinLabel}</span>
                   </div>
                   <div class="list-item-content">
                     <div class="list-item-title">
-                      ${formatAddress(addr.address)}
+                      ${escapeHtml(formatAddress(addr.address))}
                     </div>
                     <div class="list-item-subtitle">${
-                        unlocked ? `${coinLabel}` : t.needUnlock
+                        escapeHtml(unlocked ? `${coinLabel} · ${shortAddress(addr.address)}` : t.needUnlock)
                     }</div>
                   </div>
                   <div class="dapp-address-radio"></div>
@@ -184,7 +179,7 @@ export async function renderDappSignConnect(): Promise<void> {
 
         <div class="card dapp-sign-message">
           <div class="list-title">${t.signMessage}</div>
-          <pre>${pending.message}</pre>
+          <pre>${escapeHtml(pending.message)}</pre>
         </div>
 
         <div class="dapp-connect-footer">
@@ -198,6 +193,7 @@ export async function renderDappSignConnect(): Promise<void> {
     bindInlineHandlers(app, {
         navigateTo: (page: string) => (window as any).navigateTo(page),
     });
+    bindNavigation(app);
 
     const approveBtn = document.getElementById('dappApproveBtn') as HTMLButtonElement | null;
     const rejectBtn = document.getElementById('dappRejectBtn') as HTMLButtonElement | null;

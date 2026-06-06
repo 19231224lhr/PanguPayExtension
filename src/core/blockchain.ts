@@ -1,18 +1,29 @@
 /**
- * Blockchain types aligned with backend Go structures.
+ * Blockchain core type definitions aligned with the current Go backend.
  */
 
 export interface EcdsaSignature {
-    R: string;
-    S: string;
+    R: string | number | bigint | null;
+    S: string | number | bigint | null;
 }
 
 export interface PublicKeyNew {
-    X?: string;
-    Y?: string;
+    CurveName?: string;
+    Curve?: string;
+    X?: string | number | bigint;
+    Y?: string | number | bigint;
     XHex?: string;
     YHex?: string;
-    Curve: string;
+}
+
+export interface SignatureEnvelope {
+    Algorithm: string;
+    Signature: number[] | string | null;
+}
+
+export interface PublicKeyEnvelope {
+    Algorithm: string;
+    PublicKey: number[] | string | null;
 }
 
 export interface TxPosition {
@@ -36,6 +47,10 @@ export interface TXInputNormal {
     IsCrossChain: boolean;
     InputSignature: EcdsaSignature | NullableEcdsaSignature;
     TXOutputHash: number[] | string;
+    InputSignatureV2?: SignatureEnvelope;
+    SeedReveal?: number[] | string;
+    SeedPublicKeyV2?: PublicKeyEnvelope;
+    SeedChainStep?: number;
 }
 
 export interface TXCerPosition {
@@ -57,6 +72,7 @@ export interface TxCertificate {
     TxCerPosition: TXCerPosition;
     GuarGroupSignature: EcdsaSignature;
     UserSignature: EcdsaSignature;
+    UserSignatureV2?: SignatureEnvelope;
 }
 
 export interface TXOutput {
@@ -72,6 +88,9 @@ export interface TXOutput {
     IsCrossChain: boolean;
     IsGuarMake: boolean;
     Hash?: string;
+    SeedAnchor?: number[] | string;
+    SeedChainStep?: number;
+    DefaultSpendAlgorithm?: string;
 }
 
 export interface InterestAssign {
@@ -88,7 +107,8 @@ export interface SubATX {
     TXOutputs: TXOutput[];
     InterestAssign: InterestAssign;
     ExTXCerID: string[];
-    Data: number[];
+    Data: number[] | string;
+    UserSignatureV2?: SignatureEnvelope;
 }
 
 export interface AggregateGTX {
@@ -117,10 +137,11 @@ export interface Transaction {
     NewValueDiv: Record<number, number>;
     InterestAssign: InterestAssign;
     UserSignature: EcdsaSignature;
+    UserSignatureV2?: SignatureEnvelope;
     TXInputsNormal: TXInputNormal[];
     TXInputsCertificate: TxCertificate[];
     TXOutputs: TXOutput[];
-    Data: number[];
+    Data: number[] | string;
 }
 
 export interface UTXOData {
@@ -152,7 +173,7 @@ export interface BuildTXInfo {
     IsPledgeTX: boolean;
     HowMuchPayForGas: number;
     IsCrossChainTX: boolean;
-    Data: number[];
+    Data: number[] | string;
     InterestAssign: InterestAssign;
 }
 
@@ -166,4 +187,38 @@ export interface UserNewTX {
 export interface AggregateGTXForSubmit {
     TXHash: string;
     AllTransactions: SubATX[];
+}
+
+export function isUTXOData(obj: unknown): obj is UTXOData {
+    if (typeof obj !== 'object' || obj === null) return false;
+    const utxo = obj as Partial<UTXOData>;
+    return (
+        typeof utxo.Value === 'number' &&
+        typeof utxo.Type === 'number' &&
+        typeof utxo.Time === 'number' &&
+        typeof utxo.IsTXCerUTXO === 'boolean' &&
+        utxo.UTXO !== undefined &&
+        utxo.Position !== undefined
+    );
+}
+
+export function isTXOutput(obj: unknown): obj is TXOutput {
+    if (typeof obj !== 'object' || obj === null) return false;
+    const output = obj as Partial<TXOutput>;
+    return (
+        typeof output.ToAddress === 'string' &&
+        typeof output.ToValue === 'number' &&
+        typeof output.IsCrossChain === 'boolean'
+    );
+}
+
+export function isTransaction(obj: unknown): obj is Transaction {
+    if (typeof obj !== 'object' || obj === null) return false;
+    const tx = obj as Partial<Transaction>;
+    return (
+        typeof tx.TXID === 'string' &&
+        typeof tx.TXType === 'number' &&
+        typeof tx.Value === 'number' &&
+        Array.isArray(tx.TXOutputs)
+    );
 }

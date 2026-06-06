@@ -713,12 +713,13 @@ function startSSESync(): void {
                 });
                 window.dispatchEvent(customEvent);
                 if (activeAccountId && data?.tx_id && data?.status) {
-                    void updateTransactionStatus(activeAccountId, data.tx_id, data.status as any, {
+                    const accountId = activeAccountId;
+                    void updateTransactionStatus(accountId, data.tx_id, data.status as any, {
                         blockNumber: data.block_height || 0,
                         failureReason: data.status === 'failed' ? data.error_reason || '' : undefined,
                     }).then((changed) => {
                         if (changed) {
-                            dispatchHistoryUpdate(activeAccountId, data.tx_id, data.status);
+                            dispatchHistoryUpdate(accountId, data.tx_id, data.status);
                         }
                     });
                 }

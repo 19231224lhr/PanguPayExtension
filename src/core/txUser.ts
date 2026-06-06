@@ -1,4 +1,4 @@
-import type { UTXOData, TxCertificate } from './blockchain';
+import type { PublicKeyEnvelope, TxCertificate, UTXOData } from './blockchain';
 
 export interface WalletKeys {
     privHex: string;
@@ -25,10 +25,32 @@ export interface AddressData {
     pubYHex?: string;
     locked?: boolean;
     publicKeyNew?: {
-        CurveName: string;
-        X: number | string;
-        Y: number | string;
+        CurveName?: string;
+        Curve?: string;
+        X: bigint | number | string;
+        Y: bigint | number | string;
     };
+    addressRootSeedHex?: string;
+    signPublicKeyV2?: PublicKeyEnvelope | null;
+    seedAnchor?: number[] | string;
+    seedChainStep?: number;
+    defaultSpendAlgorithm?: string;
+    registrationState?: 'unknown' | 'pending' | 'registered' | 'failed';
+    seedRepairRequired?: boolean;
+    readOnly?: boolean;
+    seedLocalState?: {
+        mode: 'deterministic_p256';
+        chainLength: number;
+        step: number;
+        generation?: number;
+        source: string;
+        available: boolean;
+        requiresUnlock?: boolean;
+    } | null;
+    pendingSeedStep?: number;
+    pendingNextSeedStep?: number;
+    pendingSeedTxId?: string;
+    pendingSeedAt?: number;
 }
 
 export interface Wallet {

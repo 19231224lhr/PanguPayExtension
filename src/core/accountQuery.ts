@@ -2,7 +2,7 @@
  * Account query helpers aligned with frontend logic.
  */
 
-import type { UTXOData } from './blockchain';
+import type { InterestAssign, TXInputNormal, TXOutput, TxCertificate, UTXOData } from './blockchain';
 import {
     API_ENDPOINTS,
     apiClient,
@@ -152,10 +152,10 @@ export function convertToStorageUTXO(
             UTXO: {
                 TXID: txid,
                 TXType: (backendUTXO.TXType as number) || 0,
-                TXInputsNormal: (backendUTXO.TXInputsNormal as unknown[]) || [],
-                TXInputsCertificate: (backendUTXO.TXInputsCertificate as unknown[]) || [],
-                TXOutputs: (backendUTXO.TXOutputs as unknown[]) || [],
-                InterestAssign: (backendUTXO.InterestAssign as Record<string, unknown>) || {
+                TXInputsNormal: (backendUTXO.TXInputsNormal as TXInputNormal[]) || [],
+                TXInputsCertificate: (backendUTXO.TXInputsCertificate as TxCertificate[]) || [],
+                TXOutputs: (backendUTXO.TXOutputs as TXOutput[]) || [],
+                InterestAssign: (backendUTXO.InterestAssign as InterestAssign) || {
                     Gas: 0,
                     Output: 0,
                     BackAssign: {},

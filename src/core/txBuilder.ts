@@ -1,34 +1,80 @@
-/**
+﻿/**
  * Transaction Builder Service
  * 
- * 快速转账交易构造模块
+ * 蹇€熻浆璐︿氦鏄撴瀯閫犳ā鍧?
  * 
- * ⚠️ 重要：本实现严格对齐后端 Go 结构体与验签/序列化规则
- * 参考文档：docs/04-api-integration.md
+ * 鈿狅笍 閲嶈锛氭湰瀹炵幇涓ユ牸瀵归綈鍚庣 Go 缁撴瀯浣撲笌楠岀/搴忓垪鍖栬鍒?
+ * 鍙傝€冩枃妗ｏ細docs/04-api-integration.md
  * 
- * 签名规则：
- * 1. TXInputNormal.InputSignature：使用【地址私钥】对 TXOutput 哈希签名
- * 2. UserNewTX.Sig：使用【账户私钥】对整个 UserNewTX 签名（排除 Sig, Height）
+ * 绛惧悕瑙勫垯锛?
+ * 1. TXInputNormal.InputSignature锛氫娇鐢ㄣ€愬湴鍧€绉侀挜銆戝 TXOutput 鍝堝笇绛惧悕
+ * 2. UserNewTX.Sig锛氫娇鐢ㄣ€愯处鎴风閽ャ€戝鏁翠釜 UserNewTX 绛惧悕锛堟帓闄?Sig, Height锛?
  * 
  * @module services/txBuilder
  */
 
 import { sha256 } from 'js-sha256';
 import { ec as EC } from 'elliptic';
-import { User, AddressData } from './txUser';
-import { UTXOData, TxCertificate } from './blockchain';
+import type { User, AddressData } from './txUser';
+import {
+  UTXOData,
+  TxCertificate,
+  SignatureEnvelope,
+  PublicKeyEnvelope,
+  PublicKeyNew as BlockchainPublicKeyNew,
+  EcdsaSignature as BlockchainEcdsaSignature,
+  TXInputNormal as BlockchainTXInputNormal,
+  TXOutput as BlockchainTXOutput,
+  Transaction as BlockchainTransaction,
+  UserNewTX as BlockchainUserNewTX,
+  InterestAssign as BlockchainInterestAssign,
+  SubATX as BlockchainSubATX,
+  AggregateGTX as BlockchainAggregateGTX
+} from './blockchain';
 import { isUTXOLocked } from './utxoLock';
 import { isAccountPollingActive } from './accountPolling';
+import {
+  AlgorithmECDSAP256,
+  decodeBackendBytes,
+  convertHexToPublicKey,
+  hashBackendJson,
+  publicKeyEnvelopeFromHex,
+  serializeForBackend,
+  signHashEnvelope,
+  signStruct,
+  type PublicKeyNew as SignaturePublicKey
+} from './signature';
+import {
+  DefaultSeedChainLength,
+  buildSeedSpendArtifacts,
+  currentSeed,
+  nextAnchor,
+  recoverDeterministicSeedChainStateFromPrivateKey
+} from './seedChain';
+import {
+  deriveAddressKeypairFromAddressRootSeed,
+  derivePrivateKeyHexFromAddressRootSeed
+} from './addressRootSeed';
 
-// 初始化 P-256 曲线
+// 鍒濆鍖?P-256 鏇茬嚎
 const ec = new EC('p256');
 
+function backendBytesEqual(left: unknown, right: unknown): boolean {
+  const a = decodeBackendBytes(left);
+  const b = decodeBackendBytes(right);
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 // ============================================================================
-// 类型定义（严格匹配后端 Go 结构体）
+// 绫诲瀷瀹氫箟锛堜弗鏍煎尮閰嶅悗绔?Go 缁撴瀯浣擄級
 // ============================================================================
 
 /**
- * ECDSA 签名（内部使用 bigint）
+ * ECDSA 绛惧悕锛堝唴閮ㄤ娇鐢?bigint锛?
  */
 export interface EcdsaSignature {
   R: bigint;
@@ -36,42 +82,39 @@ export interface EcdsaSignature {
 }
 
 /**
- * 用于 JSON 序列化的签名格式
+ * 鐢ㄤ簬 JSON 搴忓垪鍖栫殑绛惧悕鏍煎紡
  * 
- * ⚠️ 重要：Go 的 *big.Int 序列化为 JSON number（不带引号）
- * 但 JavaScript 的 Number 无法精确表示 256 位整数
- * 解决方案：内部用字符串存储，序列化时去掉引号
+ * 鈿狅笍 閲嶈锛欸o 鐨?*big.Int 搴忓垪鍖栦负 JSON number锛堜笉甯﹀紩鍙凤級
+ * 浣?JavaScript 鐨?Number 鏃犳硶绮剧‘琛ㄧず 256 浣嶆暣鏁?
+ * 瑙ｅ喅鏂规锛氬唴閮ㄧ敤瀛楃涓插瓨鍌紝搴忓垪鍖栨椂鍘绘帀寮曞彿
  */
-export interface EcdsaSignatureJSON {
-  R: string | null;  // 十进制字符串，序列化时去引号
-  S: string | null;  // 十进制字符串，序列化时去引号
-}
+export interface EcdsaSignatureJSON extends BlockchainEcdsaSignature {}
 
 /**
- * P-256 公钥
+ * P-256 鍏挜
  */
 export interface PublicKeyNew {
-  CurveName: string;  // 固定为 "P256"
+  CurveName: string;  // 鍥哄畾涓?"P256"
   X: bigint;
   Y: bigint;
 }
 
 
 /**
- * 用于 JSON 序列化的公钥格式
+ * 鐢ㄤ簬 JSON 搴忓垪鍖栫殑鍏挜鏍煎紡
  * 
- * ⚠️ 重要：Go 的 *big.Int 序列化为 JSON number（不带引号）
- * 但 JavaScript 的 Number 无法精确表示 256 位整数
- * 解决方案：内部用字符串存储，序列化时去掉引号
+ * 鈿狅笍 閲嶈锛欸o 鐨?*big.Int 搴忓垪鍖栦负 JSON number锛堜笉甯﹀紩鍙凤級
+ * 浣?JavaScript 鐨?Number 鏃犳硶绮剧‘琛ㄧず 256 浣嶆暣鏁?
+ * 瑙ｅ喅鏂规锛氬唴閮ㄧ敤瀛楃涓插瓨鍌紝搴忓垪鍖栨椂鍘绘帀寮曞彿
  */
-export interface PublicKeyNewJSON {
+export interface PublicKeyNewJSON extends BlockchainPublicKeyNew {
   CurveName: string;
-  X: string;  // 十进制字符串，序列化时去引号
-  Y: string;  // 十进制字符串，序列化时去引号
+  X: string;  // 鍗佽繘鍒跺瓧绗︿覆锛屽簭鍒楀寲鏃跺幓寮曞彿
+  Y: string;  // 鍗佽繘鍒跺瓧绗︿覆锛屽簭鍒楀寲鏃跺幓寮曞彿
 }
 
 /**
- * 交易位置
+ * 浜ゆ槗浣嶇疆
  */
 export interface TxPosition {
   Blocknum: number;
@@ -81,66 +124,48 @@ export interface TxPosition {
 }
 
 /**
- * 交易输出
+ * 浜ゆ槗杈撳嚭
  */
-export interface TXOutput {
-  ToAddress: string;
-  ToValue: number;
-  ToGuarGroupID: string;
+export interface TXOutput extends BlockchainTXOutput {
   ToPublicKey: PublicKeyNewJSON;
-  ToInterest: number;
-  Type: number;              // 货币类型：0=PGC, 1=BTC, 2=ETH
+  Type: number;              // 璐у竵绫诲瀷锛?=PGC, 1=BTC, 2=ETH
   ToPeerID: string;
   IsPayForGas: boolean;
-  IsCrossChain: boolean;
-  IsGuarMake: boolean;
+  SeedAnchor?: number[] | string;
+  SeedChainStep?: number;
+  DefaultSpendAlgorithm?: string;
 }
 
 /**
- * UTXO 输入
+ * UTXO 杈撳叆
  */
 /**
- * UTXO 输入
+ * UTXO 杈撳叆
  * 
- * ⚠️ 重要：字段顺序必须与 Go 结构体 core/transaction.go 中的 TXInputNormal 一致！
+ * 鈿狅笍 閲嶈锛氬瓧娈甸『搴忓繀椤讳笌 Go 缁撴瀯浣?core/transaction.go 涓殑 TXInputNormal 涓€鑷达紒
  */
-export interface TXInputNormal {
-  FromTXID: string;
-  FromTxPosition: TxPosition;
-  FromAddress: string;
-  IsGuarMake: boolean;
-  IsCommitteeMake: boolean;
-  IsCrossChain: boolean;
-  InputSignature: EcdsaSignatureJSON;  // 地址私钥签名（Go 中在 TXOutputHash 前面）
-  TXOutputHash: number[];              // 被引用 TXOutput 的 SHA256 哈希（字节数组）
+export interface TXInputNormal extends BlockchainTXInputNormal {
+  InputSignature: EcdsaSignatureJSON;  // 鍦板潃绉侀挜绛惧悕锛圙o 涓湪 TXOutputHash 鍓嶉潰锛?
+  TXOutputHash: number[];              // 琚紩鐢?TXOutput 鐨?SHA256 鍝堝笇锛堝瓧鑺傛暟缁勶級
+  InputSignatureV2?: SignatureEnvelope;
+  SeedReveal?: number[] | string;
+  SeedPublicKeyV2?: PublicKeyEnvelope;
+  SeedChainStep?: number;
 }
 
 /**
- * 手续费分配
+ * 鎵嬬画璐瑰垎閰?
  */
-export interface InterestAssign {
-  Gas: number;
-  Output: number;
-  BackAssign: Record<string, number>;  // address -> 比例（和为1）
-}
+export interface InterestAssign extends BlockchainInterestAssign {}
 
 /**
- * 交易本体
+ * 浜ゆ槗鏈綋
  */
-export interface Transaction {
-  TXID: string;
-  Size: number;
-  Version: number;
-  GuarantorGroup: string;
-  TXType: number;                      // 0=普通转账
-  Value: number;
-  ValueDivision: Record<number, number>;
-  NewValue: number;
-  NewValueDiv: Record<number, number>;
-  InterestAssign: InterestAssign;
+export interface Transaction extends BlockchainTransaction {
   UserSignature: EcdsaSignatureJSON;
+  UserSignatureV2?: SignatureEnvelope;
   TXInputsNormal: TXInputNormal[];
-  TXInputsCertificate: any[];          // 快速转账填空数组
+  TXInputsCertificate: any[];          // 蹇€熻浆璐﹀～绌烘暟缁?
   TXOutputs: TXOutput[];
   // Go: []byte -> base64 string in JSON
   Data: number[] | string;
@@ -148,40 +173,41 @@ export interface Transaction {
 
 
 /**
- * 用户新交易（提交给后端的顶层结构）
+ * 鐢ㄦ埛鏂颁氦鏄擄紙鎻愪氦缁欏悗绔殑椤跺眰缁撴瀯锛?
  */
-export interface UserNewTX {
+export interface UserNewTX extends BlockchainUserNewTX {
   TX: Transaction;
-  UserID: string;
-  Height: number;
   Sig: EcdsaSignatureJSON;
 }
 
 /**
- * 构建交易参数
+ * 鏋勫缓浜ゆ槗鍙傛暟
  */
 export interface BuildTransactionParams {
-  /** 发送方地址列表 */
+  /** 鍙戦€佹柟鍦板潃鍒楄〃 */
   fromAddresses: string[];
-  /** 收款方信息 */
+  /** 鏀舵鏂逛俊鎭?*/
   recipients: Array<{
     address: string;
     amount: number;
     coinType: number;           // 0=PGC, 1=BTC, 2=ETH
-    publicKeyX: string;         // hex 格式
-    publicKeyY: string;         // hex 格式
+    publicKeyX: string;         // hex 鏍煎紡
+    publicKeyY: string;         // hex 鏍煎紡
     guarGroupID: string;
-    interest?: number;          // 分配的利息
+    interest?: number;          // 鍒嗛厤鐨勫埄鎭?
+    seedAnchor?: number[] | string;
+    seedChainStep?: number;
+    defaultSpendAlgorithm?: string;
   }>;
-  /** 找零地址（按币种） */
+  /** 鎵鹃浂鍦板潃锛堟寜甯佺锛?*/
   changeAddresses: Record<number, string>;
-  /** Gas 费 */
+  /** Gas 璐?*/
   gas: number;
-  /** 是否跨链交易 */
+  /** 鏄惁璺ㄩ摼浜ゆ槗 */
   isCrossChain?: boolean;
-  /** 额外 PGC 兑换 Gas 的数量（用于支付交易费） */
+  /** 棰濆 PGC 鍏戞崲 Gas 鐨勬暟閲忥紙鐢ㄤ簬鏀粯浜ゆ槗璐癸級 */
   howMuchPayForGas?: number;
-  /** 是否优先使用 TXCer（主币种 0） */
+  /** 鏄惁浼樺厛浣跨敤 TXCer锛堜富甯佺 0锛?*/
   preferTXCer?: boolean;
 }
 
@@ -205,12 +231,12 @@ function isUtxoLockedAnyFormat(utxoId: string): boolean {
 }
 
 // ============================================================================
-// 序列化工具函数
+// 搴忓垪鍖栧伐鍏峰嚱鏁?
 // ============================================================================
 
 /**
- * bigint 替换器（用于 JSON.stringify）
- * 将 bigint 转为十进制字符串
+ * bigint 鏇挎崲鍣紙鐢ㄤ簬 JSON.stringify锛?
+ * 灏?bigint 杞负鍗佽繘鍒跺瓧绗︿覆
  */
 function bigintReplacer(_key: string, value: unknown): unknown {
   if (typeof value === 'bigint') {
@@ -220,21 +246,21 @@ function bigintReplacer(_key: string, value: unknown): unknown {
 }
 
 /**
- * 将数字数组（字节数组）转换为 Base64 字符串
+ * 灏嗘暟瀛楁暟缁勶紙瀛楄妭鏁扮粍锛夎浆鎹负 Base64 瀛楃涓?
  * 
- * ⚠️ 重要：Go 的 []byte 序列化为 Base64 字符串，不是数组
- * 例如：[1, 2, 3] -> "AQID"
+ * 鈿狅笍 閲嶈锛欸o 鐨?[]byte 搴忓垪鍖栦负 Base64 瀛楃涓诧紝涓嶆槸鏁扮粍
+ * 渚嬪锛歔1, 2, 3] -> "AQID"
  * 
- * @param arr 数字数组（字节数组）
- * @returns Base64 字符串
+ * @param arr 鏁板瓧鏁扮粍锛堝瓧鑺傛暟缁勶級
+ * @returns Base64 瀛楃涓?
  */
 function byteArrayToBase64(arr: number[]): string {
   if (!arr || arr.length === 0) {
     return '';
   }
-  // 创建 Uint8Array 并转为 Base64
+  // 鍒涘缓 Uint8Array 骞惰浆涓?Base64
   const uint8 = new Uint8Array(arr);
-  // 使用 btoa 进行 Base64 编码
+  // 浣跨敤 btoa 杩涜 Base64 缂栫爜
   let binary = '';
   for (let i = 0; i < uint8.length; i++) {
     binary += String.fromCharCode(uint8[i]);
@@ -243,23 +269,26 @@ function byteArrayToBase64(arr: number[]): string {
 }
 
 /**
- * 将对象中的字节数组字段转换为 Base64
- * 递归处理嵌套对象和数组
+ * 灏嗗璞′腑鐨勫瓧鑺傛暟缁勫瓧娈佃浆鎹负 Base64
+ * 閫掑綊澶勭悊宓屽瀵硅薄鍜屾暟缁?
  * 
- * @param obj 要处理的对象
- * @param byteArrayFields 字节数组字段名列表
+ * @param obj 瑕佸鐞嗙殑瀵硅薄
+ * @param byteArrayFields 瀛楄妭鏁扮粍瀛楁鍚嶅垪琛?
  */
-function convertByteArraysToBase64(obj: Record<string, unknown>, byteArrayFields: string[] = ['TXOutputHash', 'Data']): void {
+function convertByteArraysToBase64(
+  obj: Record<string, unknown>,
+  byteArrayFields: string[] = ['TXOutputHash', 'Data', 'SeedReveal', 'SeedAnchor', 'Signature', 'PublicKey']
+): void {
   if (!obj || typeof obj !== 'object') return;
 
   for (const key of Object.keys(obj)) {
     const value = obj[key];
 
-    // 如果是需要转换的字节数组字段
+    // 濡傛灉鏄渶瑕佽浆鎹㈢殑瀛楄妭鏁扮粍瀛楁
     if (byteArrayFields.includes(key) && Array.isArray(value)) {
       obj[key] = byteArrayToBase64(value as number[]);
     }
-    // 如果是数组，递归处理每个元素
+    // 濡傛灉鏄暟缁勶紝閫掑綊澶勭悊姣忎釜鍏冪礌
     else if (Array.isArray(value)) {
       for (const item of value) {
         if (item && typeof item === 'object') {
@@ -267,7 +296,7 @@ function convertByteArraysToBase64(obj: Record<string, unknown>, byteArrayFields
         }
       }
     }
-    // 如果是对象，递归处理
+    // 濡傛灉鏄璞★紝閫掑綊澶勭悊
     else if (value && typeof value === 'object') {
       convertByteArraysToBase64(value as Record<string, unknown>, byteArrayFields);
     }
@@ -275,20 +304,20 @@ function convertByteArraysToBase64(obj: Record<string, unknown>, byteArrayFields
 }
 
 /**
- * 将对象序列化为 JSON 字符串
+ * 灏嗗璞″簭鍒楀寲涓?JSON 瀛楃涓?
  * 
- * ⚠️ 重要规则：
- * 1. 不要全局排序 key，只对 map 字段排序
- * 2. X/Y/R/S 必须是 JSON number（不带引号）
+ * 鈿狅笍 閲嶈瑙勫垯锛?
+ * 1. 涓嶈鍏ㄥ眬鎺掑簭 key锛屽彧瀵?map 瀛楁鎺掑簭
+ * 2. X/Y/R/S 蹇呴』鏄?JSON number锛堜笉甯﹀紩鍙凤級
  * 
- * @param obj 要序列化的对象
- * @param sortMapFields 需要排序的 map 字段名
+ * @param obj 瑕佸簭鍒楀寲鐨勫璞?
+ * @param sortMapFields 闇€瑕佹帓搴忕殑 map 瀛楁鍚?
  */
 function serializeToJSON(obj: unknown, sortMapFields: string[] = []): string {
-  // 深拷贝并转换 bigint
+  // 娣辨嫹璐濆苟杞崲 bigint
   const copy = JSON.parse(JSON.stringify(obj, bigintReplacer));
 
-  // 只对指定的 map 字段做 key 排序
+  // 鍙鎸囧畾鐨?map 瀛楁鍋?key 鎺掑簭
   for (const field of sortMapFields) {
     if (copy[field] && typeof copy[field] === 'object' && !Array.isArray(copy[field])) {
       const mapValue = copy[field] as Record<string, unknown>;
@@ -301,10 +330,10 @@ function serializeToJSON(obj: unknown, sortMapFields: string[] = []): string {
     }
   }
 
-  // JSON 序列化
+  // JSON 搴忓垪鍖?
   let json = JSON.stringify(copy);
 
-  // 把 X/Y/R/S 字段的引号去掉，变成 JSON number
+  // 鎶?X/Y/R/S 瀛楁鐨勫紩鍙峰幓鎺夛紝鍙樻垚 JSON number
   json = json.replace(/"(X|Y|R|S)":"(\d+)"/g, '"$1":$2');
 
   return json;
@@ -312,136 +341,90 @@ function serializeToJSON(obj: unknown, sortMapFields: string[] = []): string {
 
 
 /**
- * 将排除字段设置为零值
+ * 灏嗘帓闄ゅ瓧娈佃缃负闆跺€?
  * 
- * @param obj 要处理的对象
- * @param excludeFields 要排除的字段名数组
+ * @param obj 瑕佸鐞嗙殑瀵硅薄
+ * @param excludeFields 瑕佹帓闄ょ殑瀛楁鍚嶆暟缁?
  */
 function applyExcludeZeroValue(obj: Record<string, unknown>, excludeFields: string[]): void {
   for (const field of excludeFields) {
     if (!(field in obj)) continue;
 
     if (field === 'Sig' || field === 'UserSignature' || field === 'InputSignature') {
-      // 签名字段的零值是 {R: null, S: null}
+      // 绛惧悕瀛楁鐨勯浂鍊兼槸 {R: null, S: null}
       obj[field] = { R: null, S: null };
     } else if (field === 'Height' || field === 'Size' || field === 'NewValue' || field === 'TXType') {
-      // 数字字段的零值是 0
+      // 鏁板瓧瀛楁鐨勯浂鍊兼槸 0
       obj[field] = 0;
     } else if (field === 'TXID') {
-      // 字符串字段的零值是空字符串
+      // 瀛楃涓插瓧娈电殑闆跺€兼槸绌哄瓧绗︿覆
       obj[field] = '';
     } else if (field === 'NewValueDiv') {
-      // map 字段的零值是空对象
+      // map 瀛楁鐨勯浂鍊兼槸绌哄璞?
       obj[field] = {};
     }
   }
 }
 
 // ============================================================================
-// 哈希计算函数
+// 鍝堝笇璁＄畻鍑芥暟
 // ============================================================================
 
 /**
- * 计算 TXOutput 的 SHA256 哈希
+ * 璁＄畻 TXOutput 鐨?SHA256 鍝堝笇
  * 
- * 后端实现：对 TXOutput 整个结构体 JSON 序列化后求 SHA256
- * ⚠️ 注意：序列化时不排除任何字段
+ * 鍚庣瀹炵幇锛氬 TXOutput 鏁翠釜缁撴瀯浣?JSON 搴忓垪鍖栧悗姹?SHA256
+ * 鈿狅笍 娉ㄦ剰锛氬簭鍒楀寲鏃朵笉鎺掗櫎浠讳綍瀛楁
  * 
- * @param output TXOutput 对象
- * @returns 32字节哈希值（数字数组）
+ * @param output TXOutput 瀵硅薄
+ * @returns 32瀛楄妭鍝堝笇鍊硷紙鏁板瓧鏁扮粍锛?
  */
 export function getTXOutputHash(output: TXOutput): number[] {
-  // JSON 序列化（不排除任何字段，不排序）
-  const jsonStr = serializeToJSON(output);
-
-  // SHA256 哈希
-  const hashBytes = sha256.array(jsonStr);
-
-  return hashBytes;
+  return getOutputHashCompat(output);
 }
 
 /**
- * 计算交易哈希（用于生成 TXID）
+ * 璁＄畻浜ゆ槗鍝堝笇锛堢敤浜庣敓鎴?TXID锛?
  * 
- * 后端实现逻辑：
- * 1. 过滤掉 IsGuarMake=true 的 Input 和 Output
- * 2. 序列化时排除字段：TXID, Size, NewValue, UserSignature, TXType
- * 3. SHA256 哈希
+ * 鍚庣瀹炵幇閫昏緫锛?
+ * 1. 杩囨护鎺?IsGuarMake=true 鐨?Input 鍜?Output
+ * 2. 搴忓垪鍖栨椂鎺掗櫎瀛楁锛歍XID, Size, NewValue, UserSignature, TXType
+ * 3. SHA256 鍝堝笇
  * 
- * @param tx Transaction 对象
- * @returns 32字节哈希值
+ * @param tx Transaction 瀵硅薄
+ * @returns 32瀛楄妭鍝堝笇鍊?
  */
 export function getTXHash(tx: Transaction): number[] {
-  // 1. 过滤掉担保组织构造的 Input 和 Output
+  // 1. 杩囨护鎺夋媴淇濈粍缁囨瀯閫犵殑 Input 鍜?Output
   const filteredInputs = tx.TXInputsNormal.filter(input => !input.IsGuarMake);
   const filteredOutputs = tx.TXOutputs.filter(output => !output.IsGuarMake);
 
-  // 2. 创建临时交易对象
+  // 2. 鍒涘缓涓存椂浜ゆ槗瀵硅薄
   const txForHash = {
     ...tx,
     TXInputsNormal: filteredInputs,
     TXOutputs: filteredOutputs
   };
 
-  // 3. 深拷贝并设置排除字段为零值
-  // ⚠️ 重要：必须与后端 getTXHashForUserSignature 的排除字段完全一致！
-  // 后端排除：TXID, Size, NewValue, UserSignature, TXType
   const copy = JSON.parse(JSON.stringify(txForHash, bigintReplacer));
   applyExcludeZeroValue(copy, ['TXID', 'Size', 'NewValue', 'UserSignature', 'TXType']);
-
-  // 3.5 ⚠️ 重要：将字节数组转换为 Base64（与后端 json.Marshal 行为一致）
-  // Go 的 []byte 序列化为 Base64，所以前端也必须这样做
-  convertByteArraysToBase64(copy);
-
-  // 3.6 ⚠️ 重要：过滤 ValueDivision 和 NewValueDiv 中的 0 值
-  // 这必须与发送给后端的 JSON (serializeUserNewTX) 以及后端的验证逻辑保持一致
-  if (copy.ValueDivision && typeof copy.ValueDivision === 'object') {
-    const clean: Record<string, number> = {};
-    for (const k of Object.keys(copy.ValueDivision)) {
-      const val = copy.ValueDivision[k];
-      if (typeof val === 'number' && val > 0) {
-        clean[k] = val;
-      }
-    }
-    copy.ValueDivision = clean;
-  }
-  if (copy.NewValueDiv && typeof copy.NewValueDiv === 'object') {
-    const clean: Record<string, number> = {};
-    for (const k of Object.keys(copy.NewValueDiv)) {
-      const val = copy.NewValueDiv[k];
-      if (typeof val === 'number' && val > 0) {
-        clean[k] = val;
-      }
-    }
-    copy.NewValueDiv = clean;
-  }
-
-  // 4. 序列化（对 ValueDivision, NewValueDiv, BackAssign 排序）
-  const jsonStr = serializeToJSON(copy, ['ValueDivision', 'NewValueDiv', 'BackAssign']);
-
-  // [SIGDBG] 输出序列化后的完整 JSON，方便与后端比对
-  console.log('[SIGDBG][FRONTEND] getTXHash jsonLen=' + jsonStr.length);
-  console.log('[SIGDBG][FRONTEND] getTXHash preview=' + jsonStr.substring(0, 220));
-  console.log('[SIGDBG][FRONTEND] getTXHash full=', jsonStr);
-
-  // 5. SHA256 哈希
-  return sha256.array(jsonStr);
+  return hashBackendJson(copy);
 }
 
 
 /**
- * 计算 TXID
+ * 璁＄畻 TXID
  * 
- * 后端实现：取交易哈希的前8字节，转为16进制字符串
- * 结果：16个字符的十六进制字符串
+ * 鍚庣瀹炵幇锛氬彇浜ゆ槗鍝堝笇鐨勫墠8瀛楄妭锛岃浆涓?6杩涘埗瀛楃涓?
+ * 缁撴灉锛?6涓瓧绗︾殑鍗佸叚杩涘埗瀛楃涓?
  * 
- * @param tx Transaction 对象
- * @returns TXID（16字符 hex）
+ * @param tx Transaction 瀵硅薄
+ * @returns TXID锛?6瀛楃 hex锛?
  */
 export function calculateTXID(tx: Transaction): string {
   const hash = getTXHash(tx);
 
-  // 取前8字节，转为十六进制
+  // 鍙栧墠8瀛楄妭锛岃浆涓哄崄鍏繘鍒?
   let txid = '';
   for (let i = 0; i < 8; i++) {
     txid += hash[i].toString(16).padStart(2, '0');
@@ -451,41 +434,41 @@ export function calculateTXID(tx: Transaction): string {
 }
 
 // ============================================================================
-// 签名函数
+// 绛惧悕鍑芥暟
 // ============================================================================
 
 /**
- * 对 TXOutput 签名（用于 TXInputNormal.InputSignature）
+ * 瀵?TXOutput 绛惧悕锛堢敤浜?TXInputNormal.InputSignature锛?
  * 
- * 流程：
- * 1. 计算 TXOutput 的 SHA256 哈希
- * 2. 使用地址私钥对哈希签名
+ * 娴佺▼锛?
+ * 1. 璁＄畻 TXOutput 鐨?SHA256 鍝堝笇
+ * 2. 浣跨敤鍦板潃绉侀挜瀵瑰搱甯岀鍚?
  * 
- * @param output 被引用的 TXOutput
- * @param addressPrivateKeyHex 地址私钥（hex 格式）
+ * @param output 琚紩鐢ㄧ殑 TXOutput
+ * @param addressPrivateKeyHex 鍦板潃绉侀挜锛坔ex 鏍煎紡锛?
  * @returns { hash: number[], signature: EcdsaSignature }
  */
 export function signTXOutput(
   output: TXOutput,
   addressPrivateKeyHex: string
 ): { hash: number[]; signature: EcdsaSignature } {
-  // [DEBUG] 打印用于哈希的 TXOutput
+  // [DEBUG] 鎵撳嵃鐢ㄤ簬鍝堝笇鐨?TXOutput
   const jsonForHash = serializeToJSON(output);
-  console.log('[signTXOutput] ========== TXOutput 签名详情 ==========');
-  console.log('[signTXOutput] TXOutput JSON 长度:', jsonForHash.length);
+  console.log('[signTXOutput] ========== TXOutput 绛惧悕璇︽儏 ==========');
+  console.log('[signTXOutput] TXOutput JSON 闀垮害:', jsonForHash.length);
   console.log('[signTXOutput] TXOutput JSON:', jsonForHash);
 
-  // 1. 计算 TXOutput 哈希
+  // 1. 璁＄畻 TXOutput 鍝堝笇
   const hash = getTXOutputHash(output);
 
-  // [DEBUG] 打印哈希值
+  // [DEBUG] 鎵撳嵃鍝堝笇鍊?
   const hashHex = hash.map(b => b.toString(16).padStart(2, '0')).join('');
   const hashBase64 = btoa(String.fromCharCode(...hash));
   console.log('[signTXOutput] TXOutput Hash (hex):', hashHex);
   console.log('[signTXOutput] TXOutput Hash (base64):', hashBase64);
   console.log('[signTXOutput] ========================================');
 
-  // 2. 使用地址私钥签名
+  // 2. 浣跨敤鍦板潃绉侀挜绛惧悕
   const key = ec.keyFromPrivate(addressPrivateKeyHex, 'hex');
   const sig = key.sign(hash);
 
@@ -499,154 +482,95 @@ export function signTXOutput(
 }
 
 /**
- * 对 UserNewTX 签名
+ * 瀵?UserNewTX 绛惧悕
  * 
- * 后端验证逻辑：
- * 1. 使用用户账户公钥验证
- * 2. 排除字段：Sig, Height
+ * 鍚庣楠岃瘉閫昏緫锛?
+ * 1. 浣跨敤鐢ㄦ埛璐︽埛鍏挜楠岃瘉
+ * 2. 鎺掗櫎瀛楁锛歋ig, Height
  * 
- * @param userNewTX UserNewTX 对象
- * @param accountPrivateKeyHex 账户私钥（hex 格式）
+ * @param userNewTX UserNewTX 瀵硅薄
+ * @param accountPrivateKeyHex 璐︽埛绉侀挜锛坔ex 鏍煎紡锛?
  * @returns EcdsaSignature
  */
 export function signUserNewTX(
   userNewTX: UserNewTX,
   accountPrivateKeyHex: string
 ): EcdsaSignature {
-  // 1. 深拷贝
-  const copy = JSON.parse(JSON.stringify(userNewTX, bigintReplacer));
-
-  // 2. ⚠️ 重要：将字节数组转换为 Base64（Go 的 []byte 序列化格式）
-  convertByteArraysToBase64(copy);
-
-  // 3. 将排除字段设为零值
-  applyExcludeZeroValue(copy, ['Sig', 'Height']);
-
-  // 4. 递归处理嵌套的 TX 对象中的 map 字段
-  if (copy.TX) {
-    // 对 TX 内部的 map 字段排序，同时过滤 ValueDivision 和 NewValueDiv 中的 0 值
-    // ⚠️ 重要：此逻辑必须与 serializeUserNewTX 保持一致！
-    const mapFields = ['ValueDivision', 'NewValueDiv', 'BackAssign'];
-    for (const field of mapFields) {
-      if (copy.TX[field] && typeof copy.TX[field] === 'object') {
-        const sorted: Record<string, unknown> = {};
-        for (const k of Object.keys(copy.TX[field]).sort()) {
-          const val = copy.TX[field][k];
-          // 对 ValueDivision 和 NewValueDiv 过滤 0 值
-          if ((field === 'ValueDivision' || field === 'NewValueDiv') &&
-            typeof val === 'number' && val <= 0) {
-            continue;
-          }
-          sorted[k] = val;
-        }
-        copy.TX[field] = sorted;
-      }
-    }
-    // InterestAssign.BackAssign
-    if (copy.TX.InterestAssign?.BackAssign) {
-      const sorted: Record<string, unknown> = {};
-      for (const k of Object.keys(copy.TX.InterestAssign.BackAssign).sort()) {
-        sorted[k] = copy.TX.InterestAssign.BackAssign[k];
-      }
-      copy.TX.InterestAssign.BackAssign = sorted;
-    }
-  }
-
-  // 5. JSON 序列化
-  let jsonStr = JSON.stringify(copy);
-  jsonStr = jsonStr.replace(/"(X|Y|R|S)":"(\d+)"/g, '"$1":$2');
-
-  // 6. SHA256 哈希
-  const hashBytes = sha256.array(jsonStr);
-
-  // 7. 使用账户私钥签名
-  const key = ec.keyFromPrivate(accountPrivateKeyHex, 'hex');
-  const sig = key.sign(hashBytes);
-
+  const sig = signStruct(userNewTX as unknown as Record<string, unknown>, accountPrivateKeyHex, ['Sig', 'Height']);
   return {
-    R: BigInt('0x' + sig.r.toString(16)),
-    S: BigInt('0x' + sig.s.toString(16))
+    R: BigInt(String(sig.R || '0')),
+    S: BigInt(String(sig.S || '0'))
   };
 }
 
 
 // ============================================================================
-// TXCer 签名函数
+// TXCer 绛惧悕鍑芥暟
 // ============================================================================
 
 /**
- * 计算 TXCer 的 SHA256 哈希
+ * 璁＄畻 TXCer 鐨?SHA256 鍝堝笇
  * 
- * 后端实现：GetTXCerHash 排除 GuarGroupSignature 和 UserSignature 字段
+ * 鍚庣瀹炵幇锛欸etTXCerHash 鎺掗櫎 GuarGroupSignature 鍜?UserSignature 瀛楁
  * 
- * @param txCer TxCertificate 对象
- * @returns 32字节哈希值（数字数组）
+ * @param txCer TxCertificate 瀵硅薄
+ * @returns 32瀛楄妭鍝堝笇鍊硷紙鏁板瓧鏁扮粍锛?
  */
 export function getTXCerHash(txCer: TxCertificate): number[] {
-  // 深拷贝并排除签名字段（设为零值）
+  // 娣辨嫹璐濆苟鎺掗櫎绛惧悕瀛楁锛堣涓洪浂鍊硷級
   const copy = JSON.parse(JSON.stringify(txCer, bigintReplacer));
 
-  // 将签名字段设为零值 {R: null, S: null}
+  // 灏嗙鍚嶅瓧娈佃涓洪浂鍊?{R: null, S: null}
   copy.GuarGroupSignature = { R: null, S: null };
   copy.UserSignature = { R: null, S: null };
 
-  // JSON 序列化，把 X/Y/R/S 的引号去掉
+  // JSON 搴忓垪鍖栵紝鎶?X/Y/R/S 鐨勫紩鍙峰幓鎺?
   let jsonStr = JSON.stringify(copy);
   jsonStr = jsonStr.replace(/"(X|Y|R|S)":"(\d+)"/g, '"$1":$2');
 
-  console.log('[TXCer签名] TXCer 哈希 JSON:', jsonStr.slice(0, 200) + '...');
+  console.log('[TXCer绛惧悕] TXCer 鍝堝笇 JSON:', jsonStr.slice(0, 200) + '...');
 
-  // SHA256 哈希
+  // SHA256 鍝堝笇
   return sha256.array(jsonStr);
 }
 
 /**
- * 对 TXCer 签名（用于 TxCertificate.UserSignature）
+ * 瀵?TXCer 绛惧悕锛堢敤浜?TxCertificate.UserSignature锛?
  * 
- * 后端实现：使用接收地址的私钥对 TXCer 哈希签名
- * 参考：core.SignStruct(txcer, a.Wallet.AddressMsg[txcer.ToAddress].WPrivateKey, "UserSignature")
+ * 鍚庣瀹炵幇锛氫娇鐢ㄦ帴鏀跺湴鍧€鐨勭閽ュ TXCer 鍝堝笇绛惧悕
+ * 鍙傝€冿細core.SignStruct(txcer, a.Wallet.AddressMsg[txcer.ToAddress].WPrivateKey, "UserSignature")
  * 
- * @param txCer TxCertificate 对象
- * @param addressPrivateKeyHex 接收地址私钥（hex 格式）
- * @returns 签名后的 TxCertificate 副本
+ * @param txCer TxCertificate 瀵硅薄
+ * @param addressPrivateKeyHex 鎺ユ敹鍦板潃绉侀挜锛坔ex 鏍煎紡锛?
+ * @returns 绛惧悕鍚庣殑 TxCertificate 鍓湰
  */
 export function signTXCer(
   txCer: TxCertificate,
-  addressPrivateKeyHex: string
+  accountPrivateKeyHex: string
 ): TxCertificate {
-  // 深拷贝
+  // 娣辨嫹璐?
   const signedTxCer = JSON.parse(JSON.stringify(txCer, bigintReplacer));
 
-  // 计算哈希
-  const hash = getTXCerHash(txCer);
-
-  console.log('[TXCer签名] TXCerID:', txCer.TXCerID);
-  console.log('[TXCer签名] 哈希长度:', hash.length);
-
-  // 使用地址私钥签名
-  const key = ec.keyFromPrivate(addressPrivateKeyHex, 'hex');
-  const sig = key.sign(hash);
-
-  // 设置 UserSignature（十进制字符串格式）
-  signedTxCer.UserSignature = {
-    R: sig.r.toString(10),
-    S: sig.s.toString(10)
-  };
-
-  console.log('[TXCer签名] UserSignature R:', signedTxCer.UserSignature.R.slice(0, 20) + '...');
+  const hash = hashBackendJson({
+    ...txCer,
+    GuarGroupSignature: { R: null, S: null },
+    UserSignature: { R: null, S: null },
+    UserSignatureV2: { Algorithm: '', Signature: null }
+  });
+  signedTxCer.UserSignatureV2 = signHashEnvelope(AlgorithmECDSAP256, hash, accountPrivateKeyHex);
 
   return signedTxCer;
 }
 
 
 // ============================================================================
-// 公钥工具函数
+// 鍏挜宸ュ叿鍑芥暟
 // ============================================================================
 
 /**
- * 从私钥获取公钥
+ * 浠庣閽ヨ幏鍙栧叕閽?
  * 
- * @param privateKeyHex 私钥（hex 格式）
+ * @param privateKeyHex 绉侀挜锛坔ex 鏍煎紡锛?
  * @returns PublicKeyNew
  */
 export function getPublicKeyFromPrivate(privateKeyHex: string): PublicKeyNew {
@@ -660,7 +584,7 @@ export function getPublicKeyFromPrivate(privateKeyHex: string): PublicKeyNew {
 }
 
 /**
- * 将 PublicKeyNew 转换为 JSON 格式
+ * 灏?PublicKeyNew 杞崲涓?JSON 鏍煎紡
  * 
  * @param pubKey PublicKeyNew
  * @returns PublicKeyNewJSON
@@ -668,20 +592,20 @@ export function getPublicKeyFromPrivate(privateKeyHex: string): PublicKeyNew {
 export function publicKeyToJSON(pubKey: PublicKeyNew): PublicKeyNewJSON {
   return {
     CurveName: pubKey.CurveName,
-    X: pubKey.X.toString(10),  // 转为十进制字符串
-    Y: pubKey.Y.toString(10)   // 转为十进制字符串
+    X: pubKey.X.toString(10),  // 杞负鍗佽繘鍒跺瓧绗︿覆
+    Y: pubKey.Y.toString(10)   // 杞负鍗佽繘鍒跺瓧绗︿覆
   };
 }
 
 /**
- * 将 hex 格式公钥转换为 JSON 格式
+ * 灏?hex 鏍煎紡鍏挜杞崲涓?JSON 鏍煎紡
  * 
- * @param pubXHex 公钥 X 坐标（hex 格式）
- * @param pubYHex 公钥 Y 坐标（hex 格式）
+ * @param pubXHex 鍏挜 X 鍧愭爣锛坔ex 鏍煎紡锛?
+ * @param pubYHex 鍏挜 Y 鍧愭爣锛坔ex 鏍煎紡锛?
  * @returns PublicKeyNewJSON
  */
 export function hexToPublicKeyJSON(pubXHex: string, pubYHex: string): PublicKeyNewJSON {
-  // 处理空字符串情况（用于 IsPayForGas 输出等不需要公钥的场景）
+  // 澶勭悊绌哄瓧绗︿覆鎯呭喌锛堢敤浜?IsPayForGas 杈撳嚭绛変笉闇€瑕佸叕閽ョ殑鍦烘櫙锛?
   const xHex = pubXHex || '0';
   const yHex = pubYHex || '0';
 
@@ -689,40 +613,299 @@ export function hexToPublicKeyJSON(pubXHex: string, pubYHex: string): PublicKeyN
   const y = BigInt('0x' + yHex.replace(/^0x/i, ''));
   return {
     CurveName: 'P256',
-    X: x.toString(10),  // 转为十进制字符串
-    Y: y.toString(10)   // 转为十进制字符串
+    X: x.toString(10),  // 杞负鍗佽繘鍒跺瓧绗︿覆
+    Y: y.toString(10)   // 杞负鍗佽繘鍒跺瓧绗︿覆
   };
 }
 
 /**
- * 将 EcdsaSignature 转换为 JSON 格式
+ * 灏?EcdsaSignature 杞崲涓?JSON 鏍煎紡
  * 
  * @param sig EcdsaSignature
  * @returns EcdsaSignatureJSON
  */
 export function signatureToJSON(sig: EcdsaSignature): EcdsaSignatureJSON {
   return {
-    R: sig.R.toString(10),  // 转为十进制字符串
-    S: sig.S.toString(10)   // 转为十进制字符串
+    R: sig.R.toString(10),  // 杞负鍗佽繘鍒跺瓧绗︿覆
+    S: sig.S.toString(10)   // 杞负鍗佽繘鍒跺瓧绗︿覆
   };
 }
 
+function normalizeAddress(address: string): string {
+  return String(address || '').trim().toLowerCase();
+}
+
+function toSignaturePublicKey(publicKey: unknown): SignaturePublicKey {
+  const raw = (publicKey && typeof publicKey === 'object') ? publicKey as Record<string, unknown> : {};
+  return {
+    CurveName: String(raw.CurveName || 'P256'),
+    X: String(raw.X || '0'),
+    Y: String(raw.Y || '0')
+  };
+}
+
+function getOutputHashCompat(output: TXOutput): number[] {
+  const normalizedOutput: Record<string, unknown> = {
+    ...output,
+    SeedAnchor: output.SeedAnchor || []
+  };
+  return hashBackendJson(normalizedOutput);
+}
+
+function getAddressPrivateKey(address: string, walletData: Record<string, AddressData>): string {
+  const normalized = normalizeAddress(address);
+  return walletData[normalized]?.privHex || walletData[address]?.privHex || '';
+}
+
+function getAddressSpendBlockReason(
+  address: string,
+  addrData: AddressData | undefined,
+  options: { requireRegistration?: boolean } = {}
+): string | null {
+  if (!addrData) return `Address ${address.slice(0, 16)}... is missing wallet metadata`;
+  if (addrData.readOnly) return `Address ${address.slice(0, 16)}... is read-only`;
+  if (addrData.seedRepairRequired) return `Address ${address.slice(0, 16)}... requires local seed repair`;
+  if (addrData.pendingSeedStep || addrData.pendingNextSeedStep) {
+    return `Address ${address.slice(0, 16)}... has an unconfirmed seed step`;
+  }
+  if (!addrData.privHex) return `Address ${address.slice(0, 16)}... private key is locked or missing`;
+  if (!addrData.signPublicKeyV2) return `Address ${address.slice(0, 16)}... is missing SignPublicKeyV2`;
+  if (!addrData.seedAnchor || Number(addrData.seedChainStep || 0) <= 0) {
+    return `Address ${address.slice(0, 16)}... is missing seed metadata`;
+  }
+  if (!String(addrData.defaultSpendAlgorithm || '').trim()) {
+    return `Address ${address.slice(0, 16)}... is missing DefaultSpendAlgorithm`;
+  }
+  if (options.requireRegistration && addrData.registrationState !== 'registered') {
+    return `Retail address ${address.slice(0, 16)}... is not registered`;
+  }
+  return null;
+}
+
+function assertAddressSpendable(
+  address: string,
+  addrData: AddressData | undefined,
+  options: { requireRegistration?: boolean } = {}
+): void {
+  const reason = getAddressSpendBlockReason(address, addrData, options);
+  if (reason) throw new Error(reason);
+}
+
+function getAddressSeedStateForOutput(address: string, walletData: Record<string, AddressData>): {
+  seedAnchor: number[] | string;
+  seedChainStep: number;
+  defaultSpendAlgorithm: string;
+} {
+  const normalized = normalizeAddress(address);
+  const addrData = walletData[normalized] || walletData[address];
+  const blockReason = getAddressSpendBlockReason(address, addrData, { requireRegistration: false });
+  if (blockReason) throw new Error(blockReason);
+  if (!addrData?.seedAnchor || !addrData?.seedChainStep) {
+    throw new Error(`Address ${address.slice(0, 16)}... is missing local seed metadata`);
+  }
+  return {
+    seedAnchor: addrData.seedAnchor,
+    seedChainStep: Number(addrData.seedChainStep),
+    defaultSpendAlgorithm: addrData.defaultSpendAlgorithm || AlgorithmECDSAP256
+  };
+}
+
+function resolveRecipientSeedStateForOutput(
+  recipient: {
+    address: string;
+    seedAnchor?: number[] | string;
+    seedChainStep?: number;
+    defaultSpendAlgorithm?: string;
+  },
+  walletData: Record<string, AddressData>
+): {
+  seedAnchor?: number[] | string;
+  seedChainStep: number;
+  defaultSpendAlgorithm: string;
+} {
+  if (recipient.seedAnchor && Number(recipient.seedChainStep || 0) > 0) {
+    return {
+      seedAnchor: recipient.seedAnchor,
+      seedChainStep: Number(recipient.seedChainStep),
+      defaultSpendAlgorithm: recipient.defaultSpendAlgorithm || AlgorithmECDSAP256
+    };
+  }
+  const normalized = normalizeAddress(recipient.address);
+  const addrData = walletData[normalized] || walletData[recipient.address];
+  if (addrData?.seedAnchor && Number(addrData.seedChainStep || 0) > 0) {
+    return {
+      seedAnchor: addrData.seedAnchor,
+      seedChainStep: Number(addrData.seedChainStep),
+      defaultSpendAlgorithm: addrData.defaultSpendAlgorithm || AlgorithmECDSAP256
+    };
+  }
+  return {
+    seedAnchor: undefined,
+    seedChainStep: 0,
+    defaultSpendAlgorithm: recipient.defaultSpendAlgorithm || AlgorithmECDSAP256
+  };
+}
+
+function getReferencedOutputForUTXO(utxoData: UTXOData): TXOutput | null {
+  const position = utxoData?.Position;
+  const indexZ = position?.IndexZ ?? 0;
+  const outputs = utxoData?.UTXO?.TXOutputs || [];
+  if (indexZ < 0 || indexZ >= outputs.length) {
+    return null;
+  }
+  return outputs[indexZ] as TXOutput;
+}
+
+function buildSeedSweepSelection(
+  address: string,
+  utxoKey: string,
+  utxoData: UTXOData,
+  walletData: Record<string, AddressData>
+): Array<{
+  address: string;
+  utxoKey: string;
+  utxoData: UTXOData;
+  coinType: number;
+}> | null {
+  const normalizedAddress = normalizeAddress(address);
+  const addrData = walletData[normalizedAddress] || walletData[address];
+  if (!addrData) {
+    return null;
+  }
+
+  const baseOutput = getReferencedOutputForUTXO(utxoData);
+  const baseStep = Number(baseOutput?.SeedChainStep || 0);
+  const coinType = Number(addrData.type || utxoData.Type || 0);
+
+  if (!baseOutput?.SeedAnchor || baseStep <= 0) {
+    return [{
+      address: normalizedAddress,
+      utxoKey,
+      utxoData,
+      coinType
+    }];
+  }
+
+  const group: Array<{
+    address: string;
+    utxoKey: string;
+    utxoData: UTXOData;
+    coinType: number;
+  }> = [];
+
+  for (const [candidateKey, candidateData] of Object.entries(addrData.utxos || {})) {
+    if (!candidateData || candidateData.Value <= 0) {
+      continue;
+    }
+    const candidateOutput = getReferencedOutputForUTXO(candidateData);
+    const candidateStep = Number(candidateOutput?.SeedChainStep || 0);
+    if (!candidateOutput?.SeedAnchor || candidateStep !== baseStep) {
+      continue;
+    }
+    if (!backendBytesEqual(candidateOutput.SeedAnchor, baseOutput.SeedAnchor)) {
+      continue;
+    }
+    if (candidateKey !== utxoKey && isUtxoLockedAnyFormat(candidateKey)) {
+      return null;
+    }
+    group.push({
+      address: normalizedAddress,
+      utxoKey: candidateKey,
+      utxoData: candidateData,
+      coinType
+    });
+  }
+
+  if (group.length === 0) {
+    return [{
+      address: normalizedAddress,
+      utxoKey,
+      utxoData,
+      coinType
+    }];
+  }
+
+  return group;
+}
+
+function recoverSeedStateForSpend(address: string, addrData: AddressData, referencedOutput: TXOutput) {
+  const normalizedAddress = normalizeAddress(address);
+  const seedStep = Number(referencedOutput.SeedChainStep || 0);
+  if (!referencedOutput.SeedAnchor || seedStep <= 0) {
+    throw new Error(`Address ${address.slice(0, 16)}... is missing valid seed metadata`);
+  }
+  const chainLength = Number(addrData.seedLocalState?.chainLength || DefaultSeedChainLength) || DefaultSeedChainLength;
+  const attemptedPrivKeys: string[] = [];
+
+  const tryRecover = (privHex: string) => {
+    const normalized = String(privHex || '').trim();
+    if (!normalized) {
+      return null;
+    }
+    attemptedPrivKeys.push(normalized);
+    try {
+      return recoverDeterministicSeedChainStateFromPrivateKey(
+        normalized,
+        chainLength,
+        seedStep,
+        referencedOutput.SeedAnchor
+      );
+    } catch (error) {
+      return { error };
+    }
+  };
+
+  const directResult = tryRecover(addrData?.privHex || '');
+  if (directResult && !('error' in directResult)) {
+    return directResult;
+  }
+
+  const addressType = Number(addrData?.type ?? referencedOutput.Type ?? 0) || 0;
+  if (addrData?.addressRootSeedHex) {
+    const candidateTypes = [addressType, 0, 1, 2].filter((value, index, array) => array.indexOf(value) === index);
+    for (const candidateType of candidateTypes) {
+      const derivedCandidate = deriveAddressKeypairFromAddressRootSeed(addrData.addressRootSeedHex, candidateType);
+      const candidateAddress = normalizeAddress(derivedCandidate.address);
+      const rootSeedResult = tryRecover(derivedCandidate.privHex);
+      if (rootSeedResult && !('error' in rootSeedResult)) {
+        if ((addrData.privHex || '') !== derivedCandidate.privHex) {
+          console.warn(`[浜ゆ槗鏋勯€燷 鍦板潃 ${address.slice(0, 16)}... 鐨勭紦瀛樼閽ヤ笌 AddressRootSeed 娲剧敓缁撴灉涓嶄竴鑷达紝宸蹭娇鐢?root-seed 娲剧敓绉侀挜鎭㈠ seed state`);
+        }
+        if (candidateType !== addressType && candidateAddress === normalizedAddress) {
+          console.warn(`[浜ゆ槗鏋勯€燷 鍦板潃 ${address.slice(0, 16)}... 鐨勬湰鍦板竵绉嶇被鍨嬩负 ${addressType}锛屼絾 AddressRootSeed 鏇村尮閰?type=${candidateType}锛屽凡鑷姩閲囩敤鍖归厤绫诲瀷鎭㈠`);
+        }
+        return rootSeedResult;
+      }
+      if (candidateAddress === normalizedAddress && rootSeedResult && 'error' in rootSeedResult) {
+        console.warn(`[浜ゆ槗鏋勯€燷 鍦板潃 ${address.slice(0, 16)}... 鐨?AddressRootSeed 宸插尮閰嶅綋鍓嶅湴鍧€锛屼絾 seed 鎭㈠浠嶅け璐?`, rootSeedResult.error);
+      }
+    }
+  }
+
+  const lastError = directResult && 'error' in directResult
+    ? directResult.error
+    : new Error(`鍦板潃 ${address.slice(0, 16)}... 缂哄皯绉侀挜`);
+  const attempted = attemptedPrivKeys.length > 0 ? `; attempted keys=${attemptedPrivKeys.length}` : '';
+  throw new Error(`${lastError instanceof Error ? lastError.message : String(lastError)}${attempted}`);
+}
+
 // ============================================================================
-// UTXO 选择
+// UTXO 閫夋嫨
 // ============================================================================
 
 /**
- * 选择 UTXO 以满足转账需求
+ * 閫夋嫨 UTXO 浠ユ弧瓒宠浆璐﹂渶姹?
  * 
- * @param addresses 可用地址列表
- * @param walletData 钱包数据
- * @param requiredAmounts 各币种需要的金额
- * @returns 选中的 UTXO 列表
+ * @param addresses 鍙敤鍦板潃鍒楄〃
+ * @param walletData 閽卞寘鏁版嵁
+ * @param requiredAmounts 鍚勫竵绉嶉渶瑕佺殑閲戦
+ * @returns 閫変腑鐨?UTXO 鍒楄〃
  */
 function selectUTXOs(
   addresses: string[],
   walletData: Record<string, AddressData>,
-  requiredAmounts: Record<number, number>
+  requiredAmounts: Record<number, number>,
+  options: { requireRegistration?: boolean } = {}
 ): Array<{
   address: string;
   utxoKey: string;
@@ -735,18 +918,19 @@ function selectUTXOs(
     utxoData: UTXOData;
     coinType: number;
   }> = [];
+  const consumedKeys = new Set<string>();
 
-  // 按币种统计已收集金额
+  // 鎸夊竵绉嶇粺璁″凡鏀堕泦閲戦
   const collected: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
 
-  console.log('[UTXO选择] 可用地址:', addresses);
-  console.log('[UTXO选择] 需要金额:', requiredAmounts);
-  console.log('[UTXO选择] 钱包数据地址列表:', Object.keys(walletData));
+  console.log('[UTXO閫夋嫨] 鍙敤鍦板潃:', addresses);
+  console.log('[UTXO閫夋嫨] 闇€瑕侀噾棰?', requiredAmounts);
+  console.log('[UTXO閫夋嫨] 閽卞寘鏁版嵁鍦板潃鍒楄〃:', Object.keys(walletData));
 
   for (const address of addresses) {
     const addrData = walletData[address];
     if (!addrData) {
-      console.warn('[UTXO选择] 地址不存在于钱包数据中:', address.slice(0, 16) + '...');
+      console.warn('[UTXO閫夋嫨] 鍦板潃涓嶅瓨鍦ㄤ簬閽卞寘鏁版嵁涓?', address.slice(0, 16) + '...');
       continue;
     }
 
@@ -754,74 +938,79 @@ function selectUTXOs(
     const utxos = addrData.utxos || {};
     const utxoKeys = Object.keys(utxos);
 
-    console.log(`[UTXO选择] 地址 ${address.slice(0, 16)}...`);
-    console.log(`  - 币种: ${coinType}`);
-    console.log(`  - UTXO 数量: ${utxoKeys.length}`);
-    console.log(`  - 有私钥: ${!!addrData.privHex}`);
+    console.log(`[UTXO閫夋嫨] 鍦板潃 ${address.slice(0, 16)}...`);
+    console.log(`  - 甯佺: ${coinType}`);
+    console.log(`  - UTXO 鏁伴噺: ${utxoKeys.length}`);
+    console.log(`  - 鏈夌閽? ${!!addrData.privHex}`);
 
-    // 检查该币种是否还需要更多
+    // 妫€鏌ヨ甯佺鏄惁杩橀渶瑕佹洿澶?
     const needed = requiredAmounts[coinType] || 0;
     if (collected[coinType] >= needed) {
-      console.log(`  - 币种 ${coinType} 已满足需求，跳过`);
+      console.log(`  - 甯佺 ${coinType} 宸叉弧瓒抽渶姹傦紝璺宠繃`);
       continue;
     }
+    assertAddressSpendable(address, addrData, options);
 
-    // 遍历该地址的 UTXO
+    // 閬嶅巻璇ュ湴鍧€鐨?UTXO
     for (const [utxoKey, utxoData] of Object.entries(utxos)) {
+      if (consumedKeys.has(utxoKey)) continue;
       if (isUtxoLockedAnyFormat(utxoKey)) {
-        console.log(`  - UTXO ${utxoKey.slice(0, 16)}... 已锁定(pending)，跳过`);
+        console.log(`  - UTXO ${utxoKey.slice(0, 16)}... is locked, skipped`);
         continue;
       }
       if (!utxoData) {
-        console.log(`  - UTXO ${utxoKey}: 数据为空`);
+        console.log(`  - UTXO ${utxoKey}: 鏁版嵁涓虹┖`);
         continue;
       }
 
       if (utxoData.Value <= 0) {
-        console.log(`  - UTXO ${utxoKey}: 金额为0或负数 (${utxoData.Value})`);
+        console.log(`  - UTXO ${utxoKey}: 閲戦涓?鎴栬礋鏁?(${utxoData.Value})`);
         continue;
       }
 
-      // 检查 UTXO 数据完整性
+      // 妫€鏌?UTXO 鏁版嵁瀹屾暣鎬?
       const hasUTXO = !!utxoData.UTXO;
       const hasTXOutputs = !!(utxoData.UTXO?.TXOutputs?.length);
 
       console.log(`  - UTXO ${utxoKey.slice(0, 16)}...:`);
-      console.log(`    - 金额: ${utxoData.Value}`);
-      console.log(`    - 有 UTXO 字段: ${hasUTXO}`);
-      console.log(`    - 有 TXOutputs: ${hasTXOutputs}`);
+      console.log(`    - 閲戦: ${utxoData.Value}`);
+      console.log(`    - 鏈?UTXO 瀛楁: ${hasUTXO}`);
+      console.log(`    - 鏈?TXOutputs: ${hasTXOutputs}`);
       console.log(`    - Position: ${JSON.stringify(utxoData.Position)}`);
 
       if (!hasUTXO || !hasTXOutputs) {
-        console.warn(`  - UTXO ${utxoKey.slice(0, 16)}... 数据不完整，跳过`);
+        console.warn(`  - UTXO ${utxoKey.slice(0, 16)}... 鏁版嵁涓嶅畬鏁达紝璺宠繃`);
         continue;
       }
 
-      console.log(`  - 选中 UTXO: ${utxoKey.slice(0, 16)}... 金额=${utxoData.Value}`);
+      const sweepGroup = buildSeedSweepSelection(address, utxoKey, utxoData, walletData);
+      if (!sweepGroup) {
+        console.log(`  - UTXO ${utxoKey.slice(0, 16)}... 鎵€鍦?seed step 宸茶閮ㄥ垎閿佸畾锛岃烦杩囨暣涓?step`);
+        continue;
+      }
 
-      selected.push({
-        address,
-        utxoKey,
-        utxoData,
-        coinType
-      });
+      console.log(`  - 閫変腑 seed 缁? ${sweepGroup.map(item => item.utxoKey.slice(0, 16) + '...').join(', ')}`);
+      for (const item of sweepGroup) {
+        if (consumedKeys.has(item.utxoKey)) continue;
+        selected.push(item);
+        consumedKeys.add(item.utxoKey);
+        collected[item.coinType] += item.utxoData.Value;
+      }
 
-      collected[coinType] += utxoData.Value;
-
-      // 检查是否已满足需求
+      // 妫€鏌ユ槸鍚﹀凡婊¤冻闇€姹?
       if (collected[coinType] >= needed) break;
     }
   }
 
-  console.log('[UTXO选择] 最终收集:', collected);
-  console.log('[UTXO选择] 选中 UTXO 数量:', selected.length);
+  console.log('[UTXO閫夋嫨] 鏈€缁堟敹闆?', collected);
+  console.log('[UTXO閫夋嫨] 閫変腑 UTXO 鏁伴噺:', selected.length);
 
-  // 验证是否满足所有需求
+  // 楠岃瘉鏄惁婊¤冻鎵€鏈夐渶姹?
   for (const [coinTypeStr, needed] of Object.entries(requiredAmounts)) {
     const coinType = Number(coinTypeStr);
     if (needed > 0 && collected[coinType] < needed) {
-      const errMsg = `余额不足：需要 ${needed} 类型${coinType}，只有 ${collected[coinType]}`;
-      console.error('[UTXO选择]', errMsg);
+      const errMsg = `浣欓涓嶈冻锛氶渶瑕?${needed} 绫诲瀷${coinType}锛屽彧鏈?${collected[coinType]}`;
+      console.error('[UTXO閫夋嫨]', errMsg);
       throw new Error(errMsg);
     }
   }
@@ -830,19 +1019,20 @@ function selectUTXOs(
 }
 
 /**
- * 选择 UTXO（不抛出错误，尽可能多收集）
+ * 閫夋嫨 UTXO锛堜笉鎶涘嚭閿欒锛屽敖鍙兘澶氭敹闆嗭級
  * 
- * 用于 TXCer 补足场景，即使 UTXO 不足也不报错
+ * 鐢ㄤ簬 TXCer 琛ヨ冻鍦烘櫙锛屽嵆浣?UTXO 涓嶈冻涔熶笉鎶ラ敊
  * 
- * @param addresses 可用地址列表
- * @param walletData 钱包数据
- * @param requiredAmounts 各币种需要的金额
- * @returns 选中的 UTXO 列表
+ * @param addresses 鍙敤鍦板潃鍒楄〃
+ * @param walletData 閽卞寘鏁版嵁
+ * @param requiredAmounts 鍚勫竵绉嶉渶瑕佺殑閲戦
+ * @returns 閫変腑鐨?UTXO 鍒楄〃
  */
 function selectUTXOsPartial(
   addresses: string[],
   walletData: Record<string, AddressData>,
-  requiredAmounts: Record<number, number>
+  requiredAmounts: Record<number, number>,
+  options: { requireRegistration?: boolean } = {}
 ): Array<{
   address: string;
   utxoKey: string;
@@ -855,8 +1045,9 @@ function selectUTXOsPartial(
     utxoData: UTXOData;
     coinType: number;
   }> = [];
+  const consumedKeys = new Set<string>();
 
-  // 按币种统计已收集金额
+  // 鎸夊竵绉嶇粺璁″凡鏀堕泦閲戦
   const collected: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
 
   for (const address of addresses) {
@@ -866,58 +1057,60 @@ function selectUTXOsPartial(
     const coinType = addrData.type || 0;
     const utxos = addrData.utxos || {};
 
-    // 检查该币种是否还需要更多
+    // 妫€鏌ヨ甯佺鏄惁杩橀渶瑕佹洿澶?
     const needed = requiredAmounts[coinType] || 0;
     if (collected[coinType] >= needed) continue;
+    assertAddressSpendable(address, addrData, options);
 
-    // 遍历该地址的 UTXO
+    // 閬嶅巻璇ュ湴鍧€鐨?UTXO
     for (const [utxoKey, utxoData] of Object.entries(utxos)) {
+      if (consumedKeys.has(utxoKey)) continue;
       if (isUtxoLockedAnyFormat(utxoKey)) continue;
       if (!utxoData || utxoData.Value <= 0) continue;
       if (!utxoData.UTXO || !utxoData.UTXO.TXOutputs?.length) continue;
 
-      selected.push({
-        address,
-        utxoKey,
-        utxoData,
-        coinType
-      });
-
-      collected[coinType] += utxoData.Value;
+      const sweepGroup = buildSeedSweepSelection(address, utxoKey, utxoData, walletData);
+      if (!sweepGroup) continue;
+      for (const item of sweepGroup) {
+        if (consumedKeys.has(item.utxoKey)) continue;
+        selected.push(item);
+        consumedKeys.add(item.utxoKey);
+        collected[item.coinType] += item.utxoData.Value;
+      }
       if (collected[coinType] >= needed) break;
     }
   }
 
-  // 不验证是否满足需求，直接返回已收集的
+  // 涓嶉獙璇佹槸鍚︽弧瓒抽渶姹傦紝鐩存帴杩斿洖宸叉敹闆嗙殑
   return selected;
 }
 
 
 // ============================================================================
-// 主构造函数
+// 涓绘瀯閫犲嚱鏁?
 // ============================================================================
 
 /**
- * 构建快速转账交易
+ * 鏋勫缓蹇€熻浆璐︿氦鏄?
  * 
- * 完整流程：
- * 1. 选择 UTXO
- * 2. 构造 TXInputNormal（包含 InputSignature）
- * 3. 构造 TXOutput
- * 4. 构造 Transaction
- * 5. 计算 TXID
- * 6. 构造 UserNewTX 并签名
+ * 瀹屾暣娴佺▼锛?
+ * 1. 閫夋嫨 UTXO
+ * 2. 鏋勯€?TXInputNormal锛堝寘鍚?InputSignature锛?
+ * 3. 鏋勯€?TXOutput
+ * 4. 鏋勯€?Transaction
+ * 5. 璁＄畻 TXID
+ * 6. 鏋勯€?UserNewTX 骞剁鍚?
  * 
- * @param params 构建参数
- * @param user 用户数据
+ * @param params 鏋勫缓鍙傛暟
+ * @param user 鐢ㄦ埛鏁版嵁
  * @returns UserNewTX
  */
 export async function buildTransaction(
   params: BuildTransactionParams,
   user: User
 ): Promise<UserNewTX> {
-  console.log('[交易构造] 开始构建交易...');
-  console.log('[交易构造] 参数:', JSON.stringify(params, null, 2));
+  console.log('[浜ゆ槗鏋勯€燷 寮€濮嬫瀯寤轰氦鏄?..');
+  console.log('[浜ゆ槗鏋勯€燷 鍙傛暟:', JSON.stringify(params, null, 2));
 
   const {
     fromAddresses,
@@ -929,49 +1122,49 @@ export async function buildTransaction(
     preferTXCer = false
   } = params;
 
-  // 获取钱包数据
+  // 鑾峰彇閽卞寘鏁版嵁
   const walletData = user.wallet?.addressMsg || {};
   const guarGroupID = user.orgNumber || user.guarGroup?.groupID || '';
   const userID = user.accountId || '';
 
-  console.log('[交易构造] 用户ID:', userID);
-  console.log('[交易构造] 担保组织ID:', guarGroupID);
-  console.log('[交易构造] 钱包地址数量:', Object.keys(walletData).length);
-  console.log('[交易构造] 发送地址:', fromAddresses);
+  console.log('[浜ゆ槗鏋勯€燷 鐢ㄦ埛ID:', userID);
+  console.log('[浜ゆ槗鏋勯€燷 鎷呬繚缁勭粐ID:', guarGroupID);
+  console.log('[浜ゆ槗鏋勯€燷 閽卞寘鍦板潃鏁伴噺:', Object.keys(walletData).length);
+  console.log('[浜ゆ槗鏋勯€燷 鍙戦€佸湴鍧€:', fromAddresses);
 
   if (!guarGroupID) {
-    throw new Error('用户未加入担保组织');
+    throw new Error('User is not in a guarantor group');
   }
 
   if (!userID) {
-    throw new Error('用户 ID 不存在');
+    throw new Error('User ID is missing');
   }
 
-  // 获取账户私钥
+  // 鑾峰彇璐︽埛绉侀挜
   const accountPrivKey = user.keys?.privHex || user.privHex || '';
   if (!accountPrivKey) {
-    throw new Error('账户私钥不存在');
+    throw new Error('Account private key is missing');
   }
-  console.log('[交易构造] 账户私钥存在:', !!accountPrivKey);
+  console.log('[浜ゆ槗鏋勯€燷 璐︽埛绉侀挜瀛樺湪:', !!accountPrivKey);
 
-  // ========== Step 1: 计算各币种需要的金额 ==========
+  // ========== Step 1: 璁＄畻鍚勫竵绉嶉渶瑕佺殑閲戦 ==========
   const requiredAmounts: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
   for (const recipient of recipients) {
     requiredAmounts[recipient.coinType] = (requiredAmounts[recipient.coinType] || 0) + recipient.amount;
   }
 
-  // 额外兑换 Gas 的 PGC 也需要从 UTXO 中扣除（币种 0 = PGC）
+  // 棰濆鍏戞崲 Gas 鐨?PGC 涔熼渶瑕佷粠 UTXO 涓墸闄わ紙甯佺 0 = PGC锛?
   if (howMuchPayForGas > 0) {
     requiredAmounts[0] += howMuchPayForGas;
-    console.log('[交易构造] 包含额外 Gas 兑换:', howMuchPayForGas, 'PGC');
+    console.log('[浜ゆ槗鏋勯€燷 鍖呭惈棰濆 Gas 鍏戞崲:', howMuchPayForGas, 'PGC');
   }
 
-  console.log('[交易构造] 需要金额:', requiredAmounts);
+  console.log('[浜ゆ槗鏋勯€燷 闇€瑕侀噾棰?', requiredAmounts);
 
-  // ========== Step 2: 选择 UTXO 和 TXCer ==========
-  console.log('[交易构造] 开始选择 UTXO...');
+  // ========== Step 2: 閫夋嫨 UTXO 鍜?TXCer ==========
+  console.log('[浜ゆ槗鏋勯€燷 寮€濮嬮€夋嫨 UTXO...');
 
-  // 先尝试仅使用 UTXO（或按 preferTXCer 规则优先使用 TXCer）
+  // 鍏堝皾璇曚粎浣跨敤 UTXO锛堟垨鎸?preferTXCer 瑙勫垯浼樺厛浣跨敤 TXCer锛?
   let selectedUTXOs: Array<{
     address: string;
     utxoKey: string;
@@ -985,7 +1178,7 @@ export async function buildTransaction(
     address: string;
   }> = [];
 
-  let txType = 0; // 0 = 普通转账，1 = 使用了 TXCer
+  let txType = 0; // 0 = 鏅€氳浆璐︼紝1 = 浣跨敤浜?TXCer
 
   const buildAvailableTXCers = (): Array<{ txCerId: string; txCer: TxCertificate; address: string; value: number }> => {
     const availableTXCers: Array<{ txCerId: string; txCer: TxCertificate; address: string; value: number }> = [];
@@ -1002,7 +1195,7 @@ export async function buildTransaction(
         }
       }
     }
-    console.log('[交易构造] 可用 TXCer 数量:', availableTXCers.length);
+    console.log('[浜ゆ槗鏋勯€燷 鍙敤 TXCer 鏁伴噺:', availableTXCers.length);
     return availableTXCers;
   };
 
@@ -1015,15 +1208,15 @@ export async function buildTransaction(
       if (remainingNeeded <= 0) break;
       selectedTXCers.push({ txCerId: txCerInfo.txCerId, txCer: txCerInfo.txCer, address: txCerInfo.address });
       remainingNeeded -= txCerInfo.value;
-      console.log('[交易构造] 选中 TXCer:', txCerInfo.txCerId.slice(0, 8) + '...', '金额:', txCerInfo.value);
+      console.log('[浜ゆ槗鏋勯€燷 閫変腑 TXCer:', txCerInfo.txCerId.slice(0, 8) + '...', '閲戦:', txCerInfo.value);
     }
     return remainingNeeded;
   };
 
   if (preferTXCer) {
-    console.log('[交易构造] preferTXCer=true，主币种优先使用 TXCer');
+    console.log('[浜ゆ槗鏋勯€燷 preferTXCer=true锛屼富甯佺浼樺厛浣跨敤 TXCer');
     if (isCrossChain) {
-      throw new Error('跨链交易不能使用 TXCer');
+      throw new Error('璺ㄩ摼浜ゆ槗涓嶈兘浣跨敤 TXCer');
     }
     const availableTXCers = buildAvailableTXCers();
     const mainCurrencyNeeded = requiredAmounts[0] || 0;
@@ -1032,7 +1225,7 @@ export async function buildTransaction(
     const requiredAfterTXCer: Record<number, number> = { ...requiredAmounts };
     requiredAfterTXCer[0] = Math.max(0, remainingMain);
 
-    // 主币种仍不足，或者存在非主币种需求，则补充选择 UTXO
+    // 涓诲竵绉嶄粛涓嶈冻锛屾垨鑰呭瓨鍦ㄩ潪涓诲竵绉嶉渶姹傦紝鍒欒ˉ鍏呴€夋嫨 UTXO
     if (requiredAfterTXCer[0] > 0 || (requiredAfterTXCer[1] || 0) > 0 || (requiredAfterTXCer[2] || 0) > 0) {
       try {
         selectedUTXOs = selectUTXOs(fromAddresses, walletData, requiredAfterTXCer);
@@ -1041,7 +1234,7 @@ export async function buildTransaction(
       }
     }
 
-    // 校验主币种是否足够（UTXO+TXCer）
+    // 鏍￠獙涓诲竵绉嶆槸鍚﹁冻澶燂紙UTXO+TXCer锛?
     let mainCollected = 0;
     for (const { utxoData, coinType } of selectedUTXOs) {
       if (coinType === 0) mainCollected += utxoData.Value;
@@ -1050,44 +1243,44 @@ export async function buildTransaction(
     for (const { txCer } of selectedTXCers) txCerCollected += txCer.Value;
     const stillNeed = mainCurrencyNeeded - (mainCollected + txCerCollected);
     if (stillNeed > 0.00000001) {
-      throw new Error(`余额不足：UTXO + TXCer 仍然缺少 ${stillNeed.toFixed(4)} 主货币`);
+      throw new Error(`Insufficient balance: UTXO + TXCer still missing ${stillNeed.toFixed(4)} main coin`);
     }
 
     if (selectedTXCers.length > 0) {
       txType = 1;
-      console.log('[交易构造] preferTXCer 模式：TXType 设为 1');
+      console.log('[浜ゆ槗鏋勯€燷 preferTXCer 妯″紡锛歍XType 璁句负 1');
     }
   } else {
     try {
       selectedUTXOs = selectUTXOs(fromAddresses, walletData, requiredAmounts);
-      console.log('[交易构造] UTXO 足够，选中数量:', selectedUTXOs.length);
+      console.log('[浜ゆ槗鏋勯€燷 UTXO 瓒冲锛岄€変腑鏁伴噺:', selectedUTXOs.length);
     } catch (utxoError) {
-      // UTXO 不足，尝试使用 TXCer 补足（仅主货币）
-      console.log('[交易构造] UTXO 不足，尝试使用 TXCer 补足...');
+      // UTXO 涓嶈冻锛屽皾璇曚娇鐢?TXCer 琛ヨ冻锛堜粎涓昏揣甯侊級
+      console.log('[浜ゆ槗鏋勯€燷 UTXO 涓嶈冻锛屽皾璇曚娇鐢?TXCer 琛ヨ冻...');
 
-      // 检查条件：TXCer 只能用于主货币（type=0），且不能用于质押交易和跨链交易
+      // 妫€鏌ユ潯浠讹細TXCer 鍙兘鐢ㄤ簬涓昏揣甯侊紙type=0锛夛紝涓斾笉鑳界敤浜庤川鎶间氦鏄撳拰璺ㄩ摼浜ゆ槗
       if (isCrossChain) {
-        throw new Error('跨链交易不能使用 TXCer');
+        throw new Error('璺ㄩ摼浜ゆ槗涓嶈兘浣跨敤 TXCer');
       }
 
-      // 检查是否只涉及主货币
+      // 妫€鏌ユ槸鍚﹀彧娑夊強涓昏揣甯?
       const hasNonMainCurrency = [1, 2].some(t => (requiredAmounts[t] || 0) > 0);
       if (hasNonMainCurrency) {
-        // 非主货币交易，重新抛出 UTXO 不足错误
+        // 闈炰富璐у竵浜ゆ槗锛岄噸鏂版姏鍑?UTXO 涓嶈冻閿欒
         throw utxoError;
       }
 
       const availableTXCers = buildAvailableTXCers();
 
-      // 重新尝试选择 UTXO（不抛出错误）
+      // 閲嶆柊灏濊瘯閫夋嫨 UTXO锛堜笉鎶涘嚭閿欒锛?
       try {
         selectedUTXOs = selectUTXOs(fromAddresses, walletData, requiredAmounts);
       } catch {
-        // 忽略错误，selectedUTXOs 保持为空数组
+        // 蹇界暐閿欒锛宻electedUTXOs 淇濇寔涓虹┖鏁扮粍
         selectedUTXOs = selectUTXOsPartial(fromAddresses, walletData, requiredAmounts);
       }
 
-      // 计算 UTXO 已收集的金额
+      // 璁＄畻 UTXO 宸叉敹闆嗙殑閲戦
       let utxoCollected = 0;
       for (const { utxoData, coinType } of selectedUTXOs) {
         if (coinType === 0) {
@@ -1095,201 +1288,249 @@ export async function buildTransaction(
         }
       }
 
-      // 计算还需要多少主货币
+      // 璁＄畻杩橀渶瑕佸灏戜富璐у竵
       const mainCurrencyNeeded = requiredAmounts[0] || 0;
       let remainingNeeded = mainCurrencyNeeded - utxoCollected;
 
-      console.log('[交易构造] UTXO 已收集:', utxoCollected, '还需:', remainingNeeded);
+      console.log('[浜ゆ槗鏋勯€燷 UTXO 宸叉敹闆?', utxoCollected, '杩橀渶:', remainingNeeded);
 
       remainingNeeded = selectTXCersForMainCurrency(availableTXCers, remainingNeeded);
 
       if (remainingNeeded > 0.00000001) {
-        throw new Error(`余额不足：UTXO + TXCer 仍然缺少 ${remainingNeeded.toFixed(4)} 主货币`);
+        throw new Error(`Insufficient balance: UTXO + TXCer still missing ${remainingNeeded.toFixed(4)} main coin`);
       }
 
-      // 标记为使用了 TXCer
+      // 鏍囪涓轰娇鐢ㄤ簡 TXCer
       if (selectedTXCers.length > 0) {
         txType = 1;
-        console.log('[交易构造] 将使用 TXCer 补足，TXType 设为 1');
+        console.log('[浜ゆ槗鏋勯€燷 灏嗕娇鐢?TXCer 琛ヨ冻锛孴XType 璁句负 1');
       }
     }
   }
-  console.log('[交易构造] 选中 UTXO 数量:', selectedUTXOs.length);
-  console.log('[交易构造] 选中 TXCer 数量:', selectedTXCers.length);
+  console.log('[浜ゆ槗鏋勯€燷 閫変腑 UTXO 鏁伴噺:', selectedUTXOs.length);
+  console.log('[浜ゆ槗鏋勯€燷 閫変腑 TXCer 鏁伴噺:', selectedTXCers.length);
 
-  // 计算各币种收集的总额（包含 TXCer）
+  // 璁＄畻鍚勫竵绉嶆敹闆嗙殑鎬婚锛堝寘鍚?TXCer锛?
   const collectedAmounts: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
   for (const { utxoData, coinType } of selectedUTXOs) {
     collectedAmounts[coinType] += utxoData.Value;
   }
-  // TXCer 只能是主货币
+  // TXCer 鍙兘鏄富璐у竵
   for (const { txCer } of selectedTXCers) {
     collectedAmounts[0] += txCer.Value;
   }
-  console.log('[交易构造] 收集金额（含TXCer）:', collectedAmounts);
+  console.log('[浜ゆ槗鏋勯€燷 鏀堕泦閲戦锛堝惈TXCer锛?', collectedAmounts);
 
-  // ========== Step 3: 构造 TXOutput ==========
+  const advancedOutputMeta = new Map<string, {
+    seedAnchor: number[] | string;
+    seedChainStep: number;
+    defaultSpendAlgorithm: string;
+  }>();
+
+  for (const { address, utxoData } of selectedUTXOs) {
+    const normalizedAddress = normalizeAddress(address);
+    if (advancedOutputMeta.has(normalizedAddress)) {
+      continue;
+    }
+    const addrData = walletData[normalizedAddress] || walletData[address];
+    if (!addrData?.privHex) {
+      continue;
+    }
+    const position = utxoData.Position;
+    const referencedOutput = utxoData.UTXO?.TXOutputs?.[position?.IndexZ || 0] as TXOutput | undefined;
+    if (!referencedOutput?.SeedAnchor || !referencedOutput?.SeedChainStep) {
+      continue;
+    }
+    const spendState = recoverSeedStateForSpend(normalizedAddress, addrData, referencedOutput);
+    if (spendState.step <= 1) {
+      throw new Error(`Address ${normalizedAddress.slice(0, 16)}... seed chain is exhausted`);
+    }
+    advancedOutputMeta.set(normalizedAddress, {
+      seedAnchor: nextAnchor(spendState),
+      seedChainStep: spendState.step - 1,
+      defaultSpendAlgorithm: addrData.defaultSpendAlgorithm || AlgorithmECDSAP256
+    });
+  }
+
+  // ========== Step 3: 鏋勯€?TXOutput ==========
   const txOutputs: TXOutput[] = [];
 
-  // 3.1 收款输出
+  // 3.1 鏀舵杈撳嚭
   for (const recipient of recipients) {
+    const recipientSeedMeta = isCrossChain
+      ? { seedAnchor: [], seedChainStep: 0, defaultSpendAlgorithm: '' }
+      : resolveRecipientSeedStateForOutput(recipient, walletData);
+    if (!isCrossChain && (!recipientSeedMeta.seedAnchor || !recipientSeedMeta.seedChainStep)) {
+      throw new Error(`Recipient ${recipient.address.slice(0, 16)}... is missing seed metadata`);
+    }
     txOutputs.push({
       ToAddress: recipient.address,
       ToValue: recipient.amount,
       ToGuarGroupID: recipient.guarGroupID,
-      ToPublicKey: hexToPublicKeyJSON(recipient.publicKeyX, recipient.publicKeyY),
+      ToPublicKey: convertHexToPublicKey(recipient.publicKeyX, recipient.publicKeyY) as unknown as PublicKeyNewJSON,
       ToInterest: recipient.interest || 0,
       Type: recipient.coinType,
       ToPeerID: '',
       IsPayForGas: false,
-      // ⚠️ 重要：字段顺序必须与 Go 结构体一致（IsCrossChain 在 IsGuarMake 前）
+      // 鈿狅笍 閲嶈锛氬瓧娈甸『搴忓繀椤讳笌 Go 缁撴瀯浣撲竴鑷达紙IsCrossChain 鍦?IsGuarMake 鍓嶏級
       IsCrossChain: isCrossChain,
-      IsGuarMake: false
+      IsGuarMake: false,
+      SeedAnchor: isCrossChain ? [] : recipientSeedMeta.seedAnchor,
+      SeedChainStep: isCrossChain ? 0 : recipientSeedMeta.seedChainStep,
+      DefaultSpendAlgorithm: isCrossChain ? '' : recipientSeedMeta.defaultSpendAlgorithm
     });
   }
 
-  // 3.2 找零输出
+  // 3.2 鎵鹃浂杈撳嚭
   for (const [coinTypeStr, collected] of Object.entries(collectedAmounts)) {
     const coinType = Number(coinTypeStr);
     const required = requiredAmounts[coinType] || 0;
     const change = collected - required;
 
-    if (change > 0.00000001) {  // 有找零
+    if (change > 0.00000001) {  // 鏈夋壘闆?
       const changeAddr = changeAddresses[coinType];
       if (!changeAddr) {
-        throw new Error(`缺少币种 ${coinType} 的找零地址`);
+        throw new Error(`缂哄皯甯佺 ${coinType} 鐨勬壘闆跺湴鍧€`);
       }
 
       const changeAddrData = walletData[changeAddr];
       if (!changeAddrData) {
-        throw new Error(`找零地址 ${changeAddr} 不存在`);
+        throw new Error(`Change address ${changeAddr} does not exist`);
       }
 
-      // 获取找零地址的公钥
+      // 鑾峰彇鎵鹃浂鍦板潃鐨勫叕閽?
       const changePubX = changeAddrData.pubXHex || '';
       const changePubY = changeAddrData.pubYHex || '';
       if (!changePubX || !changePubY) {
-        throw new Error(`找零地址 ${changeAddr} 缺少公钥`);
+        throw new Error(`鎵鹃浂鍦板潃 ${changeAddr} 缂哄皯鍏挜`);
       }
+      const normalizedChangeAddr = normalizeAddress(changeAddr);
+      const changeSeedMeta = advancedOutputMeta.get(normalizedChangeAddr) || getAddressSeedStateForOutput(normalizedChangeAddr, walletData);
 
       txOutputs.push({
         ToAddress: changeAddr,
         ToValue: change,
         ToGuarGroupID: guarGroupID,
-        ToPublicKey: hexToPublicKeyJSON(changePubX, changePubY),
+        ToPublicKey: convertHexToPublicKey(changePubX, changePubY) as unknown as PublicKeyNewJSON,
         ToInterest: 0,
         Type: coinType,
         ToPeerID: '',
         IsPayForGas: false,
         IsCrossChain: false,
-        IsGuarMake: false
+        IsGuarMake: false,
+        SeedAnchor: changeSeedMeta.seedAnchor,
+        SeedChainStep: changeSeedMeta.seedChainStep,
+        DefaultSpendAlgorithm: changeSeedMeta.defaultSpendAlgorithm
       });
     }
   }
 
-  // 3.3 额外 PGC 兑换 Gas 输出（IsPayForGas: true）
-  // 用于将额外的 PGC 兑换为 Gas，后端会将此输出金额加到可用利息中
+  // 3.3 棰濆 PGC 鍏戞崲 Gas 杈撳嚭锛圛sPayForGas: true锛?
+  // 鐢ㄤ簬灏嗛澶栫殑 PGC 鍏戞崲涓?Gas锛屽悗绔細灏嗘杈撳嚭閲戦鍔犲埌鍙敤鍒╂伅涓?
   if (howMuchPayForGas > 0) {
-    console.log('[交易构造] 创建额外 Gas 输出, 金额:', howMuchPayForGas);
+    console.log('[浜ゆ槗鏋勯€燷 鍒涘缓棰濆 Gas 杈撳嚭, 閲戦:', howMuchPayForGas);
     txOutputs.push({
       ToAddress: '',
       ToValue: howMuchPayForGas,
       ToGuarGroupID: '',
-      ToPublicKey: hexToPublicKeyJSON('', ''),  // 使用空字符串生成零值公钥（与其他输出格式一致）
+      ToPublicKey: hexToPublicKeyJSON('', ''),  // 浣跨敤绌哄瓧绗︿覆鐢熸垚闆跺€煎叕閽ワ紙涓庡叾浠栬緭鍑烘牸寮忎竴鑷达級
       ToInterest: 0,
       Type: 0, // PGC
       ToPeerID: '',
-      IsPayForGas: true,  // 关键标记：标识此输出用于支付 Gas
+      IsPayForGas: true,  // 鍏抽敭鏍囪锛氭爣璇嗘杈撳嚭鐢ㄤ簬鏀粯 Gas
       IsCrossChain: false,
-      IsGuarMake: false
+      IsGuarMake: false,
+      SeedAnchor: [],
+      SeedChainStep: 0,
+      DefaultSpendAlgorithm: ''
     });
   }
 
 
-  // ========== Step 4: 构造 TXInputNormal ==========
-  console.log('[交易构造] 开始构造 TXInputNormal...');
+  // ========== Step 4: 鏋勯€?TXInputNormal ==========
+  console.log('[浜ゆ槗鏋勯€燷 寮€濮嬫瀯閫?TXInputNormal...');
   const txInputs: TXInputNormal[] = [];
 
   for (const { address, utxoKey, utxoData } of selectedUTXOs) {
-    console.log(`[交易构造] 处理地址 ${address.slice(0, 8)}... 的 UTXO`);
+    console.log(`[浜ゆ槗鏋勯€燷 澶勭悊鍦板潃 ${address.slice(0, 8)}... 鐨?UTXO`);
 
-    // 获取地址私钥
+    // 鑾峰彇鍦板潃绉侀挜
     const addrData = walletData[address];
     const addrPrivKey = addrData?.privHex || '';
     if (!addrPrivKey) {
-      const errMsg = `地址 ${address.slice(0, 16)}... 缺少私钥`;
-      console.error('[交易构造]', errMsg);
+      const errMsg = `鍦板潃 ${address.slice(0, 16)}... 缂哄皯绉侀挜`;
+      console.error('[浜ゆ槗鏋勯€燷', errMsg);
       throw new Error(errMsg);
     }
-    console.log('[交易构造] 地址私钥存在:', !!addrPrivKey);
+    console.log('[浜ゆ槗鏋勯€燷 鍦板潃绉侀挜瀛樺湪:', !!addrPrivKey);
 
-    // 获取被引用的 TXOutput
+    // 鑾峰彇琚紩鐢ㄧ殑 TXOutput
     const position = utxoData.Position;
     let indexZ = position?.IndexZ || 0;
 
-    // 预处理：检查 TXID 是否包含旧格式（包含 " + IndexZ" 后缀）
-    // 如果是，需要从中提取真正的 IndexZ
+    // 棰勫鐞嗭細妫€鏌?TXID 鏄惁鍖呭惈鏃ф牸寮忥紙鍖呭惈 " + IndexZ" 鍚庣紑锛?
+    // 濡傛灉鏄紝闇€瑕佷粠涓彁鍙栫湡姝ｇ殑 IndexZ
     let rawTXID = utxoData.UTXO?.TXID || utxoData.TXID || '';
     if (rawTXID.includes(' + ')) {
       const parts = rawTXID.split(' + ');
       const extractedIndexZ = parseInt(parts[1]?.trim() || '0', 10);
-      // 如果 Position.IndexZ 为 0 但 TXID 中有 IndexZ，使用 TXID 中的值
+      // 濡傛灉 Position.IndexZ 涓?0 浣?TXID 涓湁 IndexZ锛屼娇鐢?TXID 涓殑鍊?
       if (indexZ === 0 && extractedIndexZ > 0) {
         indexZ = extractedIndexZ;
-        console.warn(`[交易构造] 从旧格式 TXID 中提取 IndexZ: ${extractedIndexZ}`);
+        console.warn(`[浜ゆ槗鏋勯€燷 浠庢棫鏍煎紡 TXID 涓彁鍙?IndexZ: ${extractedIndexZ}`);
       }
     }
 
-    console.log('[交易构造] UTXO Position:', JSON.stringify(position));
-    console.log('[交易构造] 最终使用的 IndexZ:', indexZ);
-    console.log('[交易构造] UTXO.UTXO 存在:', !!utxoData.UTXO);
-    console.log('[交易构造] UTXO.UTXO.TXOutputs 存在:', !!(utxoData.UTXO?.TXOutputs));
-    console.log('[交易构造] UTXO.UTXO.TXOutputs 长度:', utxoData.UTXO?.TXOutputs?.length || 0);
+    console.log('[浜ゆ槗鏋勯€燷 UTXO Position:', JSON.stringify(position));
+    console.log('[浜ゆ槗鏋勯€燷 鏈€缁堜娇鐢ㄧ殑 IndexZ:', indexZ);
+    console.log('[浜ゆ槗鏋勯€燷 UTXO.UTXO 瀛樺湪:', !!utxoData.UTXO);
+    console.log('[浜ゆ槗鏋勯€燷 UTXO.UTXO.TXOutputs 瀛樺湪:', !!(utxoData.UTXO?.TXOutputs));
+    console.log('[浜ゆ槗鏋勯€燷 UTXO.UTXO.TXOutputs 闀垮害:', utxoData.UTXO?.TXOutputs?.length || 0);
 
-    // [DEBUG] 打印完整的 UTXO 数据，用于诊断 TXOutputHash 不匹配问题
-    console.log('[交易构造] ========== UTXO 完整数据 ==========');
-    console.log('[交易构造] UTXO Key:', utxoKey);
-    console.log('[交易构造] UTXOData.Value:', utxoData.Value);
-    console.log('[交易构造] UTXOData.Type:', utxoData.Type);
-    console.log('[交易构造] UTXOData.UTXO.TXID:', utxoData.UTXO?.TXID);
+    // [DEBUG] 鎵撳嵃瀹屾暣鐨?UTXO 鏁版嵁锛岀敤浜庤瘖鏂?TXOutputHash 涓嶅尮閰嶉棶棰?
+    console.log('[浜ゆ槗鏋勯€燷 ========== UTXO 瀹屾暣鏁版嵁 ==========');
+    console.log('[浜ゆ槗鏋勯€燷 UTXO Key:', utxoKey);
+    console.log('[浜ゆ槗鏋勯€燷 UTXOData.Value:', utxoData.Value);
+    console.log('[浜ゆ槗鏋勯€燷 UTXOData.Type:', utxoData.Type);
+    console.log('[浜ゆ槗鏋勯€燷 UTXOData.UTXO.TXID:', utxoData.UTXO?.TXID);
     if (utxoData.UTXO?.TXOutputs) {
-      console.log('[交易构造] TXOutputs 详情:');
+      console.log('[浜ゆ槗鏋勯€燷 TXOutputs 璇︽儏:');
       utxoData.UTXO.TXOutputs.forEach((output: any, idx: number) => {
-        console.log(`[交易构造]   [${idx}] ToAddress=${output.ToAddress?.slice(0, 16)}..., ToValue=${output.ToValue}, Type=${output.Type || output.ToCoinType}`);
+        console.log(`[浜ゆ槗鏋勯€燷   [${idx}] ToAddress=${output.ToAddress?.slice(0, 16)}..., ToValue=${output.ToValue}, Type=${output.Type || output.ToCoinType}`);
       });
     }
-    console.log('[交易构造] =====================================');
+    console.log('[浜ゆ槗鏋勯€燷 =====================================');
 
-    // 检查 UTXO 数据完整性
+    // 妫€鏌?UTXO 鏁版嵁瀹屾暣鎬?
     if (!utxoData.UTXO) {
-      const errMsg = `UTXO 数据不完整：缺少 UTXO 字段（来源交易信息）。这可能是因为钱包数据未从后端同步完整。`;
-      console.error('[交易构造]', errMsg);
-      console.error('[交易构造] UTXO 数据:', JSON.stringify(utxoData, null, 2));
+      const errMsg = 'UTXO data is incomplete: missing source transaction';
+      console.error('[浜ゆ槗鏋勯€燷', errMsg);
+      console.error('[浜ゆ槗鏋勯€燷 UTXO 鏁版嵁:', JSON.stringify(utxoData, null, 2));
       throw new Error(errMsg);
     }
 
     if (!utxoData.UTXO.TXOutputs || utxoData.UTXO.TXOutputs.length === 0) {
-      const errMsg = `UTXO 数据不完整：缺少 TXOutputs 数组。TXID=${utxoData.UTXO.TXID || '未知'}`;
-      console.error('[交易构造]', errMsg);
-      console.error('[交易构造] UTXO.UTXO:', JSON.stringify(utxoData.UTXO, null, 2));
+      const errMsg = `UTXO data is incomplete: missing TXOutputs, TXID=${utxoData.UTXO.TXID || 'unknown'}`;
+      console.error('[浜ゆ槗鏋勯€燷', errMsg);
+      console.error('[浜ゆ槗鏋勯€燷 UTXO.UTXO:', JSON.stringify(utxoData.UTXO, null, 2));
       throw new Error(errMsg);
     }
 
     const referencedOutput = utxoData.UTXO.TXOutputs[indexZ];
 
     if (!referencedOutput) {
-      const errMsg = `无法获取 UTXO 的原始输出数据：IndexZ=${indexZ} 超出 TXOutputs 范围（长度=${utxoData.UTXO.TXOutputs.length}）`;
-      console.error('[交易构造]', errMsg);
+      const errMsg = `Cannot resolve referenced UTXO output: IndexZ=${indexZ} is out of TXOutputs range (length=${utxoData.UTXO.TXOutputs.length})`;
+      console.error('[浜ゆ槗鏋勯€燷', errMsg);
       throw new Error(errMsg);
     }
-    console.log('[交易构造] 被引用的 TXOutput:', JSON.stringify(referencedOutput, null, 2));
+    console.log('[浜ゆ槗鏋勯€燷 琚紩鐢ㄧ殑 TXOutput:', JSON.stringify(referencedOutput, null, 2));
 
-    // 构造 TXOutput 用于哈希计算
-    // 处理公钥格式转换
+    // 鏋勯€?TXOutput 鐢ㄤ簬鍝堝笇璁＄畻
+    // 澶勭悊鍏挜鏍煎紡杞崲
     const refPubKey = referencedOutput.ToPublicKey;
     let toPublicKey: PublicKeyNewJSON;
     if (refPubKey && typeof refPubKey === 'object') {
-      // 将公钥坐标转为十进制字符串
+      // 灏嗗叕閽ュ潗鏍囪浆涓哄崄杩涘埗瀛楃涓?
       const xVal = (refPubKey as any).X;
       const yVal = (refPubKey as any).Y;
       toPublicKey = {
@@ -1311,34 +1552,39 @@ export async function buildTransaction(
       ToPeerID: referencedOutput.ToPeerID || '',
       IsPayForGas: referencedOutput.IsPayForGas || false,
       IsCrossChain: referencedOutput.IsCrossChain || false,
-      IsGuarMake: referencedOutput.IsGuarMake || false
+      IsGuarMake: referencedOutput.IsGuarMake || false,
+      SeedAnchor: referencedOutput.SeedAnchor || [],
+      SeedChainStep: Number(referencedOutput.SeedChainStep || 0),
+      DefaultSpendAlgorithm: referencedOutput.DefaultSpendAlgorithm || AlgorithmECDSAP256
     };
-    console.log('[交易构造] 用于哈希的 TXOutput:', outputForHash);
+    console.log('[浜ゆ槗鏋勯€燷 鐢ㄤ簬鍝堝笇鐨?TXOutput:', outputForHash);
 
-    // 计算 TXOutput 哈希并签名
+    // 璁＄畻 TXOutput 鍝堝笇骞剁鍚?
     const { hash, signature } = signTXOutput(outputForHash, addrPrivKey);
-    console.log('[交易构造] TXOutput 哈希长度:', hash.length);
-    console.log('[交易构造] InputSignature R:', signature.R.toString().slice(0, 20) + '...');
+    const seedState = recoverSeedStateForSpend(address, addrData as AddressData, outputForHash);
+    const spendArtifacts = buildSeedSpendArtifacts(hash, currentSeed(seedState));
+    console.log('[浜ゆ槗鏋勯€燷 TXOutput 鍝堝笇闀垮害:', hash.length);
+    console.log('[浜ゆ槗鏋勯€燷 InputSignature R:', signature.R.toString().slice(0, 20) + '...');
 
-    // 从 UTXO 数据中获取正确的 TXID
-    // 注意：utxoData.UTXO.TXID 应该是纯 TXID，不包含 " + IndexZ" 后缀
-    // 但如果旧数据中包含了后缀，需要自动修复
+    // 浠?UTXO 鏁版嵁涓幏鍙栨纭殑 TXID
+    // 娉ㄦ剰锛歶txoData.UTXO.TXID 搴旇鏄函 TXID锛屼笉鍖呭惈 " + IndexZ" 鍚庣紑
+    // 浣嗗鏋滄棫鏁版嵁涓寘鍚簡鍚庣紑锛岄渶瑕佽嚜鍔ㄤ慨澶?
     let fromTXID = utxoData.UTXO?.TXID || utxoData.TXID || '';
     let effectiveIndexZ = indexZ;
 
-    // 自动修复：如果 TXID 包含 " + " 后缀（旧格式缓存数据），需要分割
+    // 鑷姩淇锛氬鏋?TXID 鍖呭惈 " + " 鍚庣紑锛堟棫鏍煎紡缂撳瓨鏁版嵁锛夛紝闇€瑕佸垎鍓?
     if (fromTXID.includes(' + ')) {
       const parts = fromTXID.split(' + ');
       fromTXID = parts[0].trim();
-      // 如果 Position.IndexZ 为 0，使用从 TXID 中解析的 IndexZ
+      // 濡傛灉 Position.IndexZ 涓?0锛屼娇鐢ㄤ粠 TXID 涓В鏋愮殑 IndexZ
       if (indexZ === 0 && parts[1]) {
         effectiveIndexZ = parseInt(parts[1].trim(), 10);
       }
-      console.warn(`[交易构造] 检测到旧格式 TXID，已自动修复: "${utxoData.UTXO?.TXID}" => TXID="${fromTXID}", IndexZ=${effectiveIndexZ}`);
+      console.warn(`[浜ゆ槗鏋勯€燷 妫€娴嬪埌鏃ф牸寮?TXID锛屽凡鑷姩淇: "${utxoData.UTXO?.TXID}" => TXID="${fromTXID}", IndexZ=${effectiveIndexZ}`);
     }
 
-    console.log(`[交易构造] FromTXID="${fromTXID}", IndexZ=${effectiveIndexZ}`);
-    console.log(`[交易构造] 将生成 UTXO 标识符: "${fromTXID} + ${effectiveIndexZ}"`);
+    console.log(`[浜ゆ槗鏋勯€燷 FromTXID="${fromTXID}", IndexZ=${effectiveIndexZ}`);
+    console.log(`[浜ゆ槗鏋勯€燷 灏嗙敓鎴?UTXO 鏍囪瘑绗? "${fromTXID} + ${effectiveIndexZ}"`);
 
     txInputs.push({
       FromTXID: fromTXID,
@@ -1351,63 +1597,61 @@ export async function buildTransaction(
       FromAddress: address,
       IsGuarMake: false,
       IsCommitteeMake: false,
-      IsCrossChain: false, // 必须为 false：这是 UTXO -> Light 交易，Input 消耗的是本地 UTXO，不是跨链铸币
-      // ⚠️ 重要：字段顺序必须与 Go 结构体一致！
-      // Go: InputSignature 在 TXOutputHash 前面
+      IsCrossChain: false, // 蹇呴』涓?false锛氳繖鏄?UTXO -> Light 浜ゆ槗锛孖nput 娑堣€楃殑鏄湰鍦?UTXO锛屼笉鏄法閾鹃摳甯?
+      // 鈿狅笍 閲嶈锛氬瓧娈甸『搴忓繀椤讳笌 Go 缁撴瀯浣撲竴鑷达紒
+      // Go: InputSignature 鍦?TXOutputHash 鍓嶉潰
       InputSignature: signatureToJSON(signature),
-      TXOutputHash: hash
+      TXOutputHash: hash,
+      InputSignatureV2: spendArtifacts.inputSignatureV2,
+      SeedReveal: spendArtifacts.seedReveal,
+      SeedPublicKeyV2: spendArtifacts.seedPublicKeyV2,
+      SeedChainStep: seedState.step
     });
   }
 
-  // ========== Step 4.5: 处理 TXCer 输入（如果有） ==========
+  // ========== Step 4.5: 澶勭悊 TXCer 杈撳叆锛堝鏋滄湁锛?==========
   const txInputsCertificate: TxCertificate[] = [];
 
   if (selectedTXCers.length > 0) {
-    console.log('[交易构造] 开始处理 TXCer 输入...');
+    console.log('[浜ゆ槗鏋勯€燷 寮€濮嬪鐞?TXCer 杈撳叆...');
 
     for (const { txCerId, txCer, address } of selectedTXCers) {
-      console.log(`[交易构造] 处理 TXCer ${txCerId.slice(0, 8)}...`);
+      console.log(`[浜ゆ槗鏋勯€燷 澶勭悊 TXCer ${txCerId.slice(0, 8)}...`);
 
-      // 获取接收地址的私钥（TXCer.ToAddress）
-      const txCerAddr = txCer.ToAddress?.toLowerCase() || address.toLowerCase();
-      const addrData = walletData[txCerAddr];
-      const addrPrivKey = addrData?.privHex || '';
-
-      if (!addrPrivKey) {
-        throw new Error(`TXCer 接收地址 ${txCerAddr.slice(0, 16)}... 缺少私钥`);
-      }
-
-      // 对 TXCer 签名
-      const signedTxCer = signTXCer(txCer, addrPrivKey);
+      // 瀵?TXCer 鍋?V2 鐢ㄦ埛绛惧悕锛堣处鎴风閽ワ級
+      const signedTxCer = signTXCer(txCer, accountPrivKey);
       txInputsCertificate.push(signedTxCer);
 
-      console.log(`[交易构造] TXCer ${txCerId.slice(0, 8)}... 签名完成`);
+      console.log(`[浜ゆ槗鏋勯€燷 TXCer ${txCerId.slice(0, 8)}... 绛惧悕瀹屾垚`);
     }
   }
 
-  // ========== Step 5: 构造 Transaction ==========
-  // 计算总转账金额（按汇率换算）
+  // ========== Step 5: 鏋勯€?Transaction ==========
+  // 璁＄畻鎬昏浆璐﹂噾棰濓紙鎸夋眹鐜囨崲绠楋級
   const exchangeRates: Record<number, number> = { 0: 1, 1: 1000000, 2: 1000 };
   let totalValue = 0;
   for (const [coinTypeStr, amount] of Object.entries(requiredAmounts)) {
     const coinType = Number(coinTypeStr);
     totalValue += amount * (exchangeRates[coinType] || 1);
   }
+  const cleanValueDivision = Object.fromEntries(
+    Object.entries(requiredAmounts).filter(([, amount]) => Number(amount) > 0)
+  ) as Record<number, number>;
 
-  // 构造利息回退分配（对齐前端：固定使用第一个发送地址）
+  // 鏋勯€犲埄鎭洖閫€鍒嗛厤
   const backAssign: Record<string, number> = {};
   if (fromAddresses.length > 0) {
-    backAssign[fromAddresses[0]] = 1.0; // 利息回退给第一个发送地址
+    backAssign[fromAddresses[0]] = 1.0;  // 鍒╂伅鍥為€€缁欑涓€涓彂閫佸湴鍧€
   }
 
   const transaction: Transaction = {
-    TXID: '',  // Step 6 计算
-    Size: 0,   // 后端会重新计算
+    TXID: '',
+    Size: 0,   // 鍚庣浼氶噸鏂拌绠?
     Version: 1.0,
     GuarantorGroup: guarGroupID,
-    TXType: isCrossChain ? 6 : txType,  // 6=跨链, 0=普通转账, 1=使用了TXCer
+    TXType: isCrossChain ? 6 : txType,  // 6=璺ㄩ摼, 0=鏅€氳浆璐? 1=浣跨敤浜員XCer
     Value: totalValue,
-    ValueDivision: requiredAmounts,
+    ValueDivision: cleanValueDivision,
     NewValue: 0,
     NewValueDiv: {},
     InterestAssign: {
@@ -1415,149 +1659,81 @@ export async function buildTransaction(
       Output: recipients.reduce((sum, r) => sum + (r.interest || 0), 0),
       BackAssign: backAssign
     },
-    UserSignature: { R: null, S: null },  // Step 6.5 计算
+    UserSignature: { R: null, S: null },
+    UserSignatureV2: { Algorithm: '', Signature: null },
     TXInputsNormal: txInputs,
     TXInputsCertificate: txInputsCertificate,
     TXOutputs: txOutputs,
     Data: []
   };
 
-  // ========== Step 6: 计算 TXID ==========
+  transaction.UserSignatureV2 = signHashEnvelope(
+    AlgorithmECDSAP256,
+    hashBackendJson({
+      ...transaction,
+      TXID: '',
+      Size: 0,
+      NewValue: 0,
+      UserSignature: { R: null, S: null },
+      UserSignatureV2: { Algorithm: '', Signature: null },
+      TXType: 0
+    }),
+    accountPrivKey
+  );
+
   transaction.TXID = calculateTXID(transaction);
-  console.log('[交易构造] TXID:', transaction.TXID);
+  console.log('[浜ゆ槗鏋勯€燷 TXID:', transaction.TXID);
 
-  // ========== Step 6.5: 计算 UserSignature ==========
-  // UserSignature 是用第一个 Input 的地址私钥对交易哈希签名
-  // 后端实现: 
-  // - 如果有 TXInputsNormal，使用第一个输入地址的私钥
-  // - 如果只有 TXInputsCertificate，使用第一个 TXCer 的接收地址私钥
-  let firstInputPrivKey = '';
-
-  if (txInputs.length > 0) {
-    const firstInputAddress = txInputs[0].FromAddress;
-    const firstAddrData = walletData[firstInputAddress];
-    firstInputPrivKey = firstAddrData?.privHex || '';
-  } else if (txInputsCertificate.length > 0) {
-    // 只有 TXCer 输入，使用第一个 TXCer 的接收地址私钥
-    const firstTxCer = txInputsCertificate[0];
-    const txCerAddr = firstTxCer.ToAddress?.toLowerCase() || '';
-    const addrData = walletData[txCerAddr];
-    firstInputPrivKey = addrData?.privHex || '';
-    console.log('[交易构造] 使用 TXCer 接收地址的私钥生成 UserSignature');
-  }
-
-  if (firstInputPrivKey) {
-    console.log('[交易构造] 开始计算 UserSignature...');
-    const txHash = getTXHash(transaction);
-    // [SIGDBG] 输出前端计算的 TX 哈希，方便与后端日志比对
-    const txHashHex = txHash.map(b => b.toString(16).padStart(2, '0')).join('');
-    console.log('[SIGDBG][FRONTEND] TXHASH=' + txHashHex);
-    const userSigKey = ec.keyFromPrivate(firstInputPrivKey, 'hex');
-    const userSig = userSigKey.sign(txHash);
-    transaction.UserSignature = {
-      R: userSig.r.toString(10),
-      S: userSig.s.toString(10)
-    };
-    console.log('[交易构造] UserSignature 签名完成');
-  } else {
-    console.warn('[交易构造] 无法获取输入地址的私钥，无法生成 UserSignature');
-  }
-
-  // ========== Step 7: 构造 UserNewTX 并签名 ==========
+  // ========== Step 7: 鏋勯€?UserNewTX 骞剁鍚?==========
   const userNewTX: UserNewTX = {
     TX: transaction,
     UserID: userID,
-    Height: 0,  // 前端填 0，后端会覆盖
-    Sig: { R: null, S: null }  // 先置零值
+    Height: 0,  // 鍓嶇濉?0锛屽悗绔細瑕嗙洊
+    Sig: { R: null, S: null }  // 鍏堢疆闆跺€?
   };
 
-  // 使用账户私钥签名（排除 Sig 和 Height）
+  // 浣跨敤璐︽埛绉侀挜绛惧悕锛堟帓闄?Sig 鍜?Height锛?
   const sig = signUserNewTX(userNewTX, accountPrivKey);
   userNewTX.Sig = signatureToJSON(sig);
-  console.log('[交易构造] UserNewTX 签名完成');
+  console.log('[浜ゆ槗鏋勯€燷 UserNewTX 绛惧悕瀹屾垚');
 
   return userNewTX;
 }
 
 // ============================================================================
-// 序列化为后端格式
+// 搴忓垪鍖栦负鍚庣鏍煎紡
 // ============================================================================
 
 /**
- * 将 UserNewTX 序列化为后端可接受的 JSON 格式
+ * 灏?UserNewTX 搴忓垪鍖栦负鍚庣鍙帴鍙楃殑 JSON 鏍煎紡
  * 
- * ⚠️ 重要：X/Y/R/S 必须是 JSON number（不带引号）
+ * 鈿狅笍 閲嶈锛歑/Y/R/S 蹇呴』鏄?JSON number锛堜笉甯﹀紩鍙凤級
  * 
- * @param userNewTX UserNewTX 对象
- * @returns JSON 字符串
+ * @param userNewTX UserNewTX 瀵硅薄
+ * @returns JSON 瀛楃涓?
  */
 export function serializeUserNewTX(userNewTX: UserNewTX): string {
-  // 深拷贝
-  const copy = JSON.parse(JSON.stringify(userNewTX, bigintReplacer));
-
-  // ⚠️ 重要：将字节数组转换为 Base64（Go 的 []byte 序列化格式）
-  convertByteArraysToBase64(copy);
-
-  // 对 map 字段排序
-  if (copy.TX) {
-    const mapFields = ['ValueDivision', 'NewValueDiv'];
-    for (const field of mapFields) {
-      if (copy.TX[field] && typeof copy.TX[field] === 'object') {
-        const sorted: Record<string, unknown> = {};
-        for (const k of Object.keys(copy.TX[field]).sort()) {
-          const val = copy.TX[field][k];
-          // Filter out zero values to satisfy backend strict length checks (e.g. for cross-chain TX)
-          if (typeof val === 'number' && val <= 0) {
-            continue;
-          }
-          sorted[k] = val;
-        }
-        copy.TX[field] = sorted;
-      }
-    }
-    // InterestAssign.BackAssign
-    if (copy.TX.InterestAssign?.BackAssign) {
-      const sorted: Record<string, unknown> = {};
-      for (const k of Object.keys(copy.TX.InterestAssign.BackAssign).sort()) {
-        sorted[k] = copy.TX.InterestAssign.BackAssign[k];
-      }
-      copy.TX.InterestAssign.BackAssign = sorted;
-    }
-  }
-
-  // JSON 序列化
-  let json = JSON.stringify(copy);
-
-  // 把 X/Y/R/S 字段的引号去掉
-  json = json.replace(/"(X|Y|R|S)":"(\d+)"/g, '"$1":$2');
-
-  return json;
+  return serializeForBackend(userNewTX);
 }
 
 /**
  * Serialize AggregateGTX for submit (convert []byte fields to Base64).
  */
 export function serializeAggregateGTX(atx: AggregateGTXForSubmit): string {
-  const copy = JSON.parse(JSON.stringify(atx, bigintReplacer));
-  convertByteArraysToBase64(copy);
-
-  let json = JSON.stringify(copy);
-  json = json.replace(/"(X|Y|R|S)":"(\d+)"/g, '"$1":$2');
-
-  return json;
+  return serializeForBackend(atx);
 }
 
 // ============================================================================
-// 交易状态查询
+// 浜ゆ槗鐘舵€佹煡璇?
 // ============================================================================
 
 /**
- * 交易状态类型
+ * 浜ゆ槗鐘舵€佺被鍨?
  */
 export type TXStatusType = 'pending' | 'success' | 'failed' | 'not_found';
 
 /**
- * 交易状态响应
+ * 浜ゆ槗鐘舵€佸搷搴?
  */
 export interface TXStatusResponse {
   tx_id: string;
@@ -1571,91 +1747,96 @@ export interface TXStatusResponse {
 }
 
 /**
- * 查询交易状态
+ * 鏌ヨ浜ゆ槗鐘舵€?
  * 
- * @param txID 交易ID
- * @param groupID 担保组织ID
- * @param assignNodeUrl AssignNode URL（可选）
- * @returns 交易状态响应
+ * @param txID 浜ゆ槗ID
+ * @param groupID 鎷呬繚缁勭粐ID
+ * @param assignNodeUrl AssignNode URL锛堝彲閫夛級
+ * @returns 浜ゆ槗鐘舵€佸搷搴?
  */
 export async function queryTXStatus(
   txID: string,
   groupID: string,
   assignNodeUrl?: string
 ): Promise<TXStatusResponse> {
-  const { API_BASE_URL, API_ENDPOINTS, apiClient, buildAssignNodeUrl, isApiError } = await import('./api');
+  const { API_BASE_URL, API_ENDPOINTS } = await import('./api');
 
-  const baseUrl = assignNodeUrl ? buildAssignNodeUrl(assignNodeUrl) : API_BASE_URL;
+  const baseUrl = assignNodeUrl || API_BASE_URL;
   const url = baseUrl + API_ENDPOINTS.ASSIGN_TX_STATUS(groupID, txID);
 
-  console.log('[交易状态查询] URL:', url);
+  console.log('[浜ゆ槗鐘舵€佹煡璇 URL:', url);
 
-  try {
-    const result = await apiClient.get<TXStatusResponse>(url, {
-      timeout: 5000,
-      retries: 0,
-      silent: true
-    });
-    console.log('[交易状态查询] 结果:', result);
-    return result;
-  } catch (error) {
-    // Treat 404 as a legitimate "not_found" state (common if the tx is dropped/rejected
-    // or status indexing hasn't happened yet).
-    if (isApiError(error) && error.status === 404) {
-      return {
-        tx_id: txID,
-        status: 'not_found',
-        receive_result: false,
-        result: false,
-        error_reason: 'transaction not found',
-        guar_id: '',
-        user_id: '',
-        block_height: 0
-      };
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json'
     }
-    throw error instanceof Error ? error : new Error('查询交易状态失败');
+  });
+
+  // Treat 404 as a legitimate "not_found" state (common if the tx is dropped/rejected
+  // or status indexing hasn't happened yet).
+  if (response.status === 404) {
+    return {
+      tx_id: txID,
+      status: 'not_found',
+      receive_result: false,
+      result: false,
+      error_reason: 'transaction not found',
+      guar_id: '',
+      user_id: '',
+      block_height: 0
+    };
   }
+
+  if (!response.ok) {
+    throw new Error(`鏌ヨ浜ゆ槗鐘舵€佸け璐? ${response.status} ${response.statusText}`);
+  }
+
+  const result = await response.json();
+  console.log('[浜ゆ槗鐘舵€佹煡璇 缁撴灉:', result);
+
+  return result;
 }
 
 /**
- * 等待交易确认的配置
+ * 绛夊緟浜ゆ槗纭鐨勯厤缃?
  */
 export interface WaitForConfirmationOptions {
-  /** 轮询间隔（毫秒），默认 2000 */
+  /** 杞闂撮殧锛堟绉掞級锛岄粯璁?2000 */
   pollInterval?: number;
-  /** 最大等待时间（毫秒），默认 60000 */
+  /** 鏈€澶х瓑寰呮椂闂达紙姣锛夛紝榛樿 60000 */
   maxWaitTime?: number;
-  /** 状态变化回调 */
+  /** 鐘舵€佸彉鍖栧洖璋?*/
   onStatusChange?: (status: TXStatusResponse) => void;
   minBlockHeight?: number;
 }
 
 /**
- * 等待交易确认结果
+ * 绛夊緟浜ゆ槗纭缁撴灉
  */
 export interface WaitForConfirmationResult {
-  /** 是否成功 */
+  /** 鏄惁鎴愬姛 */
   success: boolean;
-  /** 最终状态 */
+  /** 鏈€缁堢姸鎬?*/
   status: TXStatusType;
-  /** 错误原因（如果失败） */
+  /** 閿欒鍘熷洜锛堝鏋滃け璐ワ級 */
   errorReason?: string;
-  /** 是否超时 */
+  /** 鏄惁瓒呮椂 */
   timeout: boolean;
-  /** 完整的状态响应 */
+  /** 瀹屾暣鐨勭姸鎬佸搷搴?*/
   response?: TXStatusResponse;
 }
 
 /**
- * 等待交易确认
+ * 绛夊緟浜ゆ槗纭
  * 
- * 轮询查询交易状态，直到交易被确认（成功或失败）或超时
+ * 杞鏌ヨ浜ゆ槗鐘舵€侊紝鐩村埌浜ゆ槗琚‘璁わ紙鎴愬姛鎴栧け璐ワ級鎴栬秴鏃?
  * 
- * @param txID 交易ID
- * @param groupID 担保组织ID
- * @param assignNodeUrl AssignNode URL（可选）
- * @param options 配置选项
- * @returns 确认结果
+ * @param txID 浜ゆ槗ID
+ * @param groupID 鎷呬繚缁勭粐ID
+ * @param assignNodeUrl AssignNode URL锛堝彲閫夛級
+ * @param options 閰嶇疆閫夐」
+ * @returns 纭缁撴灉
  */
 export function waitForTXConfirmation(
   txID: string,
@@ -1670,7 +1851,7 @@ export function waitForTXConfirmation(
     minBlockHeight = 0
   } = options;
 
-  console.log(`[等待交易确认] 开始监听 TXID=${txID} (SSE + Backup Poll)`);
+  console.log(`[绛夊緟浜ゆ槗纭] 寮€濮嬬洃鍚?TXID=${txID} (SSE + Backup Poll)`);
 
   return new Promise((resolve) => {
     let hasResolved = false;
@@ -1699,7 +1880,7 @@ export function waitForTXConfirmation(
         (response.block_height || 0) <= minBlockHeight
       ) {
         console.log(
-          `[等待交易确认] 已验证但未上链，等待区块确认 (block_height=${response.block_height}, min=${minBlockHeight})`
+          `[绛夊緟浜ゆ槗纭] 宸查獙璇佷絾鏈笂閾撅紝绛夊緟鍖哄潡纭 (block_height=${response.block_height}, min=${minBlockHeight})`
         );
         if (lastStatus !== 'pending') {
           lastStatus = 'pending';
@@ -1716,14 +1897,14 @@ export function waitForTXConfirmation(
 
       if (response.status !== lastStatus) {
         lastStatus = response.status;
-        console.log(`[等待交易确认] 状态变化: ${response.status}`);
+        console.log(`[绛夊緟浜ゆ槗纭] 鐘舵€佸彉鍖? ${response.status}`);
         if (onStatusChange) {
           onStatusChange(response);
         }
       }
 
       if (response.status === 'success') {
-        console.log('[等待交易确认] 交易成功确认 (via ' + (response.guar_id ? 'Poll' : 'SSE') + ')');
+        console.log('[绛夊緟浜ゆ槗纭] 浜ゆ槗鎴愬姛纭 (via ' + (response.guar_id ? 'Poll' : 'SSE') + ')');
         cleanup();
         resolve({
           success: true,
@@ -1732,7 +1913,7 @@ export function waitForTXConfirmation(
           response
         });
       } else if (response.status === 'failed') {
-        console.log('[等待交易确认] 交易验证失败:', response.error_reason);
+        console.log('[绛夊緟浜ゆ槗纭] 浜ゆ槗楠岃瘉澶辫触:', response.error_reason);
         cleanup();
         resolve({
           success: false,
@@ -1747,7 +1928,7 @@ export function waitForTXConfirmation(
     // 1. Setup Timeout
     timeoutTimer = setTimeout(() => {
       if (!hasResolved) {
-        console.log('[等待交易确认] 超时');
+        console.log('[绛夊緟浜ゆ槗纭] 瓒呮椂');
         cleanup();
         resolve({
           success: false,
@@ -1792,7 +1973,7 @@ export function waitForTXConfirmation(
         }
         handleStatusResponse(res);
       } catch (err) {
-        console.warn('[等待交易确认] 轮询查询失败 (忽略):', err);
+        console.warn('[绛夊緟浜ゆ槗纭] 杞鏌ヨ澶辫触 (蹇界暐):', err);
       } finally {
         pollInFlight = false;
       }
@@ -1808,7 +1989,7 @@ export function waitForTXConfirmation(
     if (sseActiveAtStart) {
       pollStartTimer = setTimeout(() => {
         if (!hasResolved) {
-          console.warn('[等待交易确认] SSE 未推送，启用轮询兜底');
+          console.warn('[绛夊緟浜ゆ槗纭] SSE 鏈帹閫侊紝鍚敤杞鍏滃簳');
           startPolling();
         }
       }, 6000);
@@ -1821,154 +2002,122 @@ export function waitForTXConfirmation(
       .then((res) => {
         if (res.status === 'success' || res.status === 'failed') {
           ssePreferredUntil = Date.now() + 3000;
-          // 延迟使用查询结果，优先等待 SSE 推送以验证 SSE 功能
-          console.log('[等待交易确认] 初始查询已确认 (status=' + res.status + '). 等待 3秒 看是否收到 SSE 以验证被动推送...');
+          // 寤惰繜浣跨敤鏌ヨ缁撴灉锛屼紭鍏堢瓑寰?SSE 鎺ㄩ€佷互楠岃瘉 SSE 鍔熻兘
+          console.log('[绛夊緟浜ゆ槗纭] 鍒濆鏌ヨ宸茬‘璁?(status=' + res.status + '). 绛夊緟 3绉?鐪嬫槸鍚︽敹鍒?SSE 浠ラ獙璇佽鍔ㄦ帹閫?..');
           setTimeout(() => {
             if (!hasResolved) {
-              console.log('[等待交易确认] SSE 未到达或错过了窗口, 使用初始查询结果作为兜底');
+              console.log('[绛夊緟浜ゆ槗纭] SSE 鏈埌杈炬垨閿欒繃浜嗙獥鍙? 浣跨敤鍒濆鏌ヨ缁撴灉浣滀负鍏滃簳');
               handleStatusResponse(res);
             }
           }, 3000);
         } else {
-          console.log('[等待交易确认] 初始查询未确认，等待 SSE 推送...');
+          console.log('[绛夊緟浜ゆ槗纭] 鍒濆鏌ヨ鏈‘璁わ紝绛夊緟 SSE 鎺ㄩ€?..');
         }
       })
       .catch((err) => {
         // Initial poll failed, but we still wait for SSE.
-        console.warn('[等待交易确认] 初始查询失败 (忽略):', err);
+        console.warn('[绛夊緟浜ゆ槗纭] 鍒濆鏌ヨ澶辫触 (蹇界暐):', err);
       });
   });
 }
 
 // ============================================================================
-// 提交交易
+// 鎻愪氦浜ゆ槗
 // ============================================================================
 
-function sanitizeResponseText(raw: string): string {
-  return raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-}
-
-async function readResponseBody(response: Response): Promise<{ parsed: boolean; data: any; raw: string }> {
-  const raw = await response.text();
-  if (!raw) {
-    return { parsed: false, data: null, raw: '' };
-  }
-  try {
-    const data = JSON.parse(raw);
-    return { parsed: true, data, raw };
-  } catch {
-    return { parsed: false, data: null, raw };
-  }
-}
-
 /**
- * 提交交易到后端
+ * 鎻愪氦浜ゆ槗鍒板悗绔?
  * 
- * @param userNewTX UserNewTX 对象
- * @param groupID 担保组织 ID
- * @returns 后端响应
+ * @param userNewTX UserNewTX 瀵硅薄
+ * @param groupID 鎷呬繚缁勭粐 ID
+ * @returns 鍚庣鍝嶅簲
  */
 export async function submitTransaction(
   userNewTX: UserNewTX,
   groupID: string,
   assignNodeUrl?: string
 ): Promise<{ success: boolean; tx_id?: string; error?: string; errorCode?: string }> {
-  const { API_BASE_URL, API_ENDPOINTS, apiClient, buildAssignNodeUrl, isApiError } = await import('./api');
+  const { API_BASE_URL, API_ENDPOINTS } = await import('./api');
 
-  const normalizeBase = (value: string) => String(value || '').replace(/\/+$/, '');
-
-  // 如果提供了 AssignNode URL，则优先尝试直连路径 /assign/submit-tx，
-  // 失败时再回退到网关路径 /api/v1/{groupID}/assign/submit-tx。
-  const resolvedAssignUrl = assignNodeUrl ? buildAssignNodeUrl(assignNodeUrl) : '';
-  const baseUrl = normalizeBase(resolvedAssignUrl || API_BASE_URL);
-  const apiUrl = `${baseUrl}${API_ENDPOINTS.ASSIGN_SUBMIT_TX(groupID)}`;
-  const directUrl = `${baseUrl}/assign/submit-tx`;
-  const fallbackGatewayUrl =
-    resolvedAssignUrl && normalizeBase(API_BASE_URL) !== baseUrl
-      ? `${normalizeBase(API_BASE_URL)}${API_ENDPOINTS.ASSIGN_SUBMIT_TX(groupID)}`
-      : '';
-  const urlCandidates = resolvedAssignUrl
-    ? [directUrl, apiUrl, fallbackGatewayUrl].filter(Boolean)
-    : [apiUrl];
-
+  // 濡傛灉鎻愪緵浜?AssignNode URL锛屽垯浣跨敤瀹冿紱鍚﹀垯浣跨敤榛樿鐨?API_BASE_URL
+  const baseUrl = assignNodeUrl || API_BASE_URL;
+  const url = baseUrl + API_ENDPOINTS.ASSIGN_SUBMIT_TX(groupID);
   const body = serializeUserNewTX(userNewTX);
 
-  console.log('[交易提交] AssignNode URL:', resolvedAssignUrl || '(using default API_BASE_URL)');
-  console.log('[交易提交] Submit candidates:', urlCandidates);
-  console.log('[交易提交] Body:', body);
+  console.log('[浜ゆ槗鎻愪氦] AssignNode URL:', assignNodeUrl || '(using default API_BASE_URL)');
+  console.log('[浜ゆ槗鎻愪氦] Full URL:', url);
+  console.log('[浜ゆ槗鎻愪氦] Body:', body);
 
-  let lastError: { message: string; status?: number } | null = null;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body
+  });
 
-  for (let i = 0; i < urlCandidates.length; i += 1) {
-    const url = urlCandidates[i];
-    try {
-      const response = await apiClient.request<any>(url, {
-        method: 'POST',
-        body,
-        timeout: 10000,
-        retries: 0
-      });
+  const result = await response.json();
 
-      let result = (response.data && typeof response.data === 'object') ? response.data : null;
-      if (!result) {
-        return { success: false, error: '提交失败' };
-      }
+  if (result.success) {
+    console.log('[浜ゆ槗鎻愪氦] 鎴愬姛锛孴XID:', result.tx_id);
+  } else {
+    console.error('[浜ゆ槗鎻愪氦] 澶辫触:', result.error);
 
-      if (typeof result.success !== 'boolean') {
-        result.success = false;
-      }
+    // Parse specific error messages and add error codes for better handling
+    const errorMsg = result.error || '';
 
-      if (!result.success && !result.error) {
-        result.error = '提交失败';
-      }
+    // User not in organization - this typically means:
+    // 1. User imported an address that belongs to an org but never successfully joined
+    // 2. User's join request failed but frontend saved org info anyway
+    // 3. User was removed from the organization
+    if (errorMsg.includes('user is not in the guarantor') ||
+      errorMsg.includes('user not found in group') ||
+      errorMsg.includes('not in the guarantor organization')) {
+      console.warn('[submitTransaction] User is not in guarantor group');
+      result.errorCode = 'USER_NOT_IN_ORG';
+    }
 
-      if (result.success) {
-        console.log('[交易提交] 成功，TXID:', result.tx_id);
-      } else {
-        console.error('[交易提交] 失败:', result.error);
+    // Address revoked - address was unbound
+    if (errorMsg.includes('address revoked') || errorMsg.includes('already revoked')) {
+      result.errorCode = 'ADDRESS_REVOKED';
+    }
 
-        const errorMsg = result.error || '';
-        if (errorMsg.includes('user is not in the guarantor') ||
-          errorMsg.includes('user not found in group') ||
-          errorMsg.includes('not in the guarantor organization')) {
-          console.warn('[交易提交] 用户不在担保组织内，可能需要重新加入组织');
-          result.errorCode = 'USER_NOT_IN_ORG';
-        }
-        if (errorMsg.includes('address revoked') || errorMsg.includes('already revoked')) {
-          result.errorCode = 'ADDRESS_REVOKED';
-        }
-        if (errorMsg.includes('signature verification')) {
-          result.errorCode = 'SIGNATURE_FAILED';
-        }
-        if (errorMsg.includes('utxo already spent') || errorMsg.includes('double spend')) {
-          result.errorCode = 'UTXO_SPENT';
-        }
-      }
+    // Signature verification failed
+    if (errorMsg.includes('signature verification')) {
+      result.errorCode = 'SIGNATURE_FAILED';
+    }
 
-      return result;
-    } catch (error) {
-      if (isApiError(error) && (error.status === 404 || error.status === 405) && i < urlCandidates.length - 1) {
-        lastError = { message: error.message, status: error.status };
-        continue;
-      }
-      lastError = { message: error instanceof Error ? error.message : '网络错误' };
-      if (i < urlCandidates.length - 1) {
-        continue;
-      }
-      return { success: false, error: lastError.message };
+    // UTXO already spent
+    if (errorMsg.includes('utxo already spent') || errorMsg.includes('double spend')) {
+      result.errorCode = 'UTXO_SPENT';
+    }
+
+    if (errorMsg.includes('missing UserSignatureV2') || errorMsg.includes('V2 user signature')) {
+      result.errorCode = 'TX_V2_SIGNATURE_FAILED';
+    }
+
+    if (
+      errorMsg.includes('missing V2 input signature') ||
+      errorMsg.includes('seed chain') ||
+      errorMsg.includes('seed step') ||
+      errorMsg.includes('seed sweep required') ||
+      errorMsg.includes('SeedReveal') ||
+      errorMsg.includes('SignPublicKeyV2')
+    ) {
+      result.errorCode = 'SEED_PROTOCOL_FAILED';
     }
   }
 
-  return { success: false, error: lastError?.message || '提交失败' };
+  return result;
 }
 
 
 // ============================================================================
-// 适配函数：从旧格式转换
+// 閫傞厤鍑芥暟锛氫粠鏃ф牸寮忚浆鎹?
 // ============================================================================
 
 /**
- * 旧版 BuildTXInfo 格式（兼容现有代码）
+ * 鏃х増 BuildTXInfo 鏍煎紡锛堝吋瀹圭幇鏈変唬鐮侊級
  */
 export interface LegacyBuildTXInfo {
   Value?: number;
@@ -1979,6 +2128,9 @@ export interface LegacyBuildTXInfo {
     GuarGroupID?: string;
     PublicKey?: { XHex: string; YHex: string };
     ToInterest?: number;
+    SeedAnchor?: number[] | string;
+    SeedChainStep?: number;
+    DefaultSpendAlgorithm?: string;
   }>;
   UserAddress: string[];
   PriUseTXCer: boolean;
@@ -1995,10 +2147,10 @@ export interface LegacyBuildTXInfo {
 }
 
 /**
- * 从旧版 BuildTXInfo 格式转换为新版 BuildTransactionParams
+ * 浠庢棫鐗?BuildTXInfo 鏍煎紡杞崲涓烘柊鐗?BuildTransactionParams
  * 
- * @param buildInfo 旧版构建信息
- * @returns 新版构建参数
+ * @param buildInfo 鏃х増鏋勫缓淇℃伅
+ * @returns 鏂扮増鏋勫缓鍙傛暟
  */
 export function convertLegacyBuildInfo(buildInfo: LegacyBuildTXInfo): BuildTransactionParams {
   const recipients: BuildTransactionParams['recipients'] = [];
@@ -2011,7 +2163,10 @@ export function convertLegacyBuildInfo(buildInfo: LegacyBuildTXInfo): BuildTrans
       publicKeyX: bill.PublicKey?.XHex || '',
       publicKeyY: bill.PublicKey?.YHex || '',
       guarGroupID: bill.GuarGroupID || '',
-      interest: bill.ToInterest || 0
+      interest: bill.ToInterest || 0,
+      seedAnchor: bill.SeedAnchor,
+      seedChainStep: bill.SeedChainStep,
+      defaultSpendAlgorithm: bill.DefaultSpendAlgorithm
     });
   }
 
@@ -2027,187 +2182,161 @@ export function convertLegacyBuildInfo(buildInfo: LegacyBuildTXInfo): BuildTrans
 }
 
 /**
- * 使用旧版 BuildTXInfo 格式构建交易
+ * 浣跨敤鏃х増 BuildTXInfo 鏍煎紡鏋勫缓浜ゆ槗
  * 
- * 这是一个兼容函数，允许现有代码无缝迁移到新的交易构造器
+ * 杩欐槸涓€涓吋瀹瑰嚱鏁帮紝鍏佽鐜版湁浠ｇ爜鏃犵紳杩佺Щ鍒版柊鐨勪氦鏄撴瀯閫犲櫒
  * 
- * @param buildInfo 旧版构建信息
- * @param user 用户数据
+ * @param buildInfo 鏃х増鏋勫缓淇℃伅
+ * @param user 鐢ㄦ埛鏁版嵁
  * @returns UserNewTX
  */
 export async function buildTransactionFromLegacy(
   buildInfo: LegacyBuildTXInfo,
   user: User
 ): Promise<UserNewTX> {
-  console.log('[buildTransactionFromLegacy] 开始转换...');
+  console.log('[buildTransactionFromLegacy] 寮€濮嬭浆鎹?..');
   console.log('[buildTransactionFromLegacy] buildInfo:', JSON.stringify(buildInfo, null, 2));
 
   const params = convertLegacyBuildInfo(buildInfo);
-  console.log('[buildTransactionFromLegacy] 转换后的 params:', JSON.stringify(params, null, 2));
+  console.log('[buildTransactionFromLegacy] 杞崲鍚庣殑 params:', JSON.stringify(params, null, 2));
 
   return buildTransaction(params, user);
 }
 
 // ============================================================================
-// AggregateGTX 构造（普通转账 - 散户交易）
+// AggregateGTX 鏋勯€狅紙鏅€氳浆璐?- 鏁ｆ埛浜ゆ槗锛?
 // ============================================================================
 
 /**
- * SubATX 结构（聚合交易中的子交易）
+ * SubATX 缁撴瀯锛堣仛鍚堜氦鏄撲腑鐨勫瓙浜ゆ槗锛?
  */
-export interface SubATXForSubmit {
-  TXID: string;
-  TXType: number;
+export interface SubATXForSubmit extends BlockchainSubATX {
+  Version: number;
+  GuarantorGroup: string;
+  Value: number;
+  ValueDivision: Record<number, number>;
+  NewValue: number;
+  NewValueDiv: Record<number, number>;
   TXInputsNormal: TXInputNormal[];
   TXInputsCertificate: any[];
   TXOutputs: TXOutput[];
   InterestAssign: InterestAssign;
-  ExTXCerID: string[];
-  Data: number[] | string;
+  UserSignatureV2?: SignatureEnvelope;
 }
 
 /**
- * AggregateGTX 结构（用于提交到 ComNode）
+ * AggregateGTX 缁撴瀯锛堢敤浜庢彁浜ゅ埌 ComNode锛?
  */
-export interface AggregateGTXForSubmit {
-  AggrTXType: number;
-  IsGuarCommittee: boolean;
-  IsNoGuarGroupTX: boolean;
-  GuarantorGroupID: string;
+export interface AggregateGTXForSubmit extends BlockchainAggregateGTX {
   GuarantorGroupSig: EcdsaSignatureJSON;
-  TXNum: number;
-  TotalGas: number;
-  TXHash: string;
-  TXSize: number;
-  Version: number;
   AllTransactions: SubATXForSubmit[];
 }
 
 /**
- * 计算 AggregateGTX 的哈希值
+ * 璁＄畻 AggregateGTX 鐨勫搱甯屽€?
  * 
- * 模拟后端 GetATXHash：
- * 1. 排除字段：GuarantorGroupSig, TXHash, TXSize
- * 2. JSON 序列化
- * 3. SHA-256 哈希
- * 4. 返回 Base64 编码
+ * 妯℃嫙鍚庣 GetATXHash锛?
+ * 1. 鎺掗櫎瀛楁锛欸uarantorGroupSig, TXHash, TXSize
+ * 2. JSON 搴忓垪鍖?
+ * 3. SHA-256 鍝堝笇
+ * 4. 杩斿洖 Base64 缂栫爜
  * 
- * @param atx AggregateGTX 对象（不含 TXHash）
- * @returns Base64 编码的哈希值
+ * @param atx AggregateGTX 瀵硅薄锛堜笉鍚?TXHash锛?
+ * @returns Base64 缂栫爜鐨勫搱甯屽€?
  */
 export function calculateATXHash(atx: Omit<AggregateGTXForSubmit, 'TXHash' | 'TXSize' | 'GuarantorGroupSig'>): string {
-  // 深拷贝并移除排除字段
-  const hashPayload = JSON.parse(JSON.stringify(atx, bigintReplacer));
-
-  // 确保不包含排除字段
-  delete hashPayload.GuarantorGroupSig;
-  delete hashPayload.TXHash;
-  delete hashPayload.TXSize;
-
-  // 转换字节数组为 Base64
-  convertByteArraysToBase64(hashPayload);
-
-  // JSON 序列化
-  let json = JSON.stringify(hashPayload);
-
-  // 把 X/Y/R/S 字段的引号去掉，变成 JSON number
-  json = json.replace(/"(X|Y|R|S)":"(\d+)"/g, '"$1":$2');
-
-  console.log('[calculateATXHash] 序列化后的 JSON:', json.substring(0, 200) + '...');
-
-  // 计算 SHA-256
-  const hashHex = sha256(json);
-
-  // 转为字节数组再转 Base64
-  const hashBytes = new Uint8Array(hashHex.match(/.{2}/g)!.map(byte => parseInt(byte, 16)));
+  const hashBytes = hashBackendJson(atx);
   let binary = '';
-  for (let i = 0; i < hashBytes.length; i++) {
-    binary += String.fromCharCode(hashBytes[i]);
+  for (const value of hashBytes) {
+    binary += String.fromCharCode(value);
   }
-  const base64Hash = btoa(binary);
-
-  console.log('[calculateATXHash] 哈希值 (Base64):', base64Hash);
-
-  return base64Hash;
+  return btoa(binary);
 }
 
 /**
- * 将 Transaction 转换为 SubATX 格式
+ * 灏?Transaction 杞崲涓?SubATX 鏍煎紡
  * 
- * @param tx Transaction 对象
- * @returns SubATX 格式
+ * @param tx Transaction 瀵硅薄
+ * @returns SubATX 鏍煎紡
  */
 function transactionToSubATX(tx: Transaction): SubATXForSubmit {
   return {
     TXID: tx.TXID,
     TXType: tx.TXType,
+    Version: tx.Version,
+    GuarantorGroup: tx.GuarantorGroup,
+    Value: tx.Value,
+    ValueDivision: tx.ValueDivision,
+    NewValue: tx.NewValue,
+    NewValueDiv: tx.NewValueDiv,
     TXInputsNormal: tx.TXInputsNormal,
     TXInputsCertificate: tx.TXInputsCertificate || [],
     TXOutputs: tx.TXOutputs,
     InterestAssign: tx.InterestAssign,
     ExTXCerID: [],
-    Data: tx.Data || []
+    Data: tx.Data || [],
+    UserSignatureV2: tx.UserSignatureV2
   };
 }
 
 /**
- * 构建 AggregateGTX（用于普通转账/散户交易）
+ * 鏋勫缓 AggregateGTX锛堢敤浜庢櫘閫氳浆璐?鏁ｆ埛浜ゆ槗锛?
  * 
- * @param tx Transaction 对象（TXType 应该是 8）
- * @returns AggregateGTX 对象
+ * @param tx Transaction 瀵硅薄锛圱XType 搴旇鏄?8锛?
+ * @returns AggregateGTX 瀵硅薄
  */
 export function buildAggregateGTX(tx: Transaction): AggregateGTXForSubmit {
-  console.log('[buildAggregateGTX] 开始构建 AggregateGTX...');
+  console.log('[buildAggregateGTX] 寮€濮嬫瀯寤?AggregateGTX...');
 
-  // 构建基础结构（不含 TXHash）
+  // 鏋勫缓鍩虹缁撴瀯锛堜笉鍚?TXHash锛?
   const subATX = transactionToSubATX(tx);
 
   const atxBase = {
-    AggrTXType: 2,           // 散户交易聚合
+    AggrTXType: 2,           // 鏁ｆ埛浜ゆ槗鑱氬悎
     IsGuarCommittee: false,
     IsNoGuarGroupTX: true,
     GuarantorGroupID: '',
     TXNum: 1,
-    TotalGas: 0,
+    TotalGas: tx.InterestAssign?.Gas || 0,
     Version: 1.0,
     AllTransactions: [subATX]
   };
 
-  // 计算哈希
+  // 璁＄畻鍝堝笇
   const txHash = calculateATXHash(atxBase);
 
-  // 构建完整的 AggregateGTX
+  // 鏋勫缓瀹屾暣鐨?AggregateGTX
   const atx: AggregateGTXForSubmit = {
     ...atxBase,
-    GuarantorGroupSig: { R: null, S: null },  // 散户交易不需要担保签名
+    GuarantorGroupSig: { R: null, S: null },  // 鏁ｆ埛浜ゆ槗涓嶉渶瑕佹媴淇濈鍚?
     TXHash: txHash,
-    TXSize: 0  // 由后端计算
+    TXSize: 0  // 鐢卞悗绔绠?
   };
 
-  console.log('[buildAggregateGTX] 构建完成，TXHash:', txHash);
+  console.log('[buildAggregateGTX] 鏋勫缓瀹屾垚锛孴XHash:', txHash);
 
   return atx;
 }
 
 /**
- * 构建普通转账交易（散户模式，未加入担保组织）
+ * 鏋勫缓鏅€氳浆璐︿氦鏄擄紙鏁ｆ埛妯″紡锛屾湭鍔犲叆鎷呬繚缁勭粐锛?
  * 
- * 与 buildTransaction 的区别：
- * 1. TXType = 8（散户交易）
- * 2. 不需要担保组织 ID
- * 3. 返回 AggregateGTX 而非 UserNewTX
- * 4. 提交到 ComNode 而非 AssignNode
+ * 涓?buildTransaction 鐨勫尯鍒細
+ * 1. TXType = 8锛堟暎鎴蜂氦鏄擄級
+ * 2. 涓嶉渶瑕佹媴淇濈粍缁?ID
+ * 3. 杩斿洖 AggregateGTX 鑰岄潪 UserNewTX
+ * 4. 鎻愪氦鍒?ComNode 鑰岄潪 AssignNode
  * 
- * @param params 构建参数
- * @param user 用户数据
+ * @param params 鏋勫缓鍙傛暟
+ * @param user 鐢ㄦ埛鏁版嵁
  * @returns AggregateGTX
  */
 export async function buildNormalTransaction(
   params: BuildTransactionParams,
   user: User
 ): Promise<AggregateGTXForSubmit> {
-  console.log('[普通转账] 开始构建交易...');
-  console.log('[普通转账] 参数:', JSON.stringify(params, null, 2));
+  console.log('[鏅€氳浆璐 寮€濮嬫瀯寤轰氦鏄?..');
+  console.log('[鏅€氳浆璐 鍙傛暟:', JSON.stringify(params, null, 2));
 
   const {
     fromAddresses,
@@ -2217,79 +2346,84 @@ export async function buildNormalTransaction(
     howMuchPayForGas = 0
   } = params;
 
-  // 获取钱包数据
+  // 鑾峰彇閽卞寘鏁版嵁
   const walletData = user.wallet?.addressMsg || {};
   const userID = user.accountId || '';
 
-  console.log('[普通转账] 用户ID:', userID);
-  console.log('[普通转账] 钱包地址数量:', Object.keys(walletData).length);
-  console.log('[普通转账] 发送地址:', fromAddresses);
+  console.log('[鏅€氳浆璐 鐢ㄦ埛ID:', userID);
+  console.log('[鏅€氳浆璐 閽卞寘鍦板潃鏁伴噺:', Object.keys(walletData).length);
+  console.log('[鏅€氳浆璐 鍙戦€佸湴鍧€:', fromAddresses);
 
   if (!userID) {
-    throw new Error('用户 ID 不存在');
+    throw new Error('User ID is missing');
   }
 
-  // 获取账户私钥
+  // 鑾峰彇璐︽埛绉侀挜
   const accountPrivKey = user.keys?.privHex || user.privHex || '';
   if (!accountPrivKey) {
-    throw new Error('账户私钥不存在');
+    throw new Error('Account private key is missing');
   }
 
-  // ========== Step 1: 计算各币种需要的金额 ==========
+  // ========== Step 1: 璁＄畻鍚勫竵绉嶉渶瑕佺殑閲戦 ==========
   const requiredAmounts: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
   for (const recipient of recipients) {
     requiredAmounts[recipient.coinType] = (requiredAmounts[recipient.coinType] || 0) + recipient.amount;
   }
 
-  // 额外兑换 Gas 的 PGC
+  // 棰濆鍏戞崲 Gas 鐨?PGC
   if (howMuchPayForGas > 0) {
     requiredAmounts[0] += howMuchPayForGas;
   }
 
-  console.log('[普通转账] 需要金额:', requiredAmounts);
+  console.log('[鏅€氳浆璐 闇€瑕侀噾棰?', requiredAmounts);
 
-  // ========== Step 2: 选择 UTXO（散户只能使用 UTXO，不能用 TXCer）==========
-  const selectedUTXOs: Array<{
+  // ========== Step 2: 閫夋嫨 UTXO锛堟暎鎴峰彧鑳戒娇鐢?UTXO锛屼笉鑳界敤 TXCer锛?=========
+  let selectedUTXOs: Array<{
     address: string;
     utxoKey: string;
     utxoData: UTXOData;
     coinType: number;
   }> = [];
+  selectedUTXOs = selectUTXOs(fromAddresses, walletData, requiredAmounts, { requireRegistration: true });
 
   const collectedAmounts: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
-
-  for (const address of fromAddresses) {
-    const addrData = walletData[address];
-    if (!addrData) continue;
-
-    const coinType = addrData.type || 0;
-    const utxoMap = addrData.utxos || {};
-
-    for (const [utxoKey, utxoData] of Object.entries(utxoMap)) {
-      if (collectedAmounts[coinType] >= requiredAmounts[coinType]) break;
-      if (isUtxoLockedAnyFormat(utxoKey)) continue;
-
-      selectedUTXOs.push({
-        address,
-        utxoKey,
-        utxoData: utxoData as UTXOData,
-        coinType
-      });
-
-      collectedAmounts[coinType] += (utxoData as UTXOData).Value || 0;
-    }
+  for (const { utxoData, coinType } of selectedUTXOs) {
+    collectedAmounts[coinType] += utxoData.Value;
   }
 
-  // 检查余额是否足够
-  for (const coinType of [0, 1, 2]) {
-    if (collectedAmounts[coinType] < requiredAmounts[coinType]) {
-      throw new Error(`币种 ${coinType} 余额不足：需要 ${requiredAmounts[coinType]}，可用 ${collectedAmounts[coinType]}`);
+  console.log('[normal tx] selected UTXOs:', selectedUTXOs.length);
+
+  const advancedOutputMeta = new Map<string, {
+    seedAnchor: number[] | string;
+    seedChainStep: number;
+    defaultSpendAlgorithm: string;
+  }>();
+
+  for (const { address, utxoData } of selectedUTXOs) {
+    const normalizedAddress = normalizeAddress(address);
+    if (advancedOutputMeta.has(normalizedAddress)) {
+      continue;
     }
+    const addrData = walletData[normalizedAddress] || walletData[address];
+    if (!addrData?.privHex) {
+      continue;
+    }
+    const referencedOutput = utxoData.UTXO?.TXOutputs?.[utxoData.Position?.IndexZ || 0] as TXOutput | undefined;
+    if (!referencedOutput?.SeedAnchor || !referencedOutput?.SeedChainStep) {
+      continue;
+    }
+    const spendState = recoverSeedStateForSpend(normalizedAddress, addrData, referencedOutput);
+    if (spendState.step <= 1) {
+      throw new Error(`Address ${normalizedAddress.slice(0, 16)}... seed chain is exhausted`);
+    }
+    advancedOutputMeta.set(normalizedAddress, {
+      seedAnchor: nextAnchor(spendState),
+      seedChainStep: spendState.step - 1,
+      defaultSpendAlgorithm: addrData.defaultSpendAlgorithm || AlgorithmECDSAP256
+    });
   }
 
-  console.log('[普通转账] 选择了', selectedUTXOs.length, '个 UTXO');
-
-  // ========== Step 3: 构造 TXInputNormal ==========
+  // ========== Step 3: 鏋勯€?TXInputNormal ==========
   const txInputs: TXInputNormal[] = [];
 
   for (const utxoItem of selectedUTXOs) {
@@ -2297,24 +2431,26 @@ export async function buildNormalTransaction(
     const addrData = walletData[address];
     if (!addrData) continue;
 
-    // 获取地址私钥
+    // 鑾峰彇鍦板潃绉侀挜
     const addrPrivKey = addrData.privHex || '';
     if (!addrPrivKey) {
-      throw new Error(`地址 ${address} 私钥不存在`);
+      throw new Error(`Address ${address} private key is missing`);
     }
 
-    // 获取被引用的 TXOutput
+    // 鑾峰彇琚紩鐢ㄧ殑 TXOutput
     const position = utxoData.Position;
     const utxoTx = utxoData.UTXO;
     if (!utxoTx || !utxoTx.TXOutputs || utxoTx.TXOutputs.length <= position.IndexZ) {
-      throw new Error(`UTXO 数据不完整: ${utxoItem.utxoKey}`);
+      throw new Error(`UTXO 鏁版嵁涓嶅畬鏁? ${utxoItem.utxoKey}`);
     }
 
     const referencedOutput = utxoTx.TXOutputs[position.IndexZ];
 
-    // 计算 TXOutput 哈希并签名
+    // 璁＄畻 TXOutput 鍝堝笇骞剁鍚?
     // Cast to any to handle type difference between blockchain.TXOutput and txBuilder.TXOutput
     const { hash: outputHash, signature: inputSigRaw } = signTXOutput(referencedOutput as any, addrPrivKey);
+    const seedState = recoverSeedStateForSpend(address, addrData as AddressData, referencedOutput as any);
+    const spendArtifacts = buildSeedSpendArtifacts(outputHash, currentSeed(seedState));
     const inputSig: EcdsaSignatureJSON = {
       R: inputSigRaw.R.toString(10),
       S: inputSigRaw.S.toString(10)
@@ -2328,64 +2464,74 @@ export async function buildNormalTransaction(
       IsCommitteeMake: false,
       IsCrossChain: false,
       InputSignature: inputSig,
-      TXOutputHash: outputHash
+      TXOutputHash: outputHash,
+      InputSignatureV2: spendArtifacts.inputSignatureV2,
+      SeedReveal: spendArtifacts.seedReveal,
+      SeedPublicKeyV2: spendArtifacts.seedPublicKeyV2,
+      SeedChainStep: seedState.step
     };
 
     txInputs.push(input);
   }
 
-  // ========== Step 4: 构造 TXOutputs ==========
+  // ========== Step 4: 鏋勯€?TXOutputs ==========
   const txOutputs: TXOutput[] = [];
 
-  // 收款方输出
+  // 鏀舵鏂硅緭鍑?
   for (const recipient of recipients) {
+    const recipientSeedMeta = resolveRecipientSeedStateForOutput(recipient, walletData);
+    if (!recipientSeedMeta.seedAnchor || !recipientSeedMeta.seedChainStep) {
+      throw new Error(`Recipient ${recipient.address.slice(0, 16)}... is missing seed metadata`);
+    }
     const output: TXOutput = {
       ToAddress: recipient.address,
       ToValue: recipient.amount,
       ToGuarGroupID: recipient.guarGroupID || '',
-      ToPublicKey: {
-        CurveName: 'P256',
-        X: recipient.publicKeyX ? BigInt('0x' + recipient.publicKeyX).toString(10) : '0',
-        Y: recipient.publicKeyY ? BigInt('0x' + recipient.publicKeyY).toString(10) : '0'
-      },
+      ToPublicKey: convertHexToPublicKey(recipient.publicKeyX, recipient.publicKeyY) as unknown as PublicKeyNewJSON,
       ToInterest: recipient.interest || 0,
       Type: recipient.coinType,
       ToPeerID: '',
       IsPayForGas: false,
       IsCrossChain: false,
-      IsGuarMake: false
+      IsGuarMake: false,
+      SeedAnchor: recipientSeedMeta.seedAnchor,
+      SeedChainStep: recipientSeedMeta.seedChainStep,
+      DefaultSpendAlgorithm: recipientSeedMeta.defaultSpendAlgorithm
     };
     txOutputs.push(output);
   }
 
-  // 找零输出
+  // 鎵鹃浂杈撳嚭
   for (const coinType of [0, 1, 2]) {
     const changeAmount = collectedAmounts[coinType] - requiredAmounts[coinType];
     if (changeAmount > 0 && changeAddresses[coinType]) {
       const changeAddr = changeAddresses[coinType];
       const changeAddrData = walletData[changeAddr];
+      const normalizedChangeAddr = normalizeAddress(changeAddr);
+      const changeSeedMeta = advancedOutputMeta.get(normalizedChangeAddr) || getAddressSeedStateForOutput(normalizedChangeAddr, walletData);
 
       const output: TXOutput = {
         ToAddress: changeAddr,
         ToValue: changeAmount,
         ToGuarGroupID: '',
-        ToPublicKey: changeAddrData ? {
-          CurveName: 'P256',
-          X: changeAddrData.pubXHex ? BigInt('0x' + changeAddrData.pubXHex).toString(10) : '0',
-          Y: changeAddrData.pubYHex ? BigInt('0x' + changeAddrData.pubYHex).toString(10) : '0'
-        } : { CurveName: 'P256', X: '0', Y: '0' },
+        ToPublicKey: changeAddrData
+          ? (convertHexToPublicKey(changeAddrData.pubXHex || '', changeAddrData.pubYHex || '') as unknown as PublicKeyNewJSON)
+          : { CurveName: 'P256', X: '0', Y: '0' },
         ToInterest: 0,
         Type: coinType,
         ToPeerID: '',
         IsPayForGas: false,
         IsCrossChain: false,
-        IsGuarMake: false
+        IsGuarMake: false,
+        SeedAnchor: changeSeedMeta.seedAnchor,
+        SeedChainStep: changeSeedMeta.seedChainStep,
+        DefaultSpendAlgorithm: changeSeedMeta.defaultSpendAlgorithm
       };
       txOutputs.push(output);
     }
   }
 
-  // Gas 输出
+  // Gas 杈撳嚭
   if (howMuchPayForGas > 0) {
     const gasOutput: TXOutput = {
       ToAddress: '',
@@ -2397,12 +2543,15 @@ export async function buildNormalTransaction(
       ToPeerID: '',
       IsPayForGas: true,
       IsCrossChain: false,
-      IsGuarMake: false
+      IsGuarMake: false,
+      SeedAnchor: [],
+      SeedChainStep: 0,
+      DefaultSpendAlgorithm: ''
     };
     txOutputs.push(gasOutput);
   }
 
-  // ========== Step 5: 构造 InterestAssign ==========
+  // ========== Step 5: 鏋勯€?InterestAssign ==========
   const backAssign: Record<string, number> = {};
   const addressCount = fromAddresses.length;
   for (const addr of fromAddresses) {
@@ -2415,7 +2564,7 @@ export async function buildNormalTransaction(
     BackAssign: backAssign
   };
 
-  // ========== Step 6: 构造 Transaction ==========
+  // ========== Step 6: 鏋勯€?Transaction ==========
   const valueDivision: Record<number, number> = {};
   for (const recipient of recipients) {
     valueDivision[recipient.coinType] = (valueDivision[recipient.coinType] || 0) + recipient.amount;
@@ -2425,34 +2574,46 @@ export async function buildNormalTransaction(
   }
 
   const tx: Transaction = {
-    TXID: '',  // 待计算
+    TXID: '',
     Size: 0,
     Version: 1.0,
-    GuarantorGroup: '',  // 散户没有担保组织
-    TXType: 8,           // 散户交易类型
+    GuarantorGroup: '',  // 鏁ｆ埛娌℃湁鎷呬繚缁勭粐
+    TXType: 8,           // 鏁ｆ埛浜ゆ槗绫诲瀷
     Value: Object.values(valueDivision).reduce((a, b) => a + b, 0),
     ValueDivision: valueDivision,
     NewValue: 0,
     NewValueDiv: {},
     InterestAssign: interestAssign,
-    UserSignature: { R: null, S: null },  // 待签名
+    UserSignature: { R: null, S: null },
+    UserSignatureV2: { Algorithm: '', Signature: null },
     TXInputsNormal: txInputs,
     TXInputsCertificate: [],
     TXOutputs: txOutputs,
     Data: []
   };
 
-  // 计算 TXID
+  tx.UserSignatureV2 = signHashEnvelope(
+    AlgorithmECDSAP256,
+    hashBackendJson({
+      ...tx,
+      TXID: '',
+      Size: 0,
+      NewValue: 0,
+      UserSignature: { R: null, S: null },
+      UserSignatureV2: { Algorithm: '', Signature: null },
+      TXType: 0
+    }),
+    accountPrivKey
+  );
+
   tx.TXID = calculateTXID(tx);
-  console.log('[普通转账] TXID:', tx.TXID);
+  console.log('[鏅€氳浆璐 TXID:', tx.TXID);
 
-  // 用户签名（跳过，AggregateGTX 不需要外层 UserSignature，内部的 InputSignature 已签名）
-  // tx.UserSignature = signTransaction(tx, accountPrivKey);
-
-  // ========== Step 7: 构建 AggregateGTX ==========
+  // ========== Step 7: 鏋勫缓 AggregateGTX ==========
   const atx = buildAggregateGTX(tx);
 
-  console.log('[普通转账] 交易构建完成');
+  console.log('[鏅€氳浆璐 浜ゆ槗鏋勫缓瀹屾垚');
 
   return atx;
 }
+

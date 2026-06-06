@@ -11,18 +11,29 @@ import {
     isApiError,
 } from './api';
 import {
+    AlgorithmECDSAP256,
     convertHexToPublicKey,
+    getPublicKeyHexFromPrivate,
+    hashBackendJson,
     getTimestamp,
+    publicKeyEnvelopeFromHex,
     serializeForBackend,
+    signHashEnvelope,
     signStruct,
     bigIntToHex,
     type EcdsaSignature,
+    type PublicKeyEnvelope,
     type PublicKeyNew,
+    type SignatureEnvelope,
 } from './signature';
+import { buildInitialSeedMetaFromPrivateKey } from './seedChain';
 import {
+    getAccount,
     getOrganization,
     getSessionAddressKey,
     getSessionKey,
+    hasAddressProtocolMetadata,
+    normalizeAddressDataForStorage,
     saveAccount,
     type OrganizationChoice,
     type UserAccount,
@@ -31,6 +42,10 @@ import {
 export interface UserNewAddressInfo {
     NewAddress: string;
     PublicKeyNew: PublicKeyNew;
+    SignPublicKeyV2: PublicKeyEnvelope;
+    SeedAnchor: number[] | string;
+    SeedChainStep: number;
+    DefaultSpendAlgorithm: string;
     UserID: string;
     Type: number;
     Sig?: EcdsaSignature;
@@ -48,6 +63,11 @@ export interface RegisterAddressRequest {
     GroupID: string;
     TimeStamp: number;
     Type: number;
+    SignPublicKeyV2: PublicKeyEnvelope;
+    SeedAnchor: number[] | string;
+    SeedChainStep: number;
+    DefaultSpendAlgorithm: string;
+    AddressOwnershipSig?: SignatureEnvelope;
     Sig?: EcdsaSignature;
 }
 
@@ -62,6 +82,10 @@ export interface UserAddressBindingMsg {
     UserID: string;
     Address: string;
     PublicKey: PublicKeyNew;
+    SignPublicKeyV2?: PublicKeyEnvelope;
+    SeedAnchor?: number[] | string;
+    SeedChainStep?: number;
+    DefaultSpendAlgorithm?: string;
     Type: number;
     TimeStamp: number;
     Sig?: EcdsaSignature;
@@ -81,6 +105,10 @@ export interface AddressGroupInfo {
     GroupID: string;
     PublicKey?: { CurveName: string; X?: number | string; Y?: number | string };
     Type?: number;
+    SignPublicKeyV2?: PublicKeyEnvelope;
+    SeedAnchor?: number[] | string;
+    SeedChainStep?: number;
+    DefaultSpendAlgorithm?: string;
 }
 
 export interface QueryAddressGroupResponse {
@@ -105,6 +133,36 @@ function buildAssignNewAddressUrl(org: OrganizationChoice): string {
     return buildApiUrl(base, API_ENDPOINTS.ASSIGN_NEW_ADDRESS(org.groupId));
 }
 
+function ensureAddressProtocolMeta(
+    accountId: string,
+    address: string,
+    pubXHex: string,
+    pubYHex: string,
+    addressType: number,
+    addressPrivHex: string,
+    accountPrivHex?: string
+): {
+    signPublicKeyV2: PublicKeyEnvelope;
+    seedAnchor: number[];
+    seedChainStep: number;
+    defaultSpendAlgorithm: string;
+} {
+    void accountId;
+    void address;
+    void addressType;
+    const accountPub = accountPrivHex ? getPublicKeyHexFromPrivate(accountPrivHex) : { x: pubXHex, y: pubYHex };
+    const signPublicKeyV2 = accountPrivHex
+        ? publicKeyEnvelopeFromHex(accountPub.x, accountPub.y)
+        : publicKeyEnvelopeFromHex(pubXHex, pubYHex);
+    const seedMeta = buildInitialSeedMetaFromPrivateKey(addressPrivHex);
+    return {
+        signPublicKeyV2,
+        seedAnchor: seedMeta.seedAnchor,
+        seedChainStep: seedMeta.seedChainStep,
+        defaultSpendAlgorithm: seedMeta.defaultSpendAlgorithm || AlgorithmECDSAP256,
+    };
+}
+
 export async function createNewAddressOnBackendWithPriv(
     accountId: string,
     newAddress: string,
@@ -112,7 +170,8 @@ export async function createNewAddressOnBackendWithPriv(
     pubYHex: string,
     addressType: number,
     accountPrivHex: string,
-    orgOverride?: OrganizationChoice | null
+    orgOverride?: OrganizationChoice | null,
+    addressPrivHex?: string
 ): Promise<AddressResult<NewAddressResponse>> {
     try {
         const org = orgOverride || (await getOrganization(accountId));
@@ -127,9 +186,28 @@ export async function createNewAddressOnBackendWithPriv(
             return { success: false, error: '账户私钥缺失' };
         }
 
+        const normalizedAddress = normalizeAddress(newAddress);
+        const resolvedAddressPriv = addressPrivHex || getSessionAddressKey(normalizedAddress) || '';
+        if (!resolvedAddressPriv) {
+            return { success: false, error: 'address seed recovery material missing' };
+        }
+        const protocolMeta = ensureAddressProtocolMeta(
+            accountId,
+            normalizedAddress,
+            pubXHex,
+            pubYHex,
+            addressType,
+            resolvedAddressPriv,
+            accountPrivHex
+        );
+
         const requestBody: UserNewAddressInfo = {
-            NewAddress: normalizeAddress(newAddress),
+            NewAddress: normalizedAddress,
             PublicKeyNew: convertHexToPublicKey(pubXHex, pubYHex),
+            SignPublicKeyV2: protocolMeta.signPublicKeyV2,
+            SeedAnchor: protocolMeta.seedAnchor,
+            SeedChainStep: protocolMeta.seedChainStep,
+            DefaultSpendAlgorithm: protocolMeta.defaultSpendAlgorithm,
             UserID: accountId,
             Type: addressType,
         };
@@ -165,15 +243,50 @@ export async function registerAddressOnComNode(
             return { success: false, error: 'ComNode 端点不可用' };
         }
 
-        const requestBody: RegisterAddressRequest = {
-            Address: normalizeAddress(address),
+        const normalizedAddress = normalizeAddress(address);
+        const protocolMeta = ensureAddressProtocolMeta(
+            '',
+            normalizedAddress,
+            pubXHex,
+            pubYHex,
+            addressType,
+            privHex
+        );
+        const ownershipPayload = {
+            Address: normalizedAddress,
             PublicKeyNew: convertHexToPublicKey(pubXHex, pubYHex),
             GroupID: '',
             TimeStamp: getTimestamp(),
             Type: addressType,
+            SignPublicKeyV2: protocolMeta.signPublicKeyV2,
+            SeedAnchor: protocolMeta.seedAnchor,
+            SeedChainStep: protocolMeta.seedChainStep,
+            DefaultSpendAlgorithm: protocolMeta.defaultSpendAlgorithm,
+        };
+        const addressOwnershipSig = signHashEnvelope(
+            AlgorithmECDSAP256,
+            hashBackendJson(ownershipPayload),
+            privHex
+        );
+
+        const requestBody: RegisterAddressRequest = {
+            Address: normalizedAddress,
+            PublicKeyNew: convertHexToPublicKey(pubXHex, pubYHex),
+            GroupID: '',
+            TimeStamp: ownershipPayload.TimeStamp,
+            Type: addressType,
+            SignPublicKeyV2: protocolMeta.signPublicKeyV2,
+            SeedAnchor: protocolMeta.seedAnchor,
+            SeedChainStep: protocolMeta.seedChainStep,
+            DefaultSpendAlgorithm: protocolMeta.defaultSpendAlgorithm,
+            AddressOwnershipSig: addressOwnershipSig,
         };
 
-        requestBody.Sig = signStruct(requestBody as unknown as Record<string, unknown>, privHex, ['Sig']);
+        requestBody.Sig = signStruct(
+            requestBody as unknown as Record<string, unknown>,
+            privHex,
+            ['Sig', 'AddressOwnershipSig']
+        );
 
         const response = await apiClient.request<RegisterAddressResponse>(
             buildApiUrl(comNodeURL, API_ENDPOINTS.COM_REGISTER_ADDRESS),
@@ -196,7 +309,19 @@ export async function registerAddressOnComNode(
 
 export async function queryAddressGroupInfo(
     address: string
-): Promise<{ success: boolean; data?: { groupId: string; type: number; publicKey?: { x: string; y: string } }; error?: string }> {
+): Promise<{
+    success: boolean;
+    data?: {
+        groupId: string;
+        type: number;
+        publicKey?: { x: string; y: string };
+        signPublicKeyV2?: PublicKeyEnvelope;
+        seedAnchor?: number[] | string;
+        seedChainStep?: number;
+        defaultSpendAlgorithm?: string;
+    };
+    error?: string;
+}> {
     try {
         const comNodeURL = await getComNodeEndpoint();
         if (!comNodeURL) {
@@ -233,7 +358,18 @@ export async function queryAddressGroupInfo(
             }
         }
 
-        return { success: true, data: { groupId, type, publicKey } };
+        return {
+            success: true,
+            data: {
+                groupId,
+                type,
+                publicKey,
+                signPublicKeyV2: info?.SignPublicKeyV2,
+                seedAnchor: info?.SeedAnchor,
+                seedChainStep: Number(info?.SeedChainStep ?? 0) || undefined,
+                defaultSpendAlgorithm: info?.DefaultSpendAlgorithm,
+            },
+        };
     } catch (error) {
         if (isApiError(error) && error.status === 503) {
             clearComNodeCache();
@@ -270,11 +406,25 @@ export async function unbindAddressOnBackend(
             return { success: false, error: '地址公钥缺失' };
         }
 
+        const normalizedAddress = normalizeAddress(address);
+        const account = await getAccount(accountId);
+        const existing = account?.addresses?.[normalizedAddress];
+        const normalizedMeta = account && existing
+            ? normalizeAddressDataForStorage(normalizedAddress, existing, account)
+            : null;
+        if (!normalizedMeta || !hasAddressProtocolMetadata(normalizedMeta)) {
+            return { success: false, error: 'address protocol metadata incomplete' };
+        }
+
         const requestBody: UserAddressBindingMsg = {
             Op: 0,
             UserID: accountId,
-            Address: normalizeAddress(address),
+            Address: normalizedAddress,
             PublicKey: convertHexToPublicKey(pubXHex, pubYHex),
+            SignPublicKeyV2: normalizedMeta.signPublicKeyV2 || undefined,
+            SeedAnchor: normalizedMeta.seedAnchor,
+            SeedChainStep: normalizedMeta.seedChainStep,
+            DefaultSpendAlgorithm: normalizedMeta.defaultSpendAlgorithm,
             Type: addressType,
             TimeStamp: getTimestamp(),
         };
@@ -368,7 +518,8 @@ export async function registerAddressesOnMainEntry(account: UserAccount): Promis
                 pubYHex,
                 addressType,
                 session.privKey,
-                org
+                org,
+                getSessionAddressKey(addr) || meta?.privHex || ''
             );
 
             if (!result.success) {

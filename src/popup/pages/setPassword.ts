@@ -1,5 +1,5 @@
 /**
- * 设置密码页面 - 新建账户的第二步
+ * Set login password for a newly created account.
  */
 
 import { encryptPrivateKey } from '../../core/keyEncryption';
@@ -12,11 +12,66 @@ import {
 } from '../../core/storage';
 import { startTxStatusSync } from '../../core/txStatus';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
+import { getActiveLanguage } from '../utils/appSettings';
+import { escapeHtml, icon, renderHeaderBar, renderNotice, shortAddress } from '../utils/ui';
 
 interface PendingAccountData {
     accountId: string;
     address: string;
     privHex: string;
+}
+
+const TEXT = {
+    'zh-CN': {
+        title: '设置登录密码',
+        step: '步骤 2 / 4',
+        desc: '登录密码用于加密本地私钥，请选择容易记住但不易猜到的密码。',
+        account: '即将创建的账户',
+        password: '登录密码',
+        confirm: '确认密码',
+        placeholder: '至少 6 位字符',
+        confirmPlaceholder: '再次输入密码',
+        ruleLength: '至少 6 位字符',
+        ruleMatch: '两次密码一致',
+        submit: '完成创建',
+        submitting: '创建中...',
+        missing: '账户数据丢失，请重新创建',
+        passwordRequired: '请输入登录密码',
+        confirmRequired: '请再次输入密码',
+        lengthError: '密码至少 6 位字符',
+        matchError: '两次输入的密码不一致',
+        success: '账户创建成功',
+        failed: '创建失败',
+        securityTitle: '本地加密',
+        securityDesc: '密码只用于加密浏览器本地私钥，插件不会上传你的私钥。',
+    },
+    en: {
+        title: 'Set Login Password',
+        step: 'Step 2 / 4',
+        desc: 'This password encrypts your local private key. Choose one you can remember.',
+        account: 'Account to create',
+        password: 'Password',
+        confirm: 'Confirm Password',
+        placeholder: 'At least 6 characters',
+        confirmPlaceholder: 'Enter password again',
+        ruleLength: 'At least 6 characters',
+        ruleMatch: 'Passwords match',
+        submit: 'Create Account',
+        submitting: 'Creating...',
+        missing: 'Account data missing. Please create again.',
+        passwordRequired: 'Please enter password',
+        confirmRequired: 'Please confirm password',
+        lengthError: 'Password must be at least 6 characters',
+        matchError: 'Passwords do not match',
+        success: 'Account created',
+        failed: 'Failed to create account',
+        securityTitle: 'Local encryption',
+        securityDesc: 'The password encrypts the local key. The extension never uploads your private key.',
+    },
+};
+
+function getText() {
+    return getActiveLanguage() === 'en' ? TEXT.en : TEXT['zh-CN'];
 }
 
 function getPendingAccountData(): PendingAccountData | null {
@@ -31,93 +86,95 @@ export function renderSetPassword(): void {
     const app = document.getElementById('app');
     if (!app) return;
 
+    const t = getText();
     const pending = getPendingAccountData();
     if (!pending) {
-        (window as any).showToast('账户数据丢失，请重新创建', 'error');
+        (window as any).showToast(t.missing, 'error');
         (window as any).navigateTo('create');
         return;
     }
 
-    const shortAddress = pending.address.slice(0, 8) + '...' + pending.address.slice(-6);
-
     app.innerHTML = `
-    <div class="page">
-      <header class="header">
-        <button class="header-btn" onclick="navigateTo('create')">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <span style="font-weight: 600;">设置登录密码</span>
-        <div style="width: 32px;"></div>
-      </header>
-      
-      <div class="page-content">
-        <div class="card account-step-card section-space">
-          <div class="account-step-title">步骤 2 / 4 · 设置密码</div>
-          <div class="account-step-desc">设置登录密码用于加密私钥</div>
-        </div>
+      <div class="page account-flow-page">
+        ${renderHeaderBar({ title: t.title, backPage: 'create' })}
+        <div class="page-content">
+          <div class="card account-step-card">
+            <div class="account-step-title">${escapeHtml(t.step)} · ${escapeHtml(t.title)}</div>
+            <div class="account-step-desc">${escapeHtml(t.desc)}</div>
+          </div>
 
-        <div class="card account-preview-card section-space-lg">
-          <div class="account-preview-label">即将创建的账户</div>
-          <div class="account-preview-id">账户 ID: ${pending.accountId}</div>
-          <div class="account-preview-address">${shortAddress}</div>
-        </div>
+          <div class="card account-preview-card">
+            <div class="account-preview-label">${escapeHtml(t.account)}</div>
+            <div class="account-preview-id">${escapeHtml(pending.accountId)}</div>
+            <div class="account-preview-address">${escapeHtml(shortAddress(pending.address))}</div>
+          </div>
 
-        <form id="setPasswordForm" novalidate>
-          <div class="input-group">
-            <label class="input-label">设置登录密码</label>
-            <input type="password" class="input" id="password" placeholder="至少6位字符" required minlength="6">
-            <div class="form-inline-error" id="passwordError" style="display: none;">
-              <span class="form-inline-error-icon">!</span>
-              <span class="form-inline-error-text"></span>
+          ${renderNotice('info', t.securityTitle, t.securityDesc)}
+
+          <form id="setPasswordForm" class="form-stack" novalidate>
+            <div class="input-group">
+              <label class="input-label" for="password">${escapeHtml(t.password)}</label>
+              <div class="input-with-action">
+                <input type="password" class="input" id="password" placeholder="${escapeHtml(t.placeholder)}" required minlength="6">
+                <button class="input-action" type="button" data-toggle-password="password" aria-label="${escapeHtml(t.password)}">${icon('eye', 16)}</button>
+              </div>
+              <div class="form-inline-error" id="passwordError"><span class="form-inline-error-icon">!</span><span class="form-inline-error-text"></span></div>
             </div>
-          </div>
-          
-          <div class="input-group">
-            <label class="input-label">确认密码</label>
-            <input type="password" class="input" id="confirmPassword" placeholder="再次输入密码" required>
-            <div class="form-inline-error" id="confirmPasswordError" style="display: none;">
-              <span class="form-inline-error-icon">!</span>
-              <span class="form-inline-error-text"></span>
-            </div>
-          </div>
 
-          <div class="form-actions">
-            <button type="submit" class="btn btn-primary btn-block btn-lg">
-              完成创建
-            </button>
-          </div>
-        </form>
+            <div class="input-group">
+              <label class="input-label" for="confirmPassword">${escapeHtml(t.confirm)}</label>
+              <div class="input-with-action">
+                <input type="password" class="input" id="confirmPassword" placeholder="${escapeHtml(t.confirmPlaceholder)}" required>
+                <button class="input-action" type="button" data-toggle-password="confirmPassword" aria-label="${escapeHtml(t.confirm)}">${icon('eye', 16)}</button>
+              </div>
+              <div class="form-inline-error" id="confirmPasswordError"><span class="form-inline-error-icon">!</span><span class="form-inline-error-text"></span></div>
+            </div>
+
+            <div class="password-rules">
+              <div class="password-rule" id="ruleLength">${icon('check', 14)}<span>${escapeHtml(t.ruleLength)}</span></div>
+              <div class="password-rule" id="ruleMatch">${icon('check', 14)}<span>${escapeHtml(t.ruleMatch)}</span></div>
+            </div>
+
+            <div class="form-actions">
+              <button type="submit" id="setPasswordSubmit" class="btn btn-primary btn-block btn-lg">
+                ${escapeHtml(t.submit)}
+              </button>
+            </div>
+          </form>
+        </div>
       </div>
-    </div>
-  `;
+    `;
 
     bindInlineHandlers(app, {
         navigateTo: (page: string) => (window as any).navigateTo(page),
     });
 
     const form = document.getElementById('setPasswordForm') as HTMLFormElement;
-    form.addEventListener('submit', handleSetPassword);
-
     const passwordInput = document.getElementById('password') as HTMLInputElement;
     const confirmInput = document.getElementById('confirmPassword') as HTMLInputElement;
-    passwordInput.addEventListener('input', () => clearFieldError(passwordInput, 'passwordError'));
-    confirmInput.addEventListener('input', () => clearFieldError(confirmInput, 'confirmPasswordError'));
+    form.addEventListener('submit', handleSetPassword);
+    passwordInput.addEventListener('input', updatePasswordRules);
+    confirmInput.addEventListener('input', updatePasswordRules);
+    app.querySelectorAll<HTMLButtonElement>('[data-toggle-password]').forEach((button) => {
+        button.addEventListener('click', () => togglePasswordVisibility(button.dataset.togglePassword || ''));
+    });
+    updatePasswordRules();
 }
 
 async function handleSetPassword(e: Event): Promise<void> {
     e.preventDefault();
 
+    const t = getText();
     const pending = getPendingAccountData();
     if (!pending) {
-        (window as any).showToast('账户数据丢失，请重新创建', 'error');
+        (window as any).showToast(t.missing, 'error');
         (window as any).navigateTo('create');
         return;
     }
 
     const passwordInput = document.getElementById('password') as HTMLInputElement;
     const confirmInput = document.getElementById('confirmPassword') as HTMLInputElement;
+    const submitBtn = document.getElementById('setPasswordSubmit') as HTMLButtonElement | null;
     const password = passwordInput.value.trim();
     const confirmPassword = confirmInput.value.trim();
 
@@ -126,24 +183,28 @@ async function handleSetPassword(e: Event): Promise<void> {
     clearFieldError(confirmInput, 'confirmPasswordError');
 
     if (!password) {
-        setFieldError(passwordInput, 'passwordError', '请输入登录密码');
+        setFieldError(passwordInput, 'passwordError', t.passwordRequired);
         hasError = true;
     } else if (password.length < 6) {
-        setFieldError(passwordInput, 'passwordError', '密码至少 6 位字符');
+        setFieldError(passwordInput, 'passwordError', t.lengthError);
         hasError = true;
     }
 
     if (!confirmPassword) {
-        setFieldError(confirmInput, 'confirmPasswordError', '请再次输入密码');
+        setFieldError(confirmInput, 'confirmPasswordError', t.confirmRequired);
         hasError = true;
     } else if (password !== confirmPassword) {
-        setFieldError(confirmInput, 'confirmPasswordError', '两次输入的密码不一致');
+        setFieldError(confirmInput, 'confirmPasswordError', t.matchError);
         hasError = true;
     }
 
     if (hasError) return;
 
     try {
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.textContent = t.submitting;
+        }
         const encrypted = await encryptPrivateKey(pending.privHex, password);
 
         const account: UserAccount = {
@@ -169,36 +230,49 @@ async function handleSetPassword(e: Event): Promise<void> {
         void startTxStatusSync(pending.accountId);
 
         clearPendingAccountData();
-
-        (window as any).showToast('账户创建成功！', 'success');
-
+        (window as any).showToast(t.success, 'success');
         setTimeout(() => {
             (window as any).navigateTo('walletManager');
         }, 400);
     } catch (error) {
-        console.error('[设置密码] 失败:', error);
-        (window as any).showToast('创建失败: ' + (error as Error).message, 'error');
+        console.error('[SetPassword] failed:', error);
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = t.submit;
+        }
+        (window as any).showToast(`${t.failed}: ${(error as Error).message}`, 'error');
     }
+}
+
+function togglePasswordVisibility(id: string): void {
+    const input = document.getElementById(id) as HTMLInputElement | null;
+    if (!input) return;
+    input.type = input.type === 'password' ? 'text' : 'password';
+}
+
+function updatePasswordRules(): void {
+    const passwordInput = document.getElementById('password') as HTMLInputElement | null;
+    const confirmInput = document.getElementById('confirmPassword') as HTMLInputElement | null;
+    const password = passwordInput?.value || '';
+    const confirm = confirmInput?.value || '';
+    document.getElementById('ruleLength')?.classList.toggle('is-ok', password.length >= 6);
+    document.getElementById('ruleMatch')?.classList.toggle('is-ok', !!password && password === confirm);
+    if (passwordInput) clearFieldError(passwordInput, 'passwordError');
+    if (confirmInput) clearFieldError(confirmInput, 'confirmPasswordError');
 }
 
 function setFieldError(input: HTMLInputElement, errorId: string, message: string): void {
     input.classList.add('input-error');
     const errorEl = document.getElementById(errorId);
-    if (errorEl) {
-        const textEl = errorEl.querySelector('.form-inline-error-text');
-        if (textEl) {
-            textEl.textContent = message;
-        } else {
-            errorEl.textContent = message;
-        }
-        (errorEl as HTMLElement).style.display = 'flex';
-    }
+    if (!errorEl) return;
+    const textEl = errorEl.querySelector('.form-inline-error-text');
+    if (textEl) textEl.textContent = message;
+    errorEl.classList.add('is-visible');
 }
 
 function clearFieldError(input: HTMLInputElement, errorId: string): void {
     input.classList.remove('input-error');
     const errorEl = document.getElementById(errorId);
-    if (errorEl) {
-        (errorEl as HTMLElement).style.display = 'none';
-    }
+    if (errorEl) errorEl.classList.remove('is-visible');
 }
+

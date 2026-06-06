@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PanguPay UI Preview</title>
+  <style>
+    :root {
+      --primary: #1f5eff;
+      --primary-dark: #1748c8;
+      --bg: #f6f8fb;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #64748b;
+      --border: #e2e8f0;
+      --success: #0f9f6e;
+      --warning: #d97706;
+      --danger: #dc2626;
+      --radius: 12px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #dfe7f3;
+      padding: 40px;
+      color: var(--text);
+    }
+    .board {
+      display: grid;
+      grid-template-columns: repeat(4, 360px);
+      gap: 28px;
+      align-items: start;
+      width: max-content;
+    }
+    .shot {
+      width: 360px;
+      height: 600px;
+      overflow: hidden;
+      border-radius: 18px;
+      background: var(--bg);
+      box-shadow: 0 28px 80px rgba(15, 23, 42, .22);
+      border: 1px solid rgba(15, 23, 42, .08);
+      position: relative;
+    }
+    .header {
+      height: 56px;
+      display: grid;
+      grid-template-columns: 72px 1fr 72px;
+      align-items: center;
+      padding: 0 12px;
+      background: rgba(255,255,255,.96);
+      border-bottom: 1px solid var(--border);
+    }
+    .title {
+      text-align: center;
+      font-weight: 700;
+      font-size: 15px;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .logo {
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+      font-weight: 800;
+      font-size: 14px;
+    }
+    .mark {
+      width: 28px;
+      height: 28px;
+      border-radius: 9px;
+      background: linear-gradient(135deg, #1f5eff, #80adff);
+      color: white;
+      display: inline-grid;
+      place-items: center;
+      font-weight: 900;
+    }
+    .icon-btn {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--muted);
+      display: inline-grid;
+      place-items: center;
+      margin-left: auto;
+      font-weight: 700;
+    }
+    .content {
+      height: 480px;
+      overflow: hidden;
+      padding: 16px;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+    .bottom {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 64px;
+      background: rgba(255,255,255,.96);
+      border-top: 1px solid var(--border);
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      padding: 6px 8px;
+    }
+    .nav {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      border-radius: 10px;
+      font-size: 11px;
+      display: grid;
+      gap: 3px;
+      place-items: center;
+      font-weight: 650;
+    }
+    .nav.active { color: var(--primary); background: rgba(31,94,255,.08); }
+    .nav .navicon { font-size: 18px; line-height: 1; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: 0 1px 2px rgba(15,23,42,.04);
+    }
+    .hero {
+      padding: 16px;
+      color: white;
+      background: linear-gradient(145deg, #143ea8, #1f5eff 50%, #78a8ff);
+      border-radius: var(--radius);
+      box-shadow: 0 16px 32px rgba(31,94,255,.22);
+    }
+    .hero-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      opacity: .95;
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .hero-value {
+      margin-top: 18px;
+      font-size: 32px;
+      line-height: 1;
+      font-weight: 850;
+      letter-spacing: 0;
+    }
+    .hero-sub { margin-top: 8px; font-size: 12px; opacity: .85; }
+    .assets {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-top: 16px;
+    }
+    .asset {
+      border-radius: 10px;
+      background: rgba(255,255,255,.14);
+      padding: 10px 8px;
+      min-height: 58px;
+    }
+    .asset b { display: block; font-size: 11px; opacity: .85; }
+    .asset span { display: block; margin-top: 8px; font-weight: 800; font-size: 14px; }
+    .actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .action {
+      height: 76px;
+      display: grid;
+      place-items: center;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text);
+      padding: 8px;
+    }
+    .action-icon {
+      width: 30px;
+      height: 30px;
+      border-radius: 10px;
+      display: grid;
+      place-items: center;
+      color: var(--primary);
+      background: rgba(31,94,255,.09);
+      font-weight: 900;
+    }
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      margin-bottom: 8px;
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .section-head span { color: var(--muted); font-size: 11px; font-weight: 650; }
+    .addr {
+      padding: 12px;
+      display: grid;
+      gap: 9px;
+    }
+    .addr-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .coin {
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      display: inline-grid;
+      place-items: center;
+      color: white;
+      font-size: 11px;
+      font-weight: 900;
+      flex: 0 0 auto;
+    }
+    .pgc { background: linear-gradient(135deg, #1f5eff, #6da1ff); }
+    .btc { background: linear-gradient(135deg, #d97706, #fbbf24); }
+    .eth { background: linear-gradient(135deg, #5b5ff0, #9b7cff); }
+    .addr-main { min-width: 0; flex: 1; }
+    .addr-title { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 750; }
+    .addr-meta { color: var(--muted); font-size: 11px; margin-top: 3px; }
+    .badges { display: flex; flex-wrap: wrap; gap: 6px; }
+    .badge {
+      min-height: 20px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 800;
+      background: rgba(100,116,139,.12);
+      color: var(--muted);
+    }
+    .badge.ok { background: rgba(15,159,110,.12); color: var(--success); }
+    .badge.warn { background: rgba(217,119,6,.12); color: var(--warning); }
+    .badge.blue { background: rgba(31,94,255,.12); color: var(--primary); }
+    .mode {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      background: #eaf0fb;
+      border: 1px solid var(--border);
+      padding: 4px;
+      border-radius: 10px;
+      gap: 4px;
+    }
+    .mode div {
+      height: 32px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 750;
+    }
+    .mode .active { background: white; color: var(--primary); box-shadow: 0 1px 2px rgba(15,23,42,.06); }
+    .field {
+      padding: 12px;
+      display: grid;
+      gap: 8px;
+    }
+    .label { font-size: 12px; color: var(--muted); font-weight: 750; }
+    .input {
+      height: 42px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #f8fafc;
+      padding: 0 12px;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .recipient {
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+    .rec-row { display: grid; grid-template-columns: 1fr 96px; gap: 8px; }
+    .btn {
+      height: 42px;
+      border-radius: 10px;
+      border: 0;
+      font-weight: 800;
+      font-size: 13px;
+    }
+    .primary { background: var(--primary); color: white; box-shadow: 0 10px 20px rgba(31,94,255,.2); }
+    .secondary { background: #fff; color: var(--text); border: 1px solid var(--border); }
+    .danger { background: var(--danger); color: white; }
+    .notice {
+      padding: 12px;
+      display: flex;
+      gap: 10px;
+      border-radius: 12px;
+      border: 1px solid rgba(217,119,6,.22);
+      background: rgba(217,119,6,.08);
+      color: var(--warning);
+    }
+    .notice div:last-child { color: var(--text); font-size: 12px; line-height: 1.35; }
+    .notice b { display: block; margin-bottom: 2px; }
+    .site {
+      padding: 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .site-icon {
+      width: 38px;
+      height: 38px;
+      border-radius: 11px;
+      display: grid;
+      place-items: center;
+      background: rgba(31,94,255,.1);
+      color: var(--primary);
+      font-weight: 900;
+    }
+    .site-text { min-width: 0; flex: 1; }
+    .site-title { font-size: 13px; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .site-origin { margin-top: 3px; color: var(--primary); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .summary { padding: 12px; display: grid; gap: 10px; }
+    .summary-row { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; }
+    .summary-row span:first-child { color: var(--muted); font-weight: 700; }
+    .summary-row span:last-child { font-weight: 800; text-align: right; }
+    .list { display: grid; gap: 8px; }
+    .line {
+      min-height: 44px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #f8fafc;
+      padding: 9px 10px;
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      font-size: 12px;
+    }
+    .modal-card {
+      position: absolute;
+      left: 20px;
+      right: 20px;
+      bottom: 76px;
+      background: white;
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      box-shadow: 0 22px 50px rgba(15,23,42,.25);
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+    }
+    .modal-title { font-weight: 850; font-size: 14px; }
+    .modal-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .settings-row {
+      min-height: 58px;
+      padding: 12px;
+      display: flex;
+      gap: 11px;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+    }
+    .settings-row:last-child { border-bottom: 0; }
+    .settings-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 10px;
+      background: rgba(31,94,255,.09);
+      color: var(--primary);
+      display: grid;
+      place-items: center;
+      font-weight: 900;
+    }
+    .settings-main { min-width: 0; flex: 1; }
+    .settings-title { font-size: 13px; font-weight: 800; }
+    .settings-desc { margin-top: 3px; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .two-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .screen-label {
+      position: absolute;
+      top: -30px;
+      left: 4px;
+      font-size: 13px;
+      font-weight: 800;
+      color: #334155;
+    }
+  </style>
+</head>
+<body>
+  <main class="board">
+    <section class="shot" id="home-shot">
+      <div class="header">
+        <div class="logo"><span class="mark">P</span>PanguPay</div>
+        <div></div>
+        <div class="icon-btn">L</div>
+      </div>
+      <div class="content">
+        <div class="hero">
+          <div class="hero-top"><span>My Wallet</span><span>Joined Org</span></div>
+          <div class="hero-value">12,840 <small>USDT</small></div>
+          <div class="hero-sub">4 addresses · Fast transfer enabled</div>
+          <div class="assets">
+            <div class="asset"><b>PGC</b><span>9,220</span></div>
+            <div class="asset"><b>BTC</b><span>0.86</span></div>
+            <div class="asset"><b>ETH</b><span>18.4</span></div>
+          </div>
+        </div>
+        <div class="actions">
+          <div class="card action"><span class="action-icon">↑</span>Send</div>
+          <div class="card action"><span class="action-icon">↓</span>Receive</div>
+          <div class="card action"><span class="action-icon">□</span>Wallet</div>
+          <div class="card action"><span class="action-icon">↻</span>Refresh</div>
+        </div>
+        <div>
+          <div class="section-head">Address Management <span>3 addresses</span></div>
+          <div class="card addr">
+            <div class="addr-row">
+              <span class="coin pgc">PGC</span>
+              <div class="addr-main"><div class="addr-title">0x82ad...f91c42</div><div class="addr-meta">Seed 12 · deterministic_p256</div></div>
+              <b>2,840</b>
+            </div>
+            <div class="badges"><span class="badge ok">Registered</span><span class="badge blue">Created</span><span class="badge ok">TXCer V2</span></div>
+          </div>
+        </div>
+        <div class="card addr">
+          <div class="addr-row">
+            <span class="coin btc">BTC</span>
+            <div class="addr-main"><div class="addr-title">0x31b7...aa80e9</div><div class="addr-meta">Seed 3 · pending step</div></div>
+            <b>0.86</b>
+          </div>
+          <div class="badges"><span class="badge warn">Pending Seed</span><span class="badge">Imported</span></div>
+        </div>
+      </div>
+      <div class="bottom">
+        <button class="nav active"><span class="navicon">⌂</span>Home</button>
+        <button class="nav"><span class="navicon">◷</span>History</button>
+        <button class="nav"><span class="navicon">◎</span>Org</button>
+        <button class="nav"><span class="navicon">⚙</span>Settings</button>
+      </div>
+    </section>
+
+    <section class="shot" id="send-shot">
+      <div class="header"><div class="icon-btn">←</div><div class="title">Send Transaction</div><div></div></div>
+      <div class="content">
+        <div class="mode"><div>Normal</div><div class="active">Quick</div><div>Cross</div></div>
+        <div class="card field">
+          <div class="label">Source Address</div>
+          <div class="line"><span><b>PGC</b> 0x82ad...f91c42</span><span>2,840</span></div>
+          <div class="badges"><span class="badge ok">Unlocked</span><span class="badge ok">Registered</span><span class="badge blue">Seed 12</span></div>
+        </div>
+        <div class="card recipient">
+          <div class="section-head">Recipient 1 <span>Verified</span></div>
+          <div class="input">0x91fe...093acb <span>✓</span></div>
+          <div class="rec-row"><div class="input">240.00</div><div class="input">PGC</div></div>
+        </div>
+        <div class="card recipient">
+          <div class="section-head">Recipient 2 <span>Capsule</span></div>
+          <div class="input">cap_pgc_8x...k20 <span>✓</span></div>
+          <div class="rec-row"><div class="input">12.50</div><div class="input">PGC</div></div>
+        </div>
+        <div class="card field">
+          <div class="label">Advanced Options</div>
+          <div class="input">Change: 0x82ad...f91c42</div>
+        </div>
+        <button class="btn primary">Review Transaction</button>
+      </div>
+      <div class="modal-card">
+        <div class="modal-title">Confirm Transfer</div>
+        <div class="summary-row"><span>Total PGC</span><span>252.50</span></div>
+        <div class="summary-row"><span>Gas</span><span>0.08 PGC</span></div>
+        <div class="modal-actions"><button class="btn secondary">Cancel</button><button class="btn primary">Submit</button></div>
+      </div>
+    </section>
+
+    <section class="shot" id="dapp-shot">
+      <div class="header"><div class="icon-btn">←</div><div class="title">DApp Transaction</div><div></div></div>
+      <div class="content">
+        <div class="card site">
+          <div class="site-icon">W</div>
+          <div class="site-text"><div class="site-title">TransferArea Demo</div><div class="site-origin">https://demo.transferarea.app</div></div>
+          <span class="badge warn">DApp</span>
+        </div>
+        <div class="notice"><b>!</b><div><b>Check the site carefully</b>This request can move assets. Confirm every recipient and coin total.</div></div>
+        <div class="card summary">
+          <div class="section-head">Request Summary <span>Quick Mode</span></div>
+          <div class="summary-row"><span>Source</span><span>PGC 0x82ad...f91c42</span></div>
+          <div class="summary-row"><span>Change</span><span>0x82ad...f91c42</span></div>
+        </div>
+        <div class="card summary">
+          <div class="section-head">Recipients <span>2 items</span></div>
+          <div class="line"><span>0x51ae...1200</span><b>100 PGC</b></div>
+          <div class="line"><span>0x94bd...8f72</span><b>0.20 BTC</b></div>
+        </div>
+        <div class="card summary">
+          <div class="section-head">Totals</div>
+          <div class="summary-row"><span>PGC total</span><span>100.00</span></div>
+          <div class="summary-row"><span>BTC total</span><span>0.20</span></div>
+          <div class="summary-row"><span>Gas</span><span>0.08 PGC</span></div>
+        </div>
+        <div class="two-buttons"><button class="btn secondary">Reject</button><button class="btn primary">Confirm & Submit</button></div>
+      </div>
+    </section>
+
+    <section class="shot" id="settings-shot">
+      <div class="header"><div class="icon-btn">←</div><div class="title">Settings</div><div></div></div>
+      <div class="content">
+        <div class="card site">
+          <span class="mark">P</span>
+          <div class="site-text"><div class="site-title">Account ID</div><div class="site-origin">0x9f21...4ad8</div></div>
+        </div>
+        <div>
+          <div class="section-head">General</div>
+          <div class="card">
+            <div class="settings-row"><span class="settings-icon">□</span><span class="settings-main"><span class="settings-title">Wallet Manager</span><span class="settings-desc">Manage sub wallets and protocol state</span></span><b>›</b></div>
+            <div class="settings-row"><span class="settings-icon">A</span><span class="settings-main"><span class="settings-title">Language</span><span class="settings-desc">English</span></span><b>›</b></div>
+            <div class="settings-row"><span class="settings-icon">◐</span><span class="settings-main"><span class="settings-title">Theme</span><span class="settings-desc">Light</span></span><b>›</b></div>
+          </div>
+        </div>
+        <div>
+          <div class="section-head">Security</div>
+          <div class="card">
+            <div class="settings-row"><span class="settings-icon">K</span><span class="settings-main"><span class="settings-title">Export Private Key</span><span class="settings-desc">Password confirmation required</span></span><b>›</b></div>
+            <div class="settings-row"><span class="settings-icon">L</span><span class="settings-main"><span class="settings-title">Lock Wallet</span><span class="settings-desc">Clear current session keys</span></span><b>›</b></div>
+          </div>
+        </div>
+        <div>
+          <div class="section-head">Connected Sites</div>
+          <div class="card">
+            <div class="settings-row"><span class="settings-icon">W</span><span class="settings-main"><span class="settings-title">TransferArea Demo</span><span class="settings-desc">https://demo.transferarea.app</span></span><button class="btn secondary" style="height:30px;width:78px;font-size:11px">Disconnect</button></div>
+          </div>
+        </div>
+        <button class="btn danger">Log Out</button>
+      </div>
+      <div class="bottom">
+        <button class="nav"><span class="navicon">⌂</span>Home</button>
+        <button class="nav"><span class="navicon">◷</span>History</button>
+        <button class="nav"><span class="navicon">◎</span>Org</button>
+        <button class="nav active"><span class="navicon">⚙</span>Settings</button>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

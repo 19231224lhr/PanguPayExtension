@@ -90,8 +90,72 @@ function createCustomSelect(select: HTMLSelectElement): void {
         const isOpen = wrapper.classList.contains('open');
         closeAllSelects();
         if (!isOpen) {
-            wrapper.classList.add('open');
-            trigger.setAttribute('aria-expanded', 'true');
+            openSelect(wrapper, trigger);
+        }
+    });
+
+    trigger.addEventListener('keydown', (event) => {
+        if (select.disabled) return;
+        const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('.custom-select-option:not(:disabled)'));
+        const selectedIndex = Math.max(0, items.findIndex((item) => item.dataset.value === select.value));
+
+        if (event.key === 'Escape') {
+            closeAllSelects();
+            trigger.focus();
+            return;
+        }
+
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            if (wrapper.classList.contains('open')) {
+                const active = document.activeElement as HTMLButtonElement | null;
+                const option = active?.classList.contains('custom-select-option') ? active : items[selectedIndex];
+                if (option) {
+                    chooseOption(option, select, wrapper, trigger, updateValue);
+                }
+            } else {
+                openSelect(wrapper, trigger);
+                items[selectedIndex]?.focus();
+            }
+            return;
+        }
+
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault();
+            if (!wrapper.classList.contains('open')) {
+                openSelect(wrapper, trigger);
+            }
+            const direction = event.key === 'ArrowDown' ? 1 : -1;
+            const nextIndex = (selectedIndex + direction + items.length) % items.length;
+            items[nextIndex]?.focus();
+        }
+    });
+
+    menu.addEventListener('keydown', (event) => {
+        const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('.custom-select-option:not(:disabled)'));
+        const current = document.activeElement as HTMLButtonElement | null;
+        const currentIndex = Math.max(0, items.indexOf(current as HTMLButtonElement));
+
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            closeAllSelects();
+            trigger.focus();
+            return;
+        }
+
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            if (current?.classList.contains('custom-select-option')) {
+                chooseOption(current, select, wrapper, trigger, updateValue);
+            }
+            return;
+        }
+
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault();
+            const direction = event.key === 'ArrowDown' ? 1 : -1;
+            const nextIndex = (currentIndex + direction + items.length) % items.length;
+            items[nextIndex]?.focus();
         }
     });
 
@@ -99,15 +163,32 @@ function createCustomSelect(select: HTMLSelectElement): void {
         const target = event.target as HTMLElement | null;
         const optionEl = target?.closest('.custom-select-option') as HTMLButtonElement | null;
         if (!optionEl || optionEl.disabled) return;
-        const value = optionEl.dataset.value ?? '';
-        select.value = value;
-        select.dispatchEvent(new Event('change', { bubbles: true }));
-        updateValue();
-        wrapper.classList.remove('open');
-        trigger.setAttribute('aria-expanded', 'false');
+        chooseOption(optionEl, select, wrapper, trigger, updateValue);
     });
 
     select.addEventListener('change', updateValue);
+}
+
+function openSelect(wrapper: HTMLElement, trigger: HTMLElement): void {
+    closeAllSelects();
+    wrapper.classList.add('open');
+    trigger.setAttribute('aria-expanded', 'true');
+}
+
+function chooseOption(
+    optionEl: HTMLButtonElement,
+    select: HTMLSelectElement,
+    wrapper: HTMLElement,
+    trigger: HTMLElement,
+    updateValue: () => void
+): void {
+    const value = optionEl.dataset.value ?? '';
+    select.value = value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    updateValue();
+    wrapper.classList.remove('open');
+    trigger.setAttribute('aria-expanded', 'false');
+    trigger.focus();
 }
 
 function closeAllSelects(): void {

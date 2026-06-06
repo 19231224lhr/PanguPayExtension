@@ -1,5 +1,5 @@
 /**
- * 接收页面 - 显示收款地址和二维码
+ * Receive page with capsule address and QR code.
  */
 
 import { getActiveAccount, getDefaultWalletAddress, getWalletAddresses, type AddressInfo } from '../../core/storage';
@@ -7,15 +7,55 @@ import { COIN_NAMES } from '../../core/types';
 import { requestCapsuleAddress } from '../../core/capsule';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 import { enhanceCustomSelects } from '../utils/customSelect';
+import { getActiveLanguage } from '../utils/appSettings';
+import { bindNavigation, escapeAttr, escapeHtml, icon, renderCoinBadge, renderHeaderBar, renderNotice, shortAddress } from '../utils/ui';
 
 let selectedReceiveAddress = '';
 let currentCapsuleAddress = '';
 let capsuleRequestId = 0;
 
+const TEXT = {
+    'zh-CN': {
+        title: '接收',
+        qrTitle: '胶囊收款地址',
+        qrDesc: '分享二维码或胶囊地址即可接收指定币种。',
+        select: '选择接收地址',
+        capsule: '胶囊地址',
+        generating: '正在生成胶囊地址...',
+        failed: '胶囊地址生成失败',
+        copy: '复制胶囊地址',
+        copied: '胶囊地址已复制',
+        noAddress: '请先添加钱包地址',
+        retry: '切换地址后会自动重新生成',
+        safeTitle: '仅用于收款',
+        safeDesc: '胶囊地址不会暴露私钥，请确认币种后再分享。',
+    },
+    en: {
+        title: 'Receive',
+        qrTitle: 'Capsule Address',
+        qrDesc: 'Share the QR code or capsule address to receive the selected coin.',
+        select: 'Receive Address',
+        capsule: 'Capsule Address',
+        generating: 'Generating capsule address...',
+        failed: 'Failed to generate capsule address',
+        copy: 'Copy Capsule Address',
+        copied: 'Capsule address copied',
+        noAddress: 'Add a wallet address first',
+        retry: 'Changing address regenerates the capsule automatically',
+        safeTitle: 'Receive only',
+        safeDesc: 'Capsule addresses do not expose private keys. Check the coin before sharing.',
+    },
+};
+
+function getText() {
+    return getActiveLanguage() === 'en' ? TEXT.en : TEXT['zh-CN'];
+}
+
 export async function renderReceive(): Promise<void> {
     const app = document.getElementById('app');
     if (!app) return;
 
+    const t = getText();
     const account = await getActiveAccount();
     if (!account) {
         (window as any).navigateTo('home');
@@ -24,7 +64,7 @@ export async function renderReceive(): Promise<void> {
 
     const walletAddresses = getWalletAddresses(account);
     if (!walletAddresses.length) {
-        (window as any).showToast('请先添加钱包地址', 'info');
+        (window as any).showToast(t.noAddress, 'info');
         (window as any).navigateTo('walletManager');
         return;
     }
@@ -35,75 +75,63 @@ export async function renderReceive(): Promise<void> {
     }
     const selectedInfo = walletAddresses.find((item) => item.address === selectedReceiveAddress) || defaultAddress;
     const coinLabel = COIN_NAMES[selectedInfo.type as keyof typeof COIN_NAMES] || 'PGC';
-    const coinClass = coinLabel.toLowerCase();
 
     app.innerHTML = `
-    <div class="page">
-      <header class="header">
-        <button class="header-btn" onclick="navigateTo('home')">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <span style="font-weight: 600;">接收</span>
-        <div style="width: 32px;"></div>
-      </header>
-      
-      <div class="page-content receive-page">
-        <div class="receive-card receive-qr-card">
-          <div class="receive-qr" id="qrcode">
-            <div class="receive-qr-placeholder">
-              <div class="receive-qr-icon">📱</div>
-              <div>生成胶囊地址中</div>
+      <div class="page receive-page-shell">
+        ${renderHeaderBar({ title: t.title, backPage: 'home' })}
+        <div class="page-content receive-page">
+          <div class="receive-card receive-qr-card">
+            <div class="receive-qr" id="qrcode">
+              <div class="receive-qr-placeholder">
+                <div class="loading-spinner"></div>
+                <div>${escapeHtml(t.generating)}</div>
+              </div>
             </div>
-          </div>
-          <div class="receive-title">胶囊收款地址</div>
-          <div class="receive-subtitle">分享此二维码即可接收指定币种</div>
-          <div class="receive-coin-badge receive-coin-badge--${coinClass}">${coinLabel}</div>
-        </div>
-
-        <div class="receive-card">
-          <div class="receive-field">
-            <label class="receive-label">选择接收地址</label>
-            <select id="receiveAddressSelect" class="input receive-select">
-              ${walletAddresses
-                  .map((item) => {
-                      const short = `${item.address.slice(0, 8)}...${item.address.slice(-6)}`;
-                      const coin = COIN_NAMES[item.type as keyof typeof COIN_NAMES] || 'PGC';
-                      const selected = item.address === selectedInfo.address ? 'selected' : '';
-                      return `<option value="${item.address}" ${selected}>${coin} · ${short}</option>`;
-                  })
-                  .join('')}
-            </select>
+            <div class="receive-title">${escapeHtml(t.qrTitle)}</div>
+            <div class="receive-subtitle">${escapeHtml(t.qrDesc)}</div>
+            ${renderCoinBadge(selectedInfo.type, true)}
           </div>
 
-          <div class="receive-field">
-            <label class="receive-label">胶囊地址</label>
-            <div class="receive-address" id="capsuleAddressValue">生成中...</div>
+          <div class="receive-card">
+            <div class="receive-field">
+              <label class="receive-label" for="receiveAddressSelect">${escapeHtml(t.select)}</label>
+              <select id="receiveAddressSelect" class="input receive-select">
+                ${walletAddresses
+                    .map((item) => {
+                        const short = shortAddress(item.address, 8, 6);
+                        const coin = COIN_NAMES[item.type as keyof typeof COIN_NAMES] || 'PGC';
+                        const selected = item.address === selectedInfo.address ? 'selected' : '';
+                        return `<option value="${escapeAttr(item.address)}" ${selected}>${escapeHtml(coin)} - ${escapeHtml(short)}</option>`;
+                    })
+                    .join('')}
+              </select>
+            </div>
+
+            <div class="receive-field">
+              <label class="receive-label">${escapeHtml(t.capsule)}</label>
+              <div class="copy-row">
+                <div class="copy-row-main">
+                  <div class="copy-row-value" id="capsuleAddressValue">${escapeHtml(t.generating)}</div>
+                </div>
+              </div>
+            </div>
+
+            <button class="btn btn-primary btn-block" id="copyCapsuleBtn" type="button" onclick="copyReceiveAddress()" disabled>
+              ${icon('copy', 16)}
+              ${escapeHtml(t.copy)}
+            </button>
           </div>
 
-          <button class="btn btn-primary btn-block" id="copyCapsuleBtn" onclick="copyReceiveAddress()">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
-            复制胶囊地址
-          </button>
-        </div>
-
-        <div class="receive-card receive-coin-card">
-          <div class="receive-coin-title">当前可接收币种</div>
-          <div class="receive-coin-badge receive-coin-badge--${coinClass}">${coinLabel}</div>
+          ${renderNotice('info', t.safeTitle, t.safeDesc)}
         </div>
       </div>
-    </div>
-  `;
+    `;
 
     bindInlineHandlers(app, {
         navigateTo: (page: string) => (window as any).navigateTo(page),
         copyReceiveAddress,
-        handleAddressSelect,
     });
+    bindNavigation(app);
 
     enhanceCustomSelects(app);
 
@@ -119,23 +147,24 @@ export async function renderReceive(): Promise<void> {
 
 function handleAddressSelect(address: string): void {
     selectedReceiveAddress = address;
-    renderReceive();
+    void renderReceive();
 }
 
 async function updateCapsuleAddress(accountId: string, info: AddressInfo): Promise<void> {
+    const t = getText();
     const targetId = ++capsuleRequestId;
     currentCapsuleAddress = '';
     const addressEl = document.getElementById('capsuleAddressValue');
     const qrContainer = document.getElementById('qrcode');
     const copyBtn = document.getElementById('copyCapsuleBtn') as HTMLButtonElement | null;
 
-    if (addressEl) addressEl.textContent = '生成中...';
+    if (addressEl) addressEl.textContent = t.generating;
     if (copyBtn) copyBtn.disabled = true;
     if (qrContainer) {
         qrContainer.innerHTML = `
           <div class="receive-qr-placeholder">
-            <div class="receive-qr-icon">📱</div>
-            <div>生成胶囊地址中</div>
+            <div class="loading-spinner"></div>
+            <div>${escapeHtml(t.generating)}</div>
           </div>
         `;
     }
@@ -149,13 +178,13 @@ async function updateCapsuleAddress(accountId: string, info: AddressInfo): Promi
         await renderQrCode(capsule);
     } catch (error) {
         if (targetId !== capsuleRequestId) return;
-        if (addressEl) addressEl.textContent = (error as Error).message || '生成失败';
+        if (addressEl) addressEl.textContent = (error as Error).message || t.failed;
         if (copyBtn) copyBtn.disabled = true;
         if (qrContainer) {
             qrContainer.innerHTML = `
-              <div class="receive-qr-placeholder">
-                <div class="receive-qr-icon">⚠️</div>
-                <div>胶囊地址生成失败</div>
+              <div class="receive-qr-placeholder receive-qr-placeholder--error">
+                ${icon('alert', 32)}
+                <div>${escapeHtml(t.failed)}</div>
               </div>
             `;
         }
@@ -172,23 +201,24 @@ async function renderQrCode(value: string): Promise<void> {
             width: 190,
             margin: 2,
             color: {
-                dark: '#1d4ed8',
+                dark: '#1f5eff',
                 light: '#ffffff',
             },
         });
         qrContainer.innerHTML = '';
         qrContainer.appendChild(canvas);
     } catch (error) {
-        console.log('[接收] 二维码生成失败，使用占位符');
+        console.log('[Receive] QR generation failed:', error);
     }
 }
 
 function copyReceiveAddress(): void {
+    const t = getText();
     if (!currentCapsuleAddress) {
-        (window as any).showToast('请先生成胶囊地址', 'info');
+        (window as any).showToast(t.retry, 'info');
         return;
     }
     navigator.clipboard.writeText(currentCapsuleAddress).then(() => {
-        (window as any).showToast('胶囊地址已复制', 'success');
+        (window as any).showToast(t.copied, 'success');
     });
 }

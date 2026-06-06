@@ -1,4 +1,4 @@
-export type InlineHandlerMap = Record<string, (...args: unknown[]) => void>;
+export type InlineHandlerMap = Record<string, (...args: any[]) => void>;
 
 export function bindInlineHandlers(root: HTMLElement, handlers: InlineHandlerMap): void {
     const nodes = root.querySelectorAll<HTMLElement>('[onclick]');

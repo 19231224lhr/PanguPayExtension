@@ -24,6 +24,7 @@ import {
 import { buildTxUserFromAccount, syncAccountAddresses } from './walletSync';
 import {
     getOrganization,
+    saveAccount,
     saveOrganization,
     saveTransaction,
     type OrganizationChoice,
@@ -34,7 +35,7 @@ import { lockUTXOs } from './utxoLock';
 import { lockTXCers, markTXCersSubmitted, unlockTXCers } from './txCerLockManager';
 import { COIN_NAMES } from './types';
 
-export type TransferMode = 'quick' | 'cross';
+export type TransferMode = 'normal' | 'quick' | 'cross';
 
 export interface TransferRecipient {
     address: string;
@@ -43,6 +44,9 @@ export interface TransferRecipient {
     publicKey?: string;
     orgId?: string;
     transferGas?: number;
+    seedAnchor?: number[] | string;
+    seedChainStep?: number;
+    defaultSpendAlgorithm?: string;
 }
 
 export interface TransferRequest {
@@ -151,6 +155,90 @@ function collectUsedTxCerIds(userTx: UserNewTX): string[] {
     return used;
 }
 
+type TxInputForLocalState = {
+    FromAddress?: string;
+    FromTXID?: string;
+    FromTxPosition?: { IndexZ?: number };
+    SeedChainStep?: number;
+};
+
+function collectInputsForLocalState(
+    userTx?: UserNewTX | null,
+    aggregate?: Awaited<ReturnType<typeof buildNormalTransaction>> | null
+): TxInputForLocalState[] {
+    if (userTx?.TX?.TXInputsNormal) {
+        return userTx.TX.TXInputsNormal as TxInputForLocalState[];
+    }
+    const allTransactions = aggregate?.AllTransactions || [];
+    return allTransactions.flatMap((tx) => (tx.TXInputsNormal || []) as TxInputForLocalState[]);
+}
+
+async function markPendingSeedProgress(
+    account: UserAccount,
+    inputs: TxInputForLocalState[],
+    txHash: string
+): Promise<void> {
+    if (!txHash || inputs.length === 0) return;
+    const now = Date.now();
+    let changed = false;
+    for (const input of inputs) {
+        const address = normalizeAddress(input.FromAddress || '');
+        const step = Number(input.SeedChainStep || 0);
+        if (!address || step <= 1) continue;
+        const info = account.addresses?.[address];
+        if (!info) continue;
+        info.pendingSeedStep = step;
+        info.pendingNextSeedStep = step - 1;
+        info.pendingSeedTxId = txHash;
+        info.pendingSeedAt = now;
+        changed = true;
+    }
+    if (changed) {
+        await saveAccount(account);
+    }
+}
+
+async function lockSubmittedUtxos(
+    account: UserAccount,
+    inputs: TxInputForLocalState[],
+    txHash: string
+): Promise<void> {
+    if (!txHash || inputs.length === 0) return;
+    const utxosToLock: Array<{ utxoId: string; address: string; value: number; type: number }> = [];
+    for (const input of inputs) {
+        const fromTxId = input.FromTXID || '';
+        const indexZ = input.FromTxPosition?.IndexZ ?? 0;
+        if (!fromTxId) continue;
+
+        const utxoId = `${fromTxId}_${indexZ}`;
+        const backendKey = `${fromTxId} + ${indexZ}`;
+        const addressHint = normalizeAddress(input.FromAddress || '');
+        let resolvedAddr = addressHint;
+        let utxoData =
+            account.addresses?.[resolvedAddr]?.utxos?.[utxoId] ||
+            account.addresses?.[resolvedAddr]?.utxos?.[backendKey];
+
+        if (!utxoData) {
+            for (const [addrKey, addrData] of Object.entries(account.addresses || {})) {
+                const candidate = addrData?.utxos?.[utxoId] || addrData?.utxos?.[backendKey];
+                if (candidate) {
+                    resolvedAddr = addrKey;
+                    utxoData = candidate;
+                    break;
+                }
+            }
+        }
+
+        const value = Number(utxoData?.Value ?? 0) || 0;
+        const type = Number(utxoData?.Type ?? account.addresses?.[resolvedAddr]?.type ?? 0) || 0;
+        utxosToLock.push({ utxoId, address: resolvedAddr || addressHint, value, type });
+    }
+
+    if (utxosToLock.length > 0) {
+        await lockUTXOs(utxosToLock, txHash);
+    }
+}
+
 async function postWithRetry(
     url: string,
     body: string,
@@ -247,6 +335,7 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
     let org = await getOrganization(account.accountId);
     org = await ensureOrgEndpoints(account.accountId, org);
     const hasOrg = !!org?.groupId;
+    const activeOrg = hasOrg ? org : null;
     if (!hasOrg && request.transferMode === 'cross') {
         return {
             success: false,
@@ -255,13 +344,13 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
     }
 
     const user = buildTxUserFromAccount(account);
-    if (hasOrg) {
-        user.orgNumber = org.groupId;
+    if (activeOrg) {
+        user.orgNumber = activeOrg.groupId;
         user.guarGroup = {
-            groupID: org.groupId,
-            assignAPIEndpoint: org.assignAPIEndpoint || org.assignNodeUrl || '',
-            aggrAPIEndpoint: org.aggrAPIEndpoint || org.aggrNodeUrl || '',
-            pledgeAddress: org.pledgeAddress || '',
+            groupID: activeOrg.groupId,
+            assignAPIEndpoint: activeOrg.assignAPIEndpoint || activeOrg.assignNodeUrl || '',
+            aggrAPIEndpoint: activeOrg.aggrAPIEndpoint || activeOrg.aggrNodeUrl || '',
+            pledgeAddress: activeOrg.pledgeAddress || '',
         };
     }
 
@@ -312,6 +401,9 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
                     ? ''
                     : recipient.orgId || request.recipientOrgId || '',
             interest: isCrossChain ? 0 : recipient.transferGas ?? request.transferGas ?? 0,
+            seedAnchor: recipient.seedAnchor,
+            seedChainStep: recipient.seedChainStep,
+            defaultSpendAlgorithm: recipient.defaultSpendAlgorithm,
         };
     });
 
@@ -327,7 +419,7 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
 
     const baseId = Date.now().toString();
     const historyMode: TransactionRecord['transferMode'] =
-        hasOrg ? (isCrossChain ? 'cross' : 'quick') : 'normal';
+        hasOrg ? (isCrossChain ? 'cross' : request.transferMode === 'quick' ? 'quick' : 'normal') : 'normal';
     const txRecords: TransactionRecord[] = recipients.map((recipient, index) => ({
         id: `${baseId}_${index}`,
         type: 'send',
@@ -340,7 +432,7 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         to: recipient.address,
         timestamp: Date.now(),
         gas: request.gas || 0,
-        guarantorOrg: hasOrg ? org?.groupId || '' : '',
+        guarantorOrg: activeOrg ? activeOrg.groupId : '',
     }));
 
     let userTx: UserNewTX | null = null;
@@ -377,6 +469,13 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
                 record.txHash = txHash;
                 await saveTransaction(account.accountId, record);
             }
+            const inputs = collectInputsForLocalState(null, aggregate);
+            try {
+                await lockSubmittedUtxos(account, inputs, txHash);
+                await markPendingSeedProgress(account, inputs, txHash);
+            } catch (error) {
+                console.warn('[Transfer] Failed to update local submitted UTXO state:', error);
+            }
             return { success: true, txId: txHash };
         }
 
@@ -396,18 +495,18 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         return { success: false, error: failureReason };
     }
 
-    if (!userTx || !hasOrg) {
+    if (!userTx || !activeOrg) {
         if (lockedTXCerIds.length > 0) {
             unlockTXCers(lockedTXCerIds, false);
         }
         return { success: false, error: '交易数据不完整' };
     }
 
-    const assignEndpoint = org.assignAPIEndpoint || org.assignNodeUrl || '';
+    const assignEndpoint = activeOrg.assignAPIEndpoint || activeOrg.assignNodeUrl || '';
     const assignUrl = assignEndpoint ? buildAssignNodeUrl(assignEndpoint) : API_BASE_URL;
     let response: Awaited<ReturnType<typeof submitTransaction>> | null = null;
     try {
-        response = await submitTransaction(userTx, org.groupId, assignUrl);
+        response = await submitTransaction(userTx, activeOrg.groupId, assignUrl);
     } catch (error) {
         if (lockedTXCerIds.length > 0) {
             unlockTXCers(lockedTXCerIds, false);
@@ -440,42 +539,11 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         }
 
         try {
-            const utxosToLock: Array<{ utxoId: string; address: string; value: number; type: number }> = [];
-            const inputs = userTx.TX.TXInputsNormal || [];
-            for (const input of inputs) {
-                const fromTxId = input.FromTXID || '';
-                const indexZ = input.FromTxPosition?.IndexZ ?? 0;
-                if (!fromTxId) continue;
-
-                const utxoId = `${fromTxId}_${indexZ}`;
-                const backendKey = `${fromTxId} + ${indexZ}`;
-                const addressHint = normalizeAddress(input.FromAddress || '');
-                let resolvedAddr = addressHint;
-                let utxoData =
-                    account.addresses?.[resolvedAddr]?.utxos?.[utxoId] ||
-                    account.addresses?.[resolvedAddr]?.utxos?.[backendKey];
-
-                if (!utxoData) {
-                    for (const [addrKey, addrData] of Object.entries(account.addresses || {})) {
-                        const candidate = addrData?.utxos?.[utxoId] || addrData?.utxos?.[backendKey];
-                        if (candidate) {
-                            resolvedAddr = addrKey;
-                            utxoData = candidate;
-                            break;
-                        }
-                    }
-                }
-
-                const value = Number(utxoData?.Value ?? 0) || 0;
-                const type = Number(utxoData?.Type ?? account.addresses?.[resolvedAddr]?.type ?? 0) || 0;
-                utxosToLock.push({ utxoId, address: resolvedAddr || addressHint, value, type });
-            }
-
-            if (utxosToLock.length > 0 && txHash) {
-                await lockUTXOs(utxosToLock, txHash);
-            }
+            const inputs = collectInputsForLocalState(userTx, null);
+            await lockSubmittedUtxos(account, inputs, txHash);
+            await markPendingSeedProgress(account, inputs, txHash);
         } catch (error) {
-            console.warn('[Transfer] Failed to lock UTXOs:', error);
+            console.warn('[Transfer] Failed to update local submitted UTXO state:', error);
         }
         return { success: true, txId: txHash };
     }

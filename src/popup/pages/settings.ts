@@ -19,6 +19,16 @@ import {
 import { stopTxStatusSync } from '../../core/txStatus';
 import { applyLanguage, applyTheme } from '../utils/appSettings';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
+import {
+    bindNavigation,
+    escapeAttr,
+    escapeHtml,
+    icon,
+    renderBottomNav,
+    renderHeaderBar,
+    safeImageSrc,
+    shortAddress,
+} from '../utils/ui';
 import { decryptPrivateKey } from '../../core/keyEncryption';
 
 const TEXT = {
@@ -148,34 +158,26 @@ export async function renderSettings(): Promise<void> {
 
     app.innerHTML = `
     <div class="page">
-      <header class="header">
-        <button class="header-btn" onclick="navigateTo('home')">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <span style="font-weight: 600;">${t.title}</span>
-        <div style="width: 32px;"></div>
-      </header>
+      ${renderHeaderBar({ title: t.title, backPage: 'home' })}
       
       <div class="page-content">
         <!-- 账户信息 -->
-        <div class="card" style="margin-bottom: 20px;">
-          <div style="display: flex; align-items: center; gap: 12px;">
+        <section class="card settings-account-card">
+          <div class="settings-account-inner">
             <div class="logo-badge">
               <img src="${logoUrl}" alt="PanguPay" />
             </div>
-            <div style="flex: 1; min-width: 0;">
-              <div style="font-weight: 600; margin-bottom: 2px;">${t.accountId}</div>
-              <div style="font-size: 12px; color: var(--text-primary);">
-                ${account?.accountId || (settings.language === 'en' ? 'Not logged in' : '未登录')}
+            <div class="settings-account-main">
+              <div class="settings-account-label">${escapeHtml(t.accountId)}</div>
+              <div class="settings-account-id">
+                ${escapeHtml(account?.accountId || (settings.language === 'en' ? 'Not logged in' : '未登录'))}
               </div>
-              <div style="font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                ${t.accountAddress}：${account?.mainAddress || '--'}
+              <div class="settings-account-address">
+                ${escapeHtml(t.accountAddress)}: ${escapeHtml(account?.mainAddress || '--')}
               </div>
             </div>
           </div>
-        </div>
+        </section>
 
         <!-- 常规设置 -->
         <div class="settings-section">
@@ -316,34 +318,29 @@ export async function renderSettings(): Promise<void> {
           <div class="settings-card">
             ${
                 connectionList.length === 0
-                    ? `<div class="settings-empty">${t.noConnectedSites}</div>`
+                    ? `<div class="settings-empty">${escapeHtml(t.noConnectedSites)}</div>`
                     : connectionList
                           .map((conn) => {
                               const origin = conn.origin || '';
                               const title = conn.title || origin.replace(/^https?:\/\//, '');
-                              const address = conn.address
-                                  ? `${conn.address.slice(0, 8)}...${conn.address.slice(-6)}`
-                                  : '--';
+                              const address = conn.address ? shortAddress(conn.address, 8, 6) : '--';
+                              const iconSrc = safeImageSrc(conn.icon);
                               return `
                 <div class="settings-row settings-row--static settings-row--site">
                   <span class="settings-row-icon settings-row-icon--green">
                     ${
-                        conn.icon
-                            ? `<img src="${conn.icon}" alt="${title}" />`
-                            : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <circle cx="12" cy="12" r="9"></circle>
-                                <path d="M3 12h18"></path>
-                                <path d="M12 3a15 15 0 0 1 0 18"></path>
-                              </svg>`
+                        iconSrc
+                            ? `<img src="${escapeAttr(iconSrc)}" alt="${escapeAttr(title)}" />`
+                            : icon('globe', 18)
                     }
                   </span>
                   <span class="settings-row-content">
-                    <span class="settings-row-title">${title}</span>
-                    <span class="settings-row-desc">${origin}</span>
-                    <span class="settings-row-desc">${address}</span>
+                    <span class="settings-row-title" title="${escapeAttr(title)}">${escapeHtml(title)}</span>
+                    <span class="settings-row-desc" title="${escapeAttr(origin)}">${escapeHtml(origin)}</span>
+                    <span class="settings-row-desc">${escapeHtml(address)}</span>
                   </span>
-                  <button class="btn btn-ghost btn-sm settings-row-action" onclick="disconnectSite('${origin}')">
-                    ${t.disconnectSite}
+                  <button class="btn btn-ghost btn-sm settings-row-action" type="button" data-disconnect-origin="${escapeAttr(origin)}">
+                    ${escapeHtml(t.disconnectSite)}
                   </button>
                 </div>
               `;
@@ -360,38 +357,7 @@ export async function renderSettings(): Promise<void> {
         </div>
       </div>
 
-      <!-- 底部导航 -->
-      <nav class="bottom-nav">
-        <button class="nav-item" onclick="navigateTo('home')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
-            <polyline points="9 22 9 12 15 12 15 22"></polyline>
-          </svg>
-          <span>${t.navHome}</span>
-        </button>
-        <button class="nav-item" onclick="navigateTo('history')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10"></circle>
-            <polyline points="12 6 12 12 16 14"></polyline>
-          </svg>
-          <span>${t.navHistory}</span>
-        </button>
-        <button class="nav-item" onclick="navigateTo('organization')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
-            <circle cx="9" cy="7" r="4"></circle>
-            <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"></path>
-          </svg>
-          <span>${t.navOrg}</span>
-        </button>
-        <button class="nav-item active" onclick="navigateTo('settings')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="3"></circle>
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-          </svg>
-          <span>${t.navSettings}</span>
-        </button>
-      </nav>
+      ${renderBottomNav('settings', settings.language)}
     </div>
   `;
 
@@ -403,6 +369,13 @@ export async function renderSettings(): Promise<void> {
         handleLockWallet,
         handleLogout,
         disconnectSite,
+    });
+    bindNavigation(app);
+    app.querySelectorAll<HTMLButtonElement>('[data-disconnect-origin]').forEach((button) => {
+        button.addEventListener('click', () => {
+            const origin = button.dataset.disconnectOrigin || '';
+            void disconnectSite(origin);
+        });
     });
 }
 
@@ -520,15 +493,15 @@ async function showExportKey(): Promise<void> {
 
     const modal = openModal(t.exportKeyTitle || t.exportKey);
     modal.body.innerHTML = `
-      <div class="input-group" style="margin-bottom: 8px;">
+      <div class="input-group modal-input-group">
         <label class="input-label">${t.verifyPassword}</label>
         <input type="password" class="input" id="exportKeyPassword" placeholder="${t.passwordPlaceholder}">
         <div class="input-hint">${t.exportKeyHint}</div>
       </div>
     `;
     modal.footer.innerHTML = `
-      <button class="btn btn-secondary" id="exportCancelBtn" type="button" style="flex: 1;">${t.cancel}</button>
-      <button class="btn btn-primary" id="exportConfirmBtn" type="button" style="flex: 1;">${t.confirm}</button>
+      <button class="btn btn-secondary modal-action" id="exportCancelBtn" type="button">${t.cancel}</button>
+      <button class="btn btn-primary modal-action" id="exportConfirmBtn" type="button">${t.confirm}</button>
     `;
     modal.footer.style.display = 'flex';
 
@@ -555,12 +528,12 @@ async function showExportKey(): Promise<void> {
                   <div class="capsule-block">
                     <div class="capsule-label">${t.exportKeyTitle}</div>
                     <div class="capsule-code">${privKey}</div>
-                    <div class="capsule-hint" style="color: var(--warning);">${t.exportKeyHint}</div>
+                    <div class="capsule-hint secret-warning">${t.exportKeyHint}</div>
                   </div>
                 `;
                 modal.footer.innerHTML = `
-                  <button class="btn btn-secondary" id="exportCloseBtn" type="button" style="flex: 1;">${t.cancel}</button>
-                  <button class="btn btn-primary" id="exportCopyBtn" type="button" style="flex: 1;">${t.copyKey}</button>
+                  <button class="btn btn-secondary modal-action" id="exportCloseBtn" type="button">${t.cancel}</button>
+                  <button class="btn btn-primary modal-action" id="exportCopyBtn" type="button">${t.copyKey}</button>
                 `;
                 const copyBtn = modal.overlay.querySelector('#exportCopyBtn') as HTMLButtonElement | null;
                 const closeBtn = modal.overlay.querySelector('#exportCloseBtn') as HTMLButtonElement | null;

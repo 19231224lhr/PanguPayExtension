@@ -11,6 +11,7 @@ import {
     clearStaleTxCerData,
     getDappPendingConnection,
     getDappSignPendingConnection,
+    getDappPendingTransaction,
 } from '../core/storage';
 import { startTxStatusSync } from '../core/txStatus';
 import { renderWelcome } from './pages/welcome';
@@ -29,8 +30,10 @@ import { renderCreate } from './pages/create';
 import { renderImport } from './pages/import';
 import { renderDappConnect } from './pages/dappConnect';
 import { renderDappSignConnect } from './pages/dappSignConnect';
+import { renderDappTransaction } from './pages/dappTransaction';
 import type { PageName } from '../core/types';
 import { applyStoredSettings } from './utils/appSettings';
+import { bindNavigation, icon } from './utils/ui';
 
 // ========================================
 // 路由状态
@@ -61,6 +64,7 @@ const pageRenderers: Record<PageName, PageRenderer> = {
     settings: renderSettings,
     dappConnect: renderDappConnect,
     dappSign: renderDappSignConnect,
+    dappTransaction: renderDappTransaction,
 };
 
 // ========================================
@@ -83,6 +87,7 @@ async function renderWithTransition(renderer: PageRenderer): Promise<void> {
 
     const newRoot = app.firstElementChild as HTMLElement | null;
     if (newRoot) {
+        bindNavigation(app);
         newRoot.classList.add('view', 'view-enter');
         newRoot.addEventListener(
             'animationend',
@@ -221,7 +226,7 @@ export function showToast(
         <div class="toast-title"></div>
         <div class="toast-message"></div>
       </div>
-      <button class="toast-close" type="button" aria-label="关闭">x</button>
+      <button class="toast-close" type="button" aria-label="关闭">${icon('close', 14)}</button>
     `;
 
     const titleEl = toast.querySelector<HTMLElement>('.toast-title');
@@ -280,22 +285,42 @@ export const showWarningToast = (message: string, title = '', duration = 3000) =
 const uiPort = chrome.runtime.connect({ name: 'pangu-ui' });
 
 uiPort.onMessage.addListener((message) => {
-    if (message?.type !== 'PANGU_UI_PENDING' && message?.type !== 'PANGU_UI_SIGN_PENDING') return;
+    if (
+        message?.type !== 'PANGU_UI_PENDING' &&
+        message?.type !== 'PANGU_UI_SIGN_PENDING' &&
+        message?.type !== 'PANGU_UI_TX_PENDING'
+    ) return;
     void (async () => {
         const account = await getActiveAccount();
         if (!account) return;
         if (message.accountId && message.accountId !== account.accountId) return;
-        navigateTo(message.type === 'PANGU_UI_SIGN_PENDING' ? 'dappSign' : 'dappConnect');
+        navigateTo(
+            message.type === 'PANGU_UI_TX_PENDING'
+                ? 'dappTransaction'
+                : message.type === 'PANGU_UI_SIGN_PENDING'
+                  ? 'dappSign'
+                  : 'dappConnect'
+        );
     })();
 });
 
 chrome.runtime.onMessage.addListener((message) => {
-    if (message?.type !== 'PANGU_UI_PENDING' && message?.type !== 'PANGU_UI_SIGN_PENDING') return;
+    if (
+        message?.type !== 'PANGU_UI_PENDING' &&
+        message?.type !== 'PANGU_UI_SIGN_PENDING' &&
+        message?.type !== 'PANGU_UI_TX_PENDING'
+    ) return;
     void (async () => {
         const account = await getActiveAccount();
         if (!account) return;
         if (message.accountId && message.accountId !== account.accountId) return;
-        navigateTo(message.type === 'PANGU_UI_SIGN_PENDING' ? 'dappSign' : 'dappConnect');
+        navigateTo(
+            message.type === 'PANGU_UI_TX_PENDING'
+                ? 'dappTransaction'
+                : message.type === 'PANGU_UI_SIGN_PENDING'
+                  ? 'dappSign'
+                  : 'dappConnect'
+        );
     })();
 });
 
@@ -324,6 +349,11 @@ async function init(): Promise<void> {
             void startTxStatusSync(session.accountId);
             const step = await getOnboardingStep(session.accountId);
             if (step === 'complete') {
+                const pendingTx = await getDappPendingTransaction(session.accountId);
+                if (pendingTx) {
+                    navigateTo('dappTransaction');
+                    return;
+                }
                 const pendingSign = await getDappSignPendingConnection(session.accountId);
                 if (pendingSign) {
                     navigateTo('dappSign');

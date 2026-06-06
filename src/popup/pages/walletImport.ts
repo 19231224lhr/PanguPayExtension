@@ -10,6 +10,10 @@ import {
 } from '../../core/address';
 import { getPublicKeyFromPrivate, generateAddress, getPublicKeyHexFromPrivate } from '../../core/signature';
 import {
+    deriveAddressKeypairFromAddressRootSeed,
+    parseAddressRecoveryMaterial,
+} from '../../core/addressRootSeed';
+import {
     getActiveAccount,
     getOrganization,
     getOnboardingStep,
@@ -19,58 +23,89 @@ import {
     persistAddressKey,
 } from '../../core/storage';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
+import { getActiveLanguage } from '../utils/appSettings';
+import { escapeHtml, renderHeaderBar, renderNotice, renderStatusBadge } from '../utils/ui';
+
+const TEXT = {
+    'zh-CN': {
+        title: '导入钱包',
+        importTitle: '导入材料',
+        importDesc: '支持 AddressRootSeed 和旧版 64 位私钥。',
+        material: 'AddressRootSeed / 私钥',
+        placeholder: '输入 arsk_pgc_... / arsk_btc_... / arsk_eth_... 或 64 位十六进制私钥',
+        hint: '请确保在安全环境中操作，导入后会本地加密保存。',
+        preview: '地址预览',
+        type: '导入类型',
+        submit: '导入钱包',
+        submitting: '导入中...',
+        invalid: '密钥格式无效',
+        rootSeed: 'AddressRootSeed',
+        legacy: 'Legacy Private Key',
+        safeTitle: '链上状态会自动补齐',
+        safeDesc: '导入后插件会查询地址所属组织、seed 元数据和注册状态。',
+    },
+    en: {
+        title: 'Import Wallet',
+        importTitle: 'Recovery Material',
+        importDesc: 'AddressRootSeed and legacy 64-char private keys are supported.',
+        material: 'AddressRootSeed / Private Key',
+        placeholder: 'Enter arsk_pgc_... / arsk_btc_... / arsk_eth_... or 64-char private key',
+        hint: 'Use a trusted environment. The key will be encrypted locally after import.',
+        preview: 'Address Preview',
+        type: 'Import Type',
+        submit: 'Import Wallet',
+        submitting: 'Importing...',
+        invalid: 'Invalid key material',
+        rootSeed: 'AddressRootSeed',
+        legacy: 'Legacy Private Key',
+        safeTitle: 'On-chain state will sync',
+        safeDesc: 'The extension will query organization, seed metadata, and registration state after import.',
+    },
+};
+
+function getText() {
+    return getActiveLanguage() === 'en' ? TEXT.en : TEXT['zh-CN'];
+}
 
 export function renderWalletImport(): void {
     const app = document.getElementById('app');
     if (!app) return;
 
+    const t = getText();
     app.innerHTML = `
-    <div class="page">
-      <header class="header">
-        <button class="header-btn" onclick="navigateTo('walletManager')">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <span style="font-weight: 600;">导入钱包</span>
-        <div style="width: 32px;"></div>
-      </header>
+    <div class="page wallet-import-page">
+      ${renderHeaderBar({ title: t.title, backPage: 'walletManager' })}
 
       <div class="page-content">
-        <div class="card" style="margin-bottom: 20px;">
-          <div style="display: flex; align-items: flex-start; gap: 12px;">
-            <span style="font-size: 20px;">🔑</span>
-            <div>
-              <div style="font-weight: 500; margin-bottom: 4px;">私钥导入/解锁</div>
-              <div style="font-size: 12px; color: var(--text-secondary);">
-                输入 64 字符十六进制私钥以导入或解锁地址
-              </div>
-            </div>
-          </div>
+        <div class="card import-card">
+          <div class="section-heading">${escapeHtml(t.importTitle)}</div>
+          <div class="input-hint">${escapeHtml(t.importDesc)}</div>
         </div>
 
-        <form id="walletImportForm">
+        ${renderNotice('info', t.safeTitle, t.safeDesc)}
+
+        <form id="walletImportForm" class="form-stack">
           <div class="input-group">
-            <label class="input-label">私钥</label>
-            <textarea 
-              class="input" 
-              id="privateKey" 
-              placeholder="输入您的私钥（64字符十六进制）" 
+            <label class="input-label" for="privateKey">${escapeHtml(t.material)}</label>
+            <textarea
+              class="input textarea-mono"
+              id="privateKey"
+              placeholder="${escapeHtml(t.placeholder)}"
               required
-              style="height: 80px; resize: none; font-family: monospace; font-size: 12px;"
             ></textarea>
-            <div class="input-hint">请确保在安全环境中操作</div>
+            <div class="input-hint">${escapeHtml(t.hint)}</div>
           </div>
 
-          <div id="addressPreview" style="display: none; margin-bottom: 16px;">
-            <div class="card">
-              <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 4px;">地址预览</div>
-              <div id="previewAddress" style="font-family: monospace; font-size: 12px; word-break: break-all; color: var(--success);"></div>
+          <div id="addressPreview" class="card import-preview" hidden>
+            <div class="summary-row">
+              <span>${escapeHtml(t.preview)}</span>
+              <span id="previewType">${renderStatusBadge(t.legacy, 'neutral')}</span>
             </div>
+            <div id="previewAddress" class="copy-row-value"></div>
           </div>
 
-          <button type="submit" class="btn btn-primary btn-block btn-lg" style="margin-top: 16px;">
-            导入钱包
+          <button id="walletImportSubmit" type="submit" class="btn btn-primary btn-block btn-lg">
+            ${escapeHtml(t.submit)}
           </button>
         </form>
       </div>
@@ -89,45 +124,69 @@ export function renderWalletImport(): void {
 }
 
 function handlePrivateKeyInput(e: Event): void {
+    const t = getText();
     const input = e.target as HTMLTextAreaElement;
-    let value = input.value.trim().toLowerCase();
+    const value = input.value.trim();
 
-    if (value.startsWith('0x')) {
-        value = value.slice(2);
-    }
-
-    const preview = document.getElementById('addressPreview');
+    const preview = document.getElementById('addressPreview') as HTMLElement | null;
     const previewAddress = document.getElementById('previewAddress');
+    const previewType = document.getElementById('previewType');
     if (!preview || !previewAddress) return;
 
-    if (value.length === 64 && /^[0-9a-f]+$/.test(value)) {
-        try {
-            const publicKey = getPublicKeyFromPrivate(value);
-            const address = generateAddress(publicKey);
-            previewAddress.textContent = address;
-            preview.style.display = 'block';
-        } catch {
-            preview.style.display = 'none';
+    try {
+        const material = parseAddressRecoveryMaterial(value);
+        const privateKey = material.kind === 'root_seed'
+            ? deriveAddressKeypairFromAddressRootSeed(material.hex, material.addressType ?? 0).privHex
+            : material.hex;
+        if (privateKey.length !== 64 || !/^[0-9a-f]+$/.test(privateKey)) {
+            preview.hidden = true;
+            return;
         }
-    } else {
-        preview.style.display = 'none';
+        const publicKey = getPublicKeyFromPrivate(privateKey);
+        const address = generateAddress(publicKey);
+        previewAddress.textContent = address;
+        if (previewType) {
+            previewType.innerHTML = renderStatusBadge(material.kind === 'root_seed' ? t.rootSeed : t.legacy, material.kind === 'root_seed' ? 'primary' : 'neutral');
+        }
+        preview.hidden = false;
+    } catch {
+        preview.hidden = true;
     }
 }
 
 async function handleImport(e: Event): Promise<void> {
     e.preventDefault();
 
-    let privateKey = (document.getElementById('privateKey') as HTMLTextAreaElement).value.trim().toLowerCase();
-    if (privateKey.startsWith('0x')) {
-        privateKey = privateKey.slice(2);
+    const t = getText();
+    const submitBtn = document.getElementById('walletImportSubmit') as HTMLButtonElement | null;
+    const rawInput = (document.getElementById('privateKey') as HTMLTextAreaElement).value.trim();
+    let privateKey = '';
+    let addressRootSeedHex: string | undefined;
+    let importedAddressType: number | undefined;
+    try {
+        const material = parseAddressRecoveryMaterial(rawInput);
+        if (material.kind === 'root_seed') {
+            importedAddressType = material.addressType ?? 0;
+            const derived = deriveAddressKeypairFromAddressRootSeed(material.hex, importedAddressType);
+            privateKey = derived.privHex;
+            addressRootSeedHex = derived.addressRootSeedHex;
+        } else {
+            privateKey = material.hex;
+        }
+    } catch {
+        privateKey = '';
     }
 
     if (privateKey.length !== 64 || !/^[0-9a-f]+$/.test(privateKey)) {
-        (window as any).showToast('私钥格式无效', 'error');
+        (window as any).showToast(t.invalid, 'error');
         return;
     }
 
     try {
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.textContent = t.submitting;
+        }
         const account = await getActiveAccount();
         if (!account) {
             (window as any).showToast('账户未找到', 'error');
@@ -147,7 +206,7 @@ async function handleImport(e: Event): Promise<void> {
         }
 
         const groupId = groupResult.data?.groupId || '0';
-        const addressType = groupResult.data?.type ?? 0;
+        const addressType = importedAddressType ?? groupResult.data?.type ?? 0;
 
         const org = await getOrganization(account.accountId);
         const inOrg = !!org?.groupId;
@@ -186,7 +245,8 @@ async function handleImport(e: Event): Promise<void> {
                 pubYHex,
                 addressType,
                 session.privKey,
-                org
+                org,
+                privateKey
             );
 
             if (!syncResult.success) {
@@ -226,6 +286,12 @@ async function handleImport(e: Event): Promise<void> {
                 utxoCount: 0,
                 txCerCount: 0,
                 source: 'imported',
+                privHex: privateKey,
+                addressRootSeedHex,
+                signPublicKeyV2: groupResult.data?.signPublicKeyV2,
+                seedAnchor: groupResult.data?.seedAnchor,
+                seedChainStep: groupResult.data?.seedChainStep,
+                defaultSpendAlgorithm: groupResult.data?.defaultSpendAlgorithm,
                 pubXHex,
                 pubYHex,
                 utxos: {},
@@ -239,6 +305,12 @@ async function handleImport(e: Event): Promise<void> {
                 pubXHex,
                 pubYHex,
                 type: addressType,
+                privHex: privateKey,
+                addressRootSeedHex: addressRootSeedHex || account.addresses[normalizedAddress].addressRootSeedHex,
+                signPublicKeyV2: groupResult.data?.signPublicKeyV2 || account.addresses[normalizedAddress].signPublicKeyV2,
+                seedAnchor: groupResult.data?.seedAnchor || account.addresses[normalizedAddress].seedAnchor,
+                seedChainStep: groupResult.data?.seedChainStep || account.addresses[normalizedAddress].seedChainStep,
+                defaultSpendAlgorithm: groupResult.data?.defaultSpendAlgorithm || account.addresses[normalizedAddress].defaultSpendAlgorithm,
                 source: account.addresses[normalizedAddress].source || 'imported',
             };
         }
@@ -259,5 +331,10 @@ async function handleImport(e: Event): Promise<void> {
     } catch (error) {
         console.error('[导入钱包] 失败:', error);
         (window as any).showToast('导入失败: ' + (error as Error).message, 'error');
+    } finally {
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = t.submit;
+        }
     }
 }

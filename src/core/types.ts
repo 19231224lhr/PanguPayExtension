@@ -140,6 +140,9 @@ export type MessageType =
     | 'PANGU_DAPP_SIGN_GET_PENDING'
     | 'PANGU_DAPP_SIGN_APPROVE'
     | 'PANGU_DAPP_SIGN_REJECT'
+    | 'PANGU_DAPP_TX_GET_PENDING'
+    | 'PANGU_DAPP_TX_APPROVE'
+    | 'PANGU_DAPP_TX_REJECT'
     | 'PANGU_DAPP_NOTIFY'
     | 'PANGU_CONNECTED'
     | 'PANGU_RESPONSE';
@@ -184,7 +187,8 @@ export type PageName =
     | 'organization'
     | 'settings'
     | 'dappSign'
-    | 'dappConnect';
+    | 'dappConnect'
+    | 'dappTransaction';
 
 export interface UIState {
     currentPage: PageName;
