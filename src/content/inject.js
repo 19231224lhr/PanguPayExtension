@@ -132,6 +132,7 @@ window.addEventListener('message', (event) => {
             status: event.data.status,
             mode: event.data.mode,
             origin: event.data.origin,
+            error: event.data.error,
         });
     }
 });

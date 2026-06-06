@@ -21,6 +21,7 @@ window.addEventListener('message', async (event) => {
     if (event.source !== window) return;
     if (!event.data || !event.data.type) return;
     if (!event.data.type.startsWith('PANGU_')) return;
+    if (event.data.type === 'PANGU_EVENT' || event.data.type === 'PANGU_RESPONSE') return;
 
     const { type, payload, requestId } = event.data;
     const iconEl = document.querySelector<HTMLLinkElement>("link[rel~='icon']");
@@ -65,6 +66,10 @@ chrome.runtime.onMessage.addListener((message) => {
             event: message.event,
             origin: message.origin,
             address: message.address || '',
+            txId: message.txId || '',
+            status: message.status || '',
+            mode: message.mode || '',
+            error: message.error || '',
         },
         '*'
     );

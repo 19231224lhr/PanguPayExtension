@@ -212,6 +212,7 @@ async function handleImport(e: Event): Promise<void> {
         const inOrg = !!org?.groupId;
         const onboardingStep = await getOnboardingStep(account.accountId);
         const isOnboarding = onboardingStep !== 'complete';
+        const session = getSessionKey();
 
         if (isInGuarGroup(groupId)) {
             if (!inOrg) {
@@ -232,7 +233,6 @@ async function handleImport(e: Event): Promise<void> {
         const exists = !!account.addresses[normalizedAddress];
 
         if (inOrg && !exists && !isOnboarding) {
-            const session = getSessionKey();
             if (!session || session.accountId !== account.accountId) {
                 (window as any).showToast('请先解锁账户私钥', 'error');
                 return;
@@ -259,23 +259,39 @@ async function handleImport(e: Event): Promise<void> {
         }
 
         if (!inOrg && !exists && !isOnboarding) {
-            const registerResult = await registerAddressOnComNode(
-                normalizedAddress,
-                pubXHex,
-                pubYHex,
-                privateKey,
-                addressType
-            );
-            if (!registerResult.success) {
-                const msg = registerResult.error || '导入失败';
-                const boundMatch = msg.match(/address already bound to guarantor group (\d+)/i);
-                if (boundMatch && boundMatch[1]) {
-                    (window as any).showToast(`该地址已绑定担保组织 ${boundMatch[1]}，请先加入组织后导入`, 'error');
-                } else {
-                    (window as any).showToast(msg, 'error');
-                }
+            if (!session || session.accountId !== account.accountId) {
+                (window as any).showToast('Unlock account private key first', 'error');
                 return;
             }
+            const registerResult = await registerAddressOnComNode({
+                accountId: account.accountId,
+                address: normalizedAddress,
+                pubXHex,
+                pubYHex,
+                addressPrivHex: privateKey,
+                accountPrivHex: session.privKey,
+                addressType,
+            });
+            const registerSuccess = registerResult.success &&
+                (typeof registerResult.data?.success === 'boolean' ? registerResult.data.success : true);
+            if (!registerSuccess) {
+                const msg = registerResult.success
+                    ? registerResult.data?.error || registerResult.data?.message || 'Import failed'
+                    : registerResult.error || 'Import failed';
+                (window as any).showToast(msg, 'error');
+                return;
+            }
+
+            groupResult.data = {
+                ...(groupResult.data || {
+                    groupId,
+                    type: addressType,
+                }),
+                signPublicKeyV2: registerResult.data.signPublicKeyV2,
+                seedAnchor: registerResult.data.seedAnchor,
+                seedChainStep: registerResult.data.seedChainStep,
+                defaultSpendAlgorithm: registerResult.data.defaultSpendAlgorithm,
+            };
         }
 
         if (!exists) {
@@ -321,7 +337,6 @@ async function handleImport(e: Event): Promise<void> {
 
         await saveAccount(account);
         setSessionAddressKey(normalizedAddress, privateKey);
-        const session = getSessionKey();
         if (session && session.accountId === account.accountId) {
             await persistAddressKey(account.accountId, normalizedAddress, privateKey, session.privKey);
         }

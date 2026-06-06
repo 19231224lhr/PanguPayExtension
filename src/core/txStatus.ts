@@ -4,6 +4,7 @@ import { waitForTXConfirmation, type TXStatusResponse } from './txBuilder';
 import { startAccountPolling, stopAccountPolling } from './accountPolling';
 import { unlockUTXOsByTxId } from './utxoLock';
 import { getLockedTXCerIdsByTxId, unlockTXCers } from './txCerLockManager';
+import { notifyDappTxStatus } from './dappTxStatus';
 
 type ToastType = 'success' | 'error' | 'info' | 'warning';
 
@@ -51,6 +52,9 @@ async function handleStatusChange(
     if (changed) {
         dispatchHistoryUpdate(accountId, txHash, status.status);
     }
+    await notifyDappTxStatus(accountId, txHash, status.status, {
+        error: status.status === 'failed' ? status.error_reason || '' : '',
+    });
 }
 
 async function watchTransactionStatus(
@@ -98,6 +102,7 @@ async function watchTransactionStatus(
             if (changed) {
                 dispatchHistoryUpdate(accountId, txHash, 'failed');
             }
+            await notifyDappTxStatus(accountId, txHash, 'failed', { error: reason });
             try {
                 await unlockUTXOsByTxId(txHash);
             } catch (error) {

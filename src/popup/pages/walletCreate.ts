@@ -257,9 +257,9 @@ async function handleAddWallet(): Promise<void> {
     const inOrg = !!org?.groupId;
     const onboardingStep = await getOnboardingStep(account.accountId);
     const isOnboarding = onboardingStep !== 'complete';
+    const session = getSessionKey();
 
     if (inOrg && !isOnboarding) {
-      const session = getSessionKey();
       if (!session || session.accountId !== account.accountId) {
         (window as any).showToast(t.unlockRequired, 'error');
         return;
@@ -280,6 +280,11 @@ async function handleAddWallet(): Promise<void> {
         (window as any).showToast(result.error || t.createFailed, 'error');
         return;
       }
+    }
+
+    if (!inOrg && !isOnboarding && (!session || session.accountId !== account.accountId)) {
+      (window as any).showToast(t.unlockRequired, 'error');
+      return;
     }
 
     if (!account.addresses[normalizedAddress]) {
@@ -309,29 +314,46 @@ async function handleAddWallet(): Promise<void> {
 
     await saveAccount(account);
     setSessionAddressKey(normalizedAddress, generatedPrivateKey);
-    const session = getSessionKey();
     if (session && session.accountId === account.accountId) {
       await persistAddressKey(account.accountId, normalizedAddress, generatedPrivateKey, session.privKey);
     }
 
     if (!inOrg && !isOnboarding) {
-      const registerResult = await registerAddressOnComNode(
-        normalizedAddress,
-        generatedPubXHex || '',
-        generatedPubYHex || '',
-        generatedPrivateKey,
-        coinType
-      );
-      if (!registerResult.success) {
-        const msg = registerResult.error || t.registerFailed;
-        const boundMatch = msg.match(/address already bound to guarantor group (\d+)/i);
-        if (boundMatch && boundMatch[1]) {
-          (window as any).showToast(`该地址已绑定担保组织 ${boundMatch[1]}，请先加入组织后导入`, 'error');
-        } else {
-          (window as any).showToast(msg, 'error');
-        }
+      const registerResult = await registerAddressOnComNode({
+        accountId: account.accountId,
+        address: normalizedAddress,
+        pubXHex: generatedPubXHex || '',
+        pubYHex: generatedPubYHex || '',
+        addressPrivHex: generatedPrivateKey,
+        accountPrivHex: session!.privKey,
+        addressType: coinType,
+      });
+      const registerSuccess = registerResult.success &&
+        (typeof registerResult.data?.success === 'boolean' ? registerResult.data.success : true);
+      if (!registerSuccess) {
+        const msg = registerResult.success
+          ? registerResult.data?.error || registerResult.data?.message || t.registerFailed
+          : registerResult.error || t.registerFailed;
+        account.addresses[normalizedAddress] = {
+          ...account.addresses[normalizedAddress],
+          registrationState: 'failed',
+          registrationError: msg,
+        };
+        await saveAccount(account);
+        (window as any).showToast(msg, 'error');
         return;
       }
+
+      account.addresses[normalizedAddress] = {
+        ...account.addresses[normalizedAddress],
+        signPublicKeyV2: registerResult.data.signPublicKeyV2,
+        seedAnchor: registerResult.data.seedAnchor,
+        seedChainStep: registerResult.data.seedChainStep,
+        defaultSpendAlgorithm: registerResult.data.defaultSpendAlgorithm,
+        registrationState: 'registered',
+        registrationError: undefined,
+      };
+      await saveAccount(account);
     }
 
     generatedPrivateKey = null;

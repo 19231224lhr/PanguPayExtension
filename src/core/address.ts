@@ -29,11 +29,13 @@ import {
 import { buildInitialSeedMetaFromPrivateKey } from './seedChain';
 import {
     getAccount,
+    getAccountSignPublicKeyV2,
     getOrganization,
     getSessionAddressKey,
     getSessionKey,
     hasAddressProtocolMetadata,
     normalizeAddressDataForStorage,
+    publicKeyEnvelopeEquals,
     saveAccount,
     type OrganizationChoice,
     type UserAccount,
@@ -133,27 +135,29 @@ function buildAssignNewAddressUrl(org: OrganizationChoice): string {
     return buildApiUrl(base, API_ENDPOINTS.ASSIGN_NEW_ADDRESS(org.groupId));
 }
 
-function ensureAddressProtocolMeta(
-    accountId: string,
-    address: string,
-    pubXHex: string,
-    pubYHex: string,
-    addressType: number,
-    addressPrivHex: string,
-    accountPrivHex?: string
-): {
+function ensureAddressProtocolMeta(params: {
+    accountId: string;
+    address: string;
+    pubXHex: string;
+    pubYHex: string;
+    addressType: number;
+    addressPrivHex: string;
+    accountPrivHex: string;
+}): {
     signPublicKeyV2: PublicKeyEnvelope;
     seedAnchor: number[];
     seedChainStep: number;
     defaultSpendAlgorithm: string;
 } {
-    void accountId;
-    void address;
-    void addressType;
-    const accountPub = accountPrivHex ? getPublicKeyHexFromPrivate(accountPrivHex) : { x: pubXHex, y: pubYHex };
-    const signPublicKeyV2 = accountPrivHex
-        ? publicKeyEnvelopeFromHex(accountPub.x, accountPub.y)
-        : publicKeyEnvelopeFromHex(pubXHex, pubYHex);
+    const { accountPrivHex, addressPrivHex } = params;
+    if (!accountPrivHex) {
+        throw new Error('account private key required for SignPublicKeyV2');
+    }
+    if (!addressPrivHex) {
+        throw new Error('address seed recovery material missing');
+    }
+    const accountPub = getPublicKeyHexFromPrivate(accountPrivHex);
+    const signPublicKeyV2 = publicKeyEnvelopeFromHex(accountPub.x, accountPub.y);
     const seedMeta = buildInitialSeedMetaFromPrivateKey(addressPrivHex);
     return {
         signPublicKeyV2,
@@ -191,15 +195,15 @@ export async function createNewAddressOnBackendWithPriv(
         if (!resolvedAddressPriv) {
             return { success: false, error: 'address seed recovery material missing' };
         }
-        const protocolMeta = ensureAddressProtocolMeta(
+        const protocolMeta = ensureAddressProtocolMeta({
             accountId,
-            normalizedAddress,
+            address: normalizedAddress,
             pubXHex,
             pubYHex,
             addressType,
-            resolvedAddressPriv,
-            accountPrivHex
-        );
+            addressPrivHex: resolvedAddressPriv,
+            accountPrivHex,
+        });
 
         const requestBody: UserNewAddressInfo = {
             NewAddress: normalizedAddress,
@@ -230,28 +234,56 @@ export async function createNewAddressOnBackendWithPriv(
     }
 }
 
+export interface RegisterAddressOnComNodeParams {
+    accountId: string;
+    address: string;
+    pubXHex: string;
+    pubYHex: string;
+    addressPrivHex: string;
+    accountPrivHex: string;
+    addressType: number;
+}
+
 export async function registerAddressOnComNode(
-    address: string,
-    pubXHex: string,
-    pubYHex: string,
-    privHex: string,
-    addressType: number
-): Promise<AddressResult<RegisterAddressResponse>> {
+    params: RegisterAddressOnComNodeParams
+): Promise<AddressResult<RegisterAddressResponse & {
+    signPublicKeyV2: PublicKeyEnvelope;
+    seedAnchor: number[];
+    seedChainStep: number;
+    defaultSpendAlgorithm: string;
+}>> {
     try {
         const comNodeURL = await getComNodeEndpoint();
         if (!comNodeURL) {
             return { success: false, error: 'ComNode 端点不可用' };
         }
 
+        const {
+            accountId,
+            address,
+            pubXHex,
+            pubYHex,
+            addressPrivHex,
+            accountPrivHex,
+            addressType,
+        } = params;
+        if (!accountPrivHex) {
+            return { success: false, error: 'Unlock account private key first' };
+        }
+        if (!addressPrivHex) {
+            return { success: false, error: 'address private key missing' };
+        }
+
         const normalizedAddress = normalizeAddress(address);
-        const protocolMeta = ensureAddressProtocolMeta(
-            '',
-            normalizedAddress,
+        const protocolMeta = ensureAddressProtocolMeta({
+            accountId,
+            address: normalizedAddress,
             pubXHex,
             pubYHex,
             addressType,
-            privHex
-        );
+            addressPrivHex,
+            accountPrivHex,
+        });
         const ownershipPayload = {
             Address: normalizedAddress,
             PublicKeyNew: convertHexToPublicKey(pubXHex, pubYHex),
@@ -266,7 +298,7 @@ export async function registerAddressOnComNode(
         const addressOwnershipSig = signHashEnvelope(
             AlgorithmECDSAP256,
             hashBackendJson(ownershipPayload),
-            privHex
+            addressPrivHex
         );
 
         const requestBody: RegisterAddressRequest = {
@@ -284,7 +316,7 @@ export async function registerAddressOnComNode(
 
         requestBody.Sig = signStruct(
             requestBody as unknown as Record<string, unknown>,
-            privHex,
+            addressPrivHex,
             ['Sig', 'AddressOwnershipSig']
         );
 
@@ -298,7 +330,16 @@ export async function registerAddressOnComNode(
             }
         );
 
-        return { success: true, data: response.data };
+        return {
+            success: true,
+            data: {
+                ...response.data,
+                signPublicKeyV2: protocolMeta.signPublicKeyV2,
+                seedAnchor: protocolMeta.seedAnchor,
+                seedChainStep: protocolMeta.seedChainStep,
+                defaultSpendAlgorithm: protocolMeta.defaultSpendAlgorithm,
+            },
+        };
     } catch (error) {
         return {
             success: false,
@@ -482,32 +523,45 @@ function notifyToast(message: string, type: ToastType): void {
 }
 
 export async function registerAddressesOnMainEntry(account: UserAccount): Promise<void> {
-    if (!account || account.mainAddressRegistered) return;
+    if (!account) return;
 
-    const addressMap = account.addresses || {};
-    const addresses = Object.keys(addressMap);
-    const errors: string[] = [];
-    let hadErrors = false;
-
-    if (addresses.length === 0) {
-        return;
-    }
+    const addresses = Object.keys(account.addresses || {});
+    if (addresses.length === 0) return;
 
     const org = await getOrganization(account.accountId);
+    if (account.mainAddressRegistered && org?.groupId) return;
+
+    const errors: string[] = [];
+    let hadErrors = false;
+    let changed = false;
 
     if (org?.groupId) {
         const session = getSessionKey();
         if (!session || session.accountId !== account.accountId) {
-            notifyToast('请先解锁账户私钥', 'warning');
+            notifyToast('Unlock account private key first', 'warning');
             return;
         }
 
-        for (const addr of addresses) {
-            const meta = addressMap[addr];
-            const pubXHex = meta?.pubXHex || '';
-            const pubYHex = meta?.pubYHex || '';
-            const addressType = Number(meta?.type ?? 0);
-            if (!pubXHex || !pubYHex) {
+        for (const rawAddr of addresses) {
+            const addr = normalizeAddress(rawAddr);
+            const meta = normalizeAddressDataForStorage(addr, account.addresses[rawAddr], account);
+            const pubXHex = meta.pubXHex || '';
+            const pubYHex = meta.pubYHex || '';
+            if (!pubXHex || !pubYHex) continue;
+
+            const addressPrivHex =
+                getSessionAddressKey(addr) ||
+                meta.privHex ||
+                (addr === normalizeAddress(account.mainAddress) ? session.privKey : '');
+            if (!addressPrivHex || meta.readOnly || meta.seedRepairRequired) {
+                account.addresses[addr] = {
+                    ...meta,
+                    registrationState: 'failed',
+                    registrationError: !addressPrivHex
+                        ? 'address private key missing'
+                        : 'address requires seed repair before registration',
+                };
+                changed = true;
                 continue;
             }
 
@@ -516,54 +570,140 @@ export async function registerAddressesOnMainEntry(account: UserAccount): Promis
                 addr,
                 pubXHex,
                 pubYHex,
-                addressType,
+                Number(meta.type ?? 0),
                 session.privKey,
                 org,
-                getSessionAddressKey(addr) || meta?.privHex || ''
+                addressPrivHex
             );
-
-            if (!result.success) {
-                errors.push(result.error);
+            const successFlag = result.success &&
+                (typeof result.data?.success === 'boolean' ? result.data.success : true);
+            if (!successFlag) {
+                const msg = result.success
+                    ? result.data?.error || result.data?.message || 'address registration failed'
+                    : result.error;
+                errors.push(msg);
+                account.addresses[addr] = {
+                    ...meta,
+                    registrationState: 'failed',
+                    registrationError: msg,
+                };
+                changed = true;
                 hadErrors = true;
                 continue;
             }
-            const successFlag = typeof result.data?.success === 'boolean' ? result.data.success : true;
-            if (!successFlag) {
-                const msg = result.data?.error || result.data?.message || '地址注册失败';
-                errors.push(msg);
-                hadErrors = true;
-            }
+
+            account.addresses[addr] = normalizeAddressDataForStorage(addr, {
+                ...meta,
+                registrationState: 'registered',
+                registrationError: undefined,
+            }, account);
+            changed = true;
         }
     } else {
-        for (const addr of addresses) {
-            const meta = addressMap[addr];
-            const pubXHex = meta?.pubXHex || '';
-            const pubYHex = meta?.pubYHex || '';
-            const privHex = getSessionAddressKey(addr) || meta?.privHex || '';
-            const addressType = Number(meta?.type ?? 0);
-            if (!pubXHex || !pubYHex || !privHex) {
+        const session = getSessionKey();
+        if (!session || session.accountId !== account.accountId) {
+            notifyToast('Unlock account private key first', 'warning');
+            return;
+        }
+
+        const accountSignPublicKeyV2 = getAccountSignPublicKeyV2(account);
+        if (!accountSignPublicKeyV2) {
+            notifyToast('Account SignPublicKeyV2 unavailable', 'warning');
+            return;
+        }
+
+        for (const rawAddr of addresses) {
+            const addr = normalizeAddress(rawAddr);
+            const meta = normalizeAddressDataForStorage(addr, account.addresses[rawAddr], account);
+            if (JSON.stringify(meta) !== JSON.stringify(account.addresses[rawAddr])) {
+                account.addresses[addr] = meta;
+                changed = true;
+            }
+
+            const pubXHex = meta.pubXHex || '';
+            const pubYHex = meta.pubYHex || '';
+            if (!pubXHex || !pubYHex) continue;
+
+            const addressPrivHex =
+                getSessionAddressKey(addr) ||
+                meta.privHex ||
+                (addr === normalizeAddress(account.mainAddress) ? session.privKey : '');
+            if (!addressPrivHex || meta.readOnly || meta.seedRepairRequired) {
+                account.addresses[addr] = {
+                    ...meta,
+                    registrationState: 'failed',
+                    registrationError: !addressPrivHex
+                        ? 'address private key missing'
+                        : 'address requires seed repair before registration',
+                };
+                changed = true;
                 continue;
             }
 
-            const result = await registerAddressOnComNode(
-                addr,
+            let remoteSignPublicKeyV2: PublicKeyEnvelope | undefined;
+            let remoteGroupId = GROUP_ID_NOT_EXIST;
+            const remote = await queryAddressGroupInfo(addr);
+            if (remote.success) {
+                remoteSignPublicKeyV2 = remote.data?.signPublicKeyV2;
+                remoteGroupId = remote.data?.groupId || GROUP_ID_NOT_EXIST;
+            }
+
+            if (isInGuarGroup(remoteGroupId)) {
+                const msg = `address already bound to guarantor group ${remoteGroupId}`;
+                errors.push(msg);
+                account.addresses[addr] = {
+                    ...meta,
+                    registrationState: 'failed',
+                    registrationError: msg,
+                };
+                changed = true;
+                hadErrors = true;
+                continue;
+            }
+
+            const needsRegister =
+                meta.registrationState !== 'registered' ||
+                remoteGroupId === GROUP_ID_NOT_EXIST ||
+                !publicKeyEnvelopeEquals(meta.signPublicKeyV2, accountSignPublicKeyV2) ||
+                !publicKeyEnvelopeEquals(remoteSignPublicKeyV2, accountSignPublicKeyV2);
+            if (!needsRegister) continue;
+
+            const result = await registerAddressOnComNode({
+                accountId: account.accountId,
+                address: addr,
                 pubXHex,
                 pubYHex,
-                privHex,
-                addressType
-            );
-
-            if (!result.success) {
-                errors.push(result.error);
+                addressPrivHex,
+                accountPrivHex: session.privKey,
+                addressType: Number(meta.type ?? 0),
+            });
+            const successFlag = result.success &&
+                (typeof result.data?.success === 'boolean' ? result.data.success : true);
+            if (!successFlag) {
+                const msg = result.success
+                    ? result.data?.error || result.data?.message || 'address registration failed'
+                    : result.error;
+                errors.push(msg);
+                account.addresses[addr] = {
+                    ...meta,
+                    registrationState: 'failed',
+                    registrationError: msg,
+                };
+                changed = true;
                 hadErrors = true;
                 continue;
             }
-            const successFlag = typeof result.data?.success === 'boolean' ? result.data.success : true;
-            if (!successFlag) {
-                const msg = result.data?.error || result.data?.message || '地址注册失败';
-                errors.push(msg);
-                hadErrors = true;
-            }
+
+            account.addresses[addr] = normalizeAddressDataForStorage(addr, {
+                ...meta,
+                signPublicKeyV2: result.data.signPublicKeyV2,
+                seedAnchor: result.data.seedAnchor,
+                seedChainStep: result.data.seedChainStep,
+                defaultSpendAlgorithm: result.data.defaultSpendAlgorithm,
+                registrationState: 'registered',
+                registrationError: undefined,
+            }, account);
+            changed = true;
         }
     }
 
@@ -573,6 +713,10 @@ export async function registerAddressesOnMainEntry(account: UserAccount): Promis
 
     if (!hadErrors) {
         account.mainAddressRegistered = true;
+        changed = true;
+    }
+
+    if (changed) {
         await saveAccount(account);
     }
 }

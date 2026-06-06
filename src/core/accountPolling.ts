@@ -23,6 +23,7 @@ import { COIN_NAMES } from './types';
 import type { TxCertificate, UTXOData } from './blockchain';
 import { cacheTXCerUpdate, shouldBlockTXCerUpdate, unlockTXCers } from './txCerLockManager';
 import { unlockUTXOs } from './utxoLock';
+import { notifyDappTxStatus } from './dappTxStatus';
 
 type TxStatusPayload = {
     tx_id: string;
@@ -265,6 +266,7 @@ async function applyConfirmedTxIds(accountId: string, update: AccountUpdateInfo)
         if (changed) {
             dispatchHistoryUpdate(accountId, txId, 'success');
         }
+        await notifyDappTxStatus(accountId, txId, 'success');
     }
 }
 
@@ -720,6 +722,11 @@ function startSSESync(): void {
                     }).then((changed) => {
                         if (changed) {
                             dispatchHistoryUpdate(accountId, data.tx_id, data.status);
+                        }
+                        if (data.status === 'success' || data.status === 'failed') {
+                            void notifyDappTxStatus(accountId, data.tx_id, data.status, {
+                                error: data.status === 'failed' ? data.error_reason || '' : '',
+                            });
                         }
                     });
                 }

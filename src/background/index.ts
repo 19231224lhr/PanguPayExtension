@@ -29,6 +29,7 @@ import {
     getDappPendingTransaction,
     getDappPendingTransactionById,
     clearDappPendingTransaction,
+    saveDappTxWatch,
     getOnboardingStep,
     type DappPendingTransaction,
     type DappTransactionRequest,
@@ -803,6 +804,7 @@ async function failPendingDappTransaction(
         origin: pending.origin,
         status: 'failed',
         mode: pending.request.mode || 'normal',
+        error,
     });
 }
 
@@ -877,6 +879,17 @@ async function handleTxApprove(requestId: string, payload: unknown): Promise<Pan
 
     await clearDappPendingTransaction(account.accountId, pending.requestId);
     const responseData = { txId: submitResult.txId, mode, status: 'submitted' };
+    const org = await getOrganization(account.accountId);
+    if (org?.groupId && submitResult.txId) {
+        await saveDappTxWatch({
+            accountId: account.accountId,
+            txId: submitResult.txId,
+            origin: pending.origin,
+            mode,
+            createdAt: Date.now(),
+            requestId: pending.requestId,
+        });
+    }
 
     const pendingResolver = pendingTransactions.get(pending.requestId);
     if (pendingResolver) {
@@ -933,7 +946,15 @@ async function handleTxReject(requestId: string, payload: unknown): Promise<Pang
 }
 
 async function handleNotify(requestId: string, payload: unknown): Promise<PanguResponse> {
-    const data = payload as { origin?: string; event?: string; address?: string } | null;
+    const data = payload as {
+        origin?: string;
+        event?: string;
+        address?: string;
+        txId?: string;
+        status?: string;
+        mode?: string;
+        error?: string;
+    } | null;
     const origin = normalizeOrigin(data?.origin || '');
     if (!origin || !data?.event) {
         return {
@@ -947,6 +968,10 @@ async function handleNotify(requestId: string, payload: unknown): Promise<PanguR
         event: data.event,
         origin,
         address: data.address || '',
+        txId: data.txId || '',
+        status: data.status || '',
+        mode: data.mode || '',
+        error: data.error || '',
     });
     return {
         type: 'PANGU_RESPONSE',
@@ -957,7 +982,7 @@ async function handleNotify(requestId: string, payload: unknown): Promise<PanguR
 
 async function broadcastDappEvent(
     origin: string,
-    payload: { event: string; origin: string; address?: string; txId?: string; status?: string; mode?: string }
+    payload: { event: string; origin: string; address?: string; txId?: string; status?: string; mode?: string; error?: string }
 ): Promise<void> {
     if (!origin) return;
     const normalized = normalizeOrigin(origin);

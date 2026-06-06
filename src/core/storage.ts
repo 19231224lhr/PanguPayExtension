@@ -142,6 +142,7 @@ const STORAGE_KEYS = {
     DAPP_PENDING: 'pangu_dapp_pending',
     DAPP_SIGN_PENDING: 'pangu_dapp_sign_pending',
     DAPP_TX_PENDING: 'pangu_dapp_tx_pending',
+    DAPP_TX_WATCHES: 'pangu_dapp_tx_watches',
     SESSION: 'pangu_session',
 };
 
@@ -173,6 +174,17 @@ function isEmptyPublicKeyEnvelope(value: PublicKeyEnvelope | null | undefined): 
     if (!value) return true;
     if (!String(value.Algorithm || '').trim()) return true;
     return decodeOptionalBytes(value.PublicKey).length === 0;
+}
+
+export function publicKeyEnvelopeEquals(
+    left: PublicKeyEnvelope | null | undefined,
+    right: PublicKeyEnvelope | null | undefined
+): boolean {
+    if (isEmptyPublicKeyEnvelope(left) || isEmptyPublicKeyEnvelope(right)) return false;
+    return (
+        String(left?.Algorithm || '') === String(right?.Algorithm || '') &&
+        decodeOptionalBytes(left?.PublicKey).join(',') === decodeOptionalBytes(right?.PublicKey).join(',')
+    );
 }
 
 function normalizeStoredPublicKey(
@@ -403,9 +415,11 @@ export function normalizeAddressDataForStorage(
     const protocolState = recoverAddressProtocolState(account, normalizedAddress, current as Partial<AddressInfo>);
     const accountSignPublicKeyV2 = getAccountSignPublicKeyV2(account);
     const existingSignPublicKeyV2 = current.signPublicKeyV2 as PublicKeyEnvelope | undefined;
-    const signPublicKeyV2 = !isEmptyPublicKeyEnvelope(existingSignPublicKeyV2)
-        ? existingSignPublicKeyV2
-        : accountSignPublicKeyV2;
+    const signPublicKeyV2 = accountSignPublicKeyV2 || (
+        !isEmptyPublicKeyEnvelope(existingSignPublicKeyV2)
+            ? existingSignPublicKeyV2
+            : undefined
+    );
 
     let registrationState: AddressRegistrationState = 'unknown';
     if (isRegistrationState(current.registrationState)) {
@@ -641,6 +655,13 @@ export async function deleteAccount(accountId: string): Promise<void> {
     if (dappTxPending[accountId]) {
         delete dappTxPending[accountId];
         await setStorageData(STORAGE_KEYS.DAPP_TX_PENDING, dappTxPending);
+    }
+
+    const dappTxWatches =
+        await getStorageData<Record<string, Record<string, DappTxWatch>>>(STORAGE_KEYS.DAPP_TX_WATCHES) || {};
+    if (dappTxWatches[accountId]) {
+        delete dappTxWatches[accountId];
+        await setStorageData(STORAGE_KEYS.DAPP_TX_WATCHES, dappTxWatches);
     }
 }
 
@@ -974,6 +995,15 @@ export interface DappPendingTransaction {
     request: DappTransactionRequest;
 }
 
+export interface DappTxWatch {
+    accountId: string;
+    txId: string;
+    origin: string;
+    mode: string;
+    createdAt: number;
+    requestId?: string;
+}
+
 function normalizeOrigin(origin: string): string {
     return String(origin || '').trim().toLowerCase();
 }
@@ -1257,6 +1287,71 @@ export async function clearDappPendingTransaction(accountId: string, requestId?:
         delete store[accountId];
     }
     await setStorageData(STORAGE_KEYS.DAPP_TX_PENDING, store);
+}
+
+function normalizeDappTxId(txId: string): string {
+    return String(txId || '').trim().toLowerCase();
+}
+
+function buildDappTxWatchKey(watch: DappTxWatch): string {
+    return [
+        normalizeDappTxId(watch.txId),
+        normalizeOrigin(watch.origin),
+        String(watch.requestId || watch.createdAt || Date.now()),
+    ].join(':');
+}
+
+function pruneDappTxWatches(store: Record<string, Record<string, DappTxWatch>>): void {
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    for (const [accountId, watches] of Object.entries(store)) {
+        for (const [key, watch] of Object.entries(watches || {})) {
+            if (!watch?.txId || Number(watch.createdAt || 0) < cutoff) {
+                delete watches[key];
+            }
+        }
+        if (Object.keys(watches || {}).length === 0) {
+            delete store[accountId];
+        }
+    }
+}
+
+export async function saveDappTxWatch(watch: DappTxWatch): Promise<void> {
+    if (!watch?.accountId || !watch.txId || !watch.origin) return;
+    const raw = await getStorageData<Record<string, Record<string, DappTxWatch>>>(STORAGE_KEYS.DAPP_TX_WATCHES);
+    const store = raw && typeof raw === 'object' ? raw : {};
+    pruneDappTxWatches(store);
+    if (!store[watch.accountId]) store[watch.accountId] = {};
+    const normalized: DappTxWatch = {
+        ...watch,
+        txId: normalizeDappTxId(watch.txId),
+        origin: normalizeOrigin(watch.origin),
+        mode: String(watch.mode || 'normal'),
+        createdAt: Number(watch.createdAt || Date.now()),
+    };
+    store[watch.accountId][buildDappTxWatchKey(normalized)] = normalized;
+    await setStorageData(STORAGE_KEYS.DAPP_TX_WATCHES, store);
+}
+
+export async function consumeDappTxWatches(accountId: string, txId: string): Promise<DappTxWatch[]> {
+    if (!accountId || !txId) return [];
+    const normalizedTxId = normalizeDappTxId(txId);
+    const raw = await getStorageData<Record<string, Record<string, DappTxWatch>>>(STORAGE_KEYS.DAPP_TX_WATCHES);
+    const store = raw && typeof raw === 'object' ? raw : {};
+    pruneDappTxWatches(store);
+    const accountWatches = store[accountId] || {};
+    const matched: DappTxWatch[] = [];
+    for (const [key, watch] of Object.entries(accountWatches)) {
+        if (normalizeDappTxId(watch?.txId || '') !== normalizedTxId) continue;
+        matched.push(watch);
+        delete accountWatches[key];
+    }
+    if (Object.keys(accountWatches).length === 0) {
+        delete store[accountId];
+    } else {
+        store[accountId] = accountWatches;
+    }
+    await setStorageData(STORAGE_KEYS.DAPP_TX_WATCHES, store);
+    return matched;
 }
 
 // ========================================
