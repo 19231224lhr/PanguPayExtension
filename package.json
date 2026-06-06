@@ -8,6 +8,7 @@
         "build": "vite build",
         "preview": "vite preview",
         "check:api": "node scripts/check-api-compat.js",
+        "check:dapp": "node --experimental-strip-types scripts/check-dapp-tx-request.mjs",
         "check:protocol": "node scripts/check-protocol.js"
     },
     "dependencies": {

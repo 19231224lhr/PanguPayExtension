@@ -17,6 +17,7 @@ const walletCreateSource = read('src/popup/pages/walletCreate.ts');
 const walletImportSource = read('src/popup/pages/walletImport.ts');
 const contentSource = read('src/content/index.ts');
 const backgroundSource = read('src/background/index.ts');
+const dappTxRequestSource = read('src/core/dappTxRequest.ts');
 
 if (addressSource.includes('accountPrivHex ? getPublicKeyHexFromPrivate(accountPrivHex)')) {
   fail('SignPublicKeyV2 still falls back to address public key when account private key is missing.');
@@ -38,6 +39,44 @@ for (const field of ['txId', 'status', 'mode', 'error']) {
 
 if (!backgroundSource.includes('saveDappTxWatch')) {
   fail('background does not record DApp tx watches after transaction approval.');
+}
+
+if (/if\s*\(\s*org\?\.groupId\s*&&\s*submitResult\.txId\s*\)\s*\{\s*await\s+saveDappTxWatch/s.test(backgroundSource)) {
+  fail('DApp tx watches are still gated by organization membership.');
+}
+
+for (const marker of [
+  'consumeDappTxWatches',
+  'getDappTxWatches',
+  'scheduleBackgroundDappTxStatusWatch',
+  'pollSavedDappTxWatches',
+  'DAPP_TX_STATUS_ALARM',
+  'queryTXStatus',
+  'handleBackgroundDappTxStatus',
+]) {
+  if (!backgroundSource.includes(marker)) {
+    fail(`background DApp tx status watcher is missing ${marker}.`);
+  }
+}
+
+for (const marker of ['seedAnchor', 'seedChainStep', 'defaultSpendAlgorithm']) {
+  if (!(backgroundSource + dappTxRequestSource).includes(marker)) {
+    fail(`DApp tx normalization does not preserve ${marker}.`);
+  }
+}
+
+for (const marker of ['transferMode', 'toAddress', 'recipientPublicKey', 'recipientOrgId', 'transferGas', 'howMuchPayForGas']) {
+  if (!dappTxRequestSource.includes(marker)) {
+    fail(`DApp tx normalization does not accept frontend field ${marker}.`);
+  }
+}
+
+if (!dappTxRequestSource.includes('readDappPublicKey(entry)')) {
+  fail('DApp recipient normalization does not preserve recipient public keys.');
+}
+
+if (!backgroundSource.includes('useRequestWideMeta ? request.publicKey')) {
+  fail('DApp recipient enrichment does not apply request-wide metadata for single-recipient requests.');
 }
 
 if (process.exitCode) {

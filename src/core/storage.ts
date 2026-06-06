@@ -971,6 +971,10 @@ export interface DappTransactionRecipient {
     coinType?: number;
     publicKey?: string;
     orgId?: string;
+    transferGas?: number;
+    seedAnchor?: number[] | string;
+    seedChainStep?: number;
+    defaultSpendAlgorithm?: string;
 }
 
 export interface DappTransactionRequest {
@@ -982,6 +986,10 @@ export interface DappTransactionRequest {
     extraGas?: number;
     publicKey?: string;
     orgId?: string;
+    transferGas?: number;
+    seedAnchor?: number[] | string;
+    seedChainStep?: number;
+    defaultSpendAlgorithm?: string;
     recipients?: DappTransactionRecipient[];
 }
 
@@ -1352,6 +1360,19 @@ export async function consumeDappTxWatches(accountId: string, txId: string): Pro
     }
     await setStorageData(STORAGE_KEYS.DAPP_TX_WATCHES, store);
     return matched;
+}
+
+export async function getDappTxWatches(): Promise<Record<string, DappTxWatch[]>> {
+    const raw = await getStorageData<Record<string, Record<string, DappTxWatch>>>(STORAGE_KEYS.DAPP_TX_WATCHES);
+    const store = raw && typeof raw === 'object' ? raw : {};
+    pruneDappTxWatches(store);
+    await setStorageData(STORAGE_KEYS.DAPP_TX_WATCHES, store);
+    const result: Record<string, DappTxWatch[]> = {};
+    for (const [accountId, watches] of Object.entries(store)) {
+        const list = Object.values(watches || {});
+        if (list.length > 0) result[accountId] = list;
+    }
+    return result;
 }
 
 // ========================================

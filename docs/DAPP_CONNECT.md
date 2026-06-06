@@ -13,6 +13,7 @@
 | `connect()` | 请求连接，用户选择授权地址 |
 | `connectSigned(options)` | 签名连接，验证地址所有权 |
 | `getAccount()` | 获取当前授权的地址信息 |
+| `sendTransaction(params)` | 请求插件构造并提交链上交易 |
 | `isConnected()` | 检查是否已连接 |
 | `disconnect()` | 断开连接 |
 | `on(event, callback)` | 注册事件监听 |
@@ -138,6 +139,80 @@ getAccount(): Promise<AccountInfo | null>
 
 ---
 
+### `sendTransaction(params)`
+
+请求插件构造并提交链上交易。该接口复用插件内置转账构建逻辑，与前端转账页使用同一套后端协议字段和提交接口。
+
+**签名**：
+```typescript
+sendTransaction(params: SendTransactionParams): Promise<SendTransactionResult>
+```
+
+**参数 `SendTransactionParams`**：
+| 字段 | 类型 | 必填 | 说明 |
+|:-----|:-----|:-----|:-----|
+| `to` / `toAddress` / `address` | `string` | 单收款方必填 | 收款地址 |
+| `amount` / `value` | `number` | 单收款方必填 | 转账金额 |
+| `coinType` / `type` | `number` | 否 | 币种，`0=PGC`、`1=BTC`、`2=ETH` |
+| `mode` / `transferMode` | `'normal' \| 'quick' \| 'cross'` | 否 | 转账模式，默认 `normal` |
+| `gas` | `number` | 否 | 交易 Gas |
+| `extraGas` / `howMuchPayForGas` | `number` | 否 | 额外 Gas 兑换金额 |
+| `publicKey` / `recipientPublicKey` | `string \| {x,y}` | 否 | 收款方 P-256 公钥 |
+| `orgId` / `recipientOrgId` / `groupId` | `string` | 否 | 收款方担保组织 ID |
+| `transferGas` / `interest` | `number` | 否 | 快速交易支付给收款方的利息/Gas |
+| `seedAnchor` / `SeedAnchor` | `number[] \| string` | 否 | 收款方 Seed 链锚点 |
+| `seedChainStep` / `SeedChainStep` | `number` | 否 | 收款方 Seed 链步数 |
+| `defaultSpendAlgorithm` / `DefaultSpendAlgorithm` | `string` | 否 | 默认花费算法 |
+| `recipients` | `TransactionRecipient[]` | 多收款方必填 | 多收款方列表 |
+
+多收款方交易中，每个 recipient 支持同样的 `toAddress/address`、`amount/value`、`coinType/type`、`publicKey`、`orgId/groupId`、`transferGas` 和 Seed 元数据字段。根级收款方元数据只作为单收款方请求的兜底；多收款方应把元数据放到各自 recipient 上。
+
+**返回值 `SendTransactionResult`**：
+| 字段 | 类型 | 说明 |
+|:-----|:-----|:-----|
+| `txId` | `string` | 后端返回或本地构造的交易 ID |
+| `mode` | `'normal' \| 'quick' \| 'cross'` | 实际提交模式 |
+| `status` | `'submitted'` | 已提交到后端 |
+
+**示例：单收款方**
+```javascript
+const result = await window.pangu.sendTransaction({
+    toAddress: '0123456789abcdef0123456789abcdef01234567',
+    amount: 10,
+    coinType: 0,
+    transferMode: 'quick',
+    recipientPublicKey: 'pubXHex,pubYHex',
+    recipientOrgId: '10000000',
+    howMuchPayForGas: 0
+});
+```
+
+**示例：多收款方**
+```javascript
+const result = await window.pangu.sendTransaction({
+    transferMode: 'normal',
+    coinType: 0,
+    recipients: [
+        { toAddress: 'first...', amount: 1, publicKey: 'x1,y1', orgId: '10000000' },
+        { toAddress: 'second...', amount: 2, publicKey: 'x2,y2', orgId: '10000000' }
+    ]
+});
+```
+
+**状态通知**：
+
+`sendTransaction()` 返回 `submitted` 后，组织交易会继续通过 `txStatus` 事件通知最终状态：
+
+```javascript
+window.pangu.on('txStatus', (event) => {
+    console.log(event.txId, event.status, event.mode, event.error);
+});
+```
+
+组织交易使用 `/api/v1/{groupID}/assign/tx-status/{txID}` 查询最终 `success` 或 `failed`。普通无组织交易使用 `/api/v1/com/submit-noguargroup-tx` 提交；当前后端没有提供对应最终状态查询接口，因此插件不会伪造最终成功事件。
+
+---
+
 ### `isConnected()`
 
 快速检查当前站点是否已连接。
@@ -177,6 +252,7 @@ on(event: EventName, callback: EventCallback): void
 |:-----|:-----|:-----|
 | `disconnect` | 用户在插件中断开当前站点 | `{ origin: string }` |
 | `accountChanged` | 用户在插件中切换账户 | `string`（新地址） |
+| `txStatus` | DApp 交易状态变化 | `{ txId, status, mode, origin, error }` |
 
 **示例**：
 ```javascript
@@ -186,6 +262,10 @@ window.pangu.on('disconnect', (payload) => {
 
 window.pangu.on('accountChanged', (newAddress) => {
     console.log('切换:', newAddress);
+});
+
+window.pangu.on('txStatus', (event) => {
+    console.log('交易状态:', event.status, event.txId);
 });
 ```
 
@@ -229,7 +309,51 @@ interface AccountInfo extends ConnectResult {
     organization: string | null;
 }
 
-type EventName = 'disconnect' | 'accountChanged';
+type TransferMode = 'normal' | 'quick' | 'cross';
+
+interface TransactionRecipient {
+    to?: string;
+    toAddress?: string;
+    address?: string;
+    amount?: number;
+    value?: number;
+    coinType?: number;
+    type?: number;
+    publicKey?: string | { x?: string; y?: string; X?: string; Y?: string };
+    orgId?: string;
+    groupId?: string;
+    transferGas?: number;
+    seedAnchor?: number[] | string;
+    seedChainStep?: number;
+    defaultSpendAlgorithm?: string;
+}
+
+interface SendTransactionParams extends TransactionRecipient {
+    mode?: TransferMode;
+    transferMode?: TransferMode;
+    gas?: number;
+    extraGas?: number;
+    howMuchPayForGas?: number;
+    recipientPublicKey?: string;
+    recipientOrgId?: string;
+    recipients?: TransactionRecipient[];
+}
+
+interface SendTransactionResult {
+    txId?: string;
+    mode: TransferMode;
+    status: 'submitted';
+}
+
+interface TxStatusEvent {
+    txId?: string;
+    status?: 'submitted' | 'success' | 'failed';
+    mode?: TransferMode;
+    origin?: string;
+    error?: string;
+}
+
+type EventName = 'disconnect' | 'accountChanged' | 'txStatus';
 ```
 
 ---
@@ -265,6 +389,9 @@ type EventName = 'disconnect' | 'accountChanged';
 | `用户拒绝签名` | 用户在签名页点击了拒绝 |
 | `用户未响应连接请求` | 连接超时 |
 | `用户未响应签名请求` | 签名超时 |
+| `User did not confirm transaction` | 交易确认超时 |
+| `Site is not connected` | 调用 sendTransaction 前未 connect |
+| `Transaction recipient is missing` | 交易缺少有效收款方 |
 | `站点未授权，请先连接钱包` | 调用 getAccount 前未 connect |
 | `请先解锁该地址私钥` | 签名的地址私钥未解锁 |
 | `请求超时` | 通用超时错误 |

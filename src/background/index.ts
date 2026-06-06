@@ -30,6 +30,9 @@ import {
     getDappPendingTransactionById,
     clearDappPendingTransaction,
     saveDappTxWatch,
+    consumeDappTxWatches,
+    getDappTxWatches,
+    updateTransactionStatus,
     getOnboardingStep,
     type DappPendingTransaction,
     type DappTransactionRequest,
@@ -37,12 +40,20 @@ import {
 import type { PanguMessage, PanguResponse } from '../core/types';
 import { buildAndSubmitTransfer, type TransferMode, type TransferRecipient } from '../core/transfer';
 import { queryAddressGroupInfo } from '../core/address';
+import { buildAssignNodeUrl } from '../core/api';
+import { queryTXStatus, type TXStatusResponse } from '../core/txBuilder';
+import { unlockUTXOsByTxId } from '../core/utxoLock';
+import { getLockedTXCerIdsByTxId, unlockTXCers } from '../core/txCerLockManager';
+import { normalizeDappTxRequest } from '../core/dappTxRequest';
 
 // ========================================
 // 娑堟伅澶勭悊
 // ========================================
 
 const CONNECT_TIMEOUT_MS = 120000;
+const DAPP_TX_STATUS_POLL_INTERVAL_MS = 2000;
+const DAPP_TX_STATUS_MAX_WAIT_MS = 60000;
+const DAPP_TX_STATUS_ALARM = 'dappTxStatus';
 let uiPort: chrome.runtime.Port | null = null;
 
 type PendingConnect = {
@@ -55,6 +66,7 @@ type PendingConnect = {
 const pendingConnects = new Map<string, PendingConnect>();
 const pendingSignConnects = new Map<string, PendingConnect>();
 const pendingTransactions = new Map<string, PendingConnect>();
+const backgroundDappTxWatchers = new Set<string>();
 
 type SiteInfo = {
     origin: string;
@@ -763,20 +775,29 @@ async function handleTxGetPending(requestId: string): Promise<PanguResponse> {
 
 async function enrichDappRecipients(request: DappTransactionRequest): Promise<TransferRecipient[]> {
     const recipients = request.recipients || [];
+    const useRequestWideMeta = recipients.length === 1;
     const out: TransferRecipient[] = [];
     for (const recipient of recipients) {
         const query = await queryAddressGroupInfo(recipient.to);
         const meta = query.success ? query.data : undefined;
-        const publicKey = recipient.publicKey || (meta?.publicKey ? `${meta.publicKey.x},${meta.publicKey.y}` : '');
+        const publicKey =
+            recipient.publicKey ||
+            (useRequestWideMeta ? request.publicKey : '') ||
+            (meta?.publicKey ? `${meta.publicKey.x},${meta.publicKey.y}` : '');
         out.push({
             address: recipient.to,
             amount: Number(recipient.amount || 0),
             coinType: Number(recipient.coinType ?? request.coinType ?? meta?.type ?? 0),
             publicKey,
-            orgId: recipient.orgId || meta?.groupId || '',
-            seedAnchor: meta?.seedAnchor,
-            seedChainStep: meta?.seedChainStep,
-            defaultSpendAlgorithm: meta?.defaultSpendAlgorithm,
+            orgId: recipient.orgId || (useRequestWideMeta ? request.orgId : '') || meta?.groupId || '',
+            transferGas: recipient.transferGas ?? (useRequestWideMeta ? request.transferGas : undefined),
+            seedAnchor: recipient.seedAnchor ?? (useRequestWideMeta ? request.seedAnchor : undefined) ?? meta?.seedAnchor,
+            seedChainStep:
+                recipient.seedChainStep ?? (useRequestWideMeta ? request.seedChainStep : undefined) ?? meta?.seedChainStep,
+            defaultSpendAlgorithm:
+                recipient.defaultSpendAlgorithm ??
+                (useRequestWideMeta ? request.defaultSpendAlgorithm : undefined) ??
+                meta?.defaultSpendAlgorithm,
         });
     }
     return out;
@@ -880,7 +901,7 @@ async function handleTxApprove(requestId: string, payload: unknown): Promise<Pan
     await clearDappPendingTransaction(account.accountId, pending.requestId);
     const responseData = { txId: submitResult.txId, mode, status: 'submitted' };
     const org = await getOrganization(account.accountId);
-    if (org?.groupId && submitResult.txId) {
+    if (submitResult.txId) {
         await saveDappTxWatch({
             accountId: account.accountId,
             txId: submitResult.txId,
@@ -889,6 +910,9 @@ async function handleTxApprove(requestId: string, payload: unknown): Promise<Pan
             createdAt: Date.now(),
             requestId: pending.requestId,
         });
+        if (org?.groupId) {
+            scheduleBackgroundDappTxStatusWatch(account.accountId, submitResult.txId);
+        }
     }
 
     const pendingResolver = pendingTransactions.get(pending.requestId);
@@ -1005,46 +1029,119 @@ async function broadcastDappEvent(
     }
 }
 
-function normalizeDappTxRequest(payload: unknown): DappTransactionRequest {
-    const raw = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
-    const recipients = Array.isArray(raw.recipients)
-        ? raw.recipients
-              .map((item) => {
-                  const entry = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
-                  return {
-                      to: String(entry.to || entry.address || '').trim(),
-                      amount: Number(entry.amount || 0),
-                      coinType: Number(entry.coinType ?? raw.coinType ?? 0),
-                      publicKey: entry.publicKey ? String(entry.publicKey) : undefined,
-                      orgId: entry.orgId ? String(entry.orgId) : undefined,
-                  };
-              })
-              .filter((item) => item.to && item.amount > 0)
-        : [];
+function buildDappTxWatchKey(accountId: string, txId: string): string {
+    return `${accountId}:${String(txId || '').trim().toLowerCase()}`;
+}
 
-    if (recipients.length === 0 && raw.to && Number(raw.amount || 0) > 0) {
-        recipients.push({
-            to: String(raw.to).trim(),
-            amount: Number(raw.amount || 0),
-            coinType: Number(raw.coinType ?? 0),
-            publicKey: raw.publicKey ? String(raw.publicKey) : undefined,
-            orgId: raw.orgId ? String(raw.orgId) : undefined,
+async function notifyDappTxWatchesInBackground(
+    accountId: string,
+    txId: string,
+    status: 'success' | 'failed',
+    options: { error?: string } = {}
+): Promise<void> {
+    const watches = await consumeDappTxWatches(accountId, txId);
+    for (const watch of watches) {
+        await broadcastDappEvent(watch.origin, {
+            event: 'txStatus',
+            origin: watch.origin,
+            txId,
+            status,
+            mode: watch.mode || 'normal',
+            error: options.error || '',
         });
     }
+}
 
-    const mode = raw.mode === 'cross' || raw.mode === 'quick' || raw.mode === 'normal' ? raw.mode : 'normal';
+async function unlockFailedTransactionInputs(txId: string): Promise<void> {
+    try {
+        await unlockUTXOsByTxId(txId);
+    } catch (error) {
+        console.warn('[PanguPay] Failed to unlock UTXOs after DApp tx failure:', error);
+    }
+    try {
+        const lockedTxCers = getLockedTXCerIdsByTxId(txId);
+        if (lockedTxCers.length > 0) {
+            unlockTXCers(lockedTxCers, false);
+        }
+    } catch (error) {
+        console.warn('[PanguPay] Failed to unlock TXCers after DApp tx failure:', error);
+    }
+}
 
-    return {
-        to: raw.to ? String(raw.to) : undefined,
-        amount: raw.amount != null ? Number(raw.amount) : undefined,
-        coinType: Number(raw.coinType ?? 0),
-        mode,
-        gas: Number(raw.gas ?? 0),
-        extraGas: Number(raw.extraGas ?? 0),
-        publicKey: raw.publicKey ? String(raw.publicKey) : undefined,
-        orgId: raw.orgId ? String(raw.orgId) : undefined,
-        recipients,
+async function handleBackgroundDappTxStatus(
+    accountId: string,
+    txId: string,
+    response: TXStatusResponse
+): Promise<boolean> {
+    if (response.status !== 'success' && response.status !== 'failed') return false;
+
+    const finalStatus = response.status;
+    const error = finalStatus === 'failed' ? response.error_reason || '' : '';
+    await updateTransactionStatus(accountId, txId, finalStatus, {
+        blockNumber: response.block_height || 0,
+        failureReason: error || undefined,
+    });
+    await notifyDappTxWatchesInBackground(accountId, txId, finalStatus, { error });
+    if (finalStatus === 'failed') {
+        await unlockFailedTransactionInputs(txId);
+    }
+    return true;
+}
+
+function scheduleBackgroundDappTxStatusWatch(accountId: string, txId: string): void {
+    if (!accountId || !txId) return;
+    const watchKey = buildDappTxWatchKey(accountId, txId);
+    if (backgroundDappTxWatchers.has(watchKey)) return;
+    backgroundDappTxWatchers.add(watchKey);
+
+    const startedAt = Date.now();
+    const poll = async () => {
+        try {
+            const org = await getOrganization(accountId);
+            if (!org?.groupId) {
+                backgroundDappTxWatchers.delete(watchKey);
+                return;
+            }
+            const endpoint = org.assignAPIEndpoint || org.assignNodeUrl || '';
+            const assignUrl = endpoint ? buildAssignNodeUrl(endpoint) : undefined;
+            const status = await queryTXStatus(txId, org.groupId, assignUrl);
+            if (await handleBackgroundDappTxStatus(accountId, txId, status)) {
+                backgroundDappTxWatchers.delete(watchKey);
+                return;
+            }
+        } catch (error) {
+            console.warn('[PanguPay] DApp tx status poll failed:', error);
+        }
+
+        if (Date.now() - startedAt >= DAPP_TX_STATUS_MAX_WAIT_MS) {
+            backgroundDappTxWatchers.delete(watchKey);
+            return;
+        }
+        setTimeout(poll, DAPP_TX_STATUS_POLL_INTERVAL_MS);
     };
+
+    void poll();
+}
+
+async function pollSavedDappTxWatches(): Promise<void> {
+    const watchesByAccount = await getDappTxWatches();
+    for (const [accountId, watches] of Object.entries(watchesByAccount)) {
+        const org = await getOrganization(accountId);
+        if (!org?.groupId) continue;
+        const endpoint = org.assignAPIEndpoint || org.assignNodeUrl || '';
+        const assignUrl = endpoint ? buildAssignNodeUrl(endpoint) : undefined;
+
+        for (const watch of watches) {
+            const watchKey = buildDappTxWatchKey(accountId, watch.txId);
+            if (backgroundDappTxWatchers.has(watchKey)) continue;
+            try {
+                const status = await queryTXStatus(watch.txId, org.groupId, assignUrl);
+                await handleBackgroundDappTxStatus(accountId, watch.txId, status);
+            } catch (error) {
+                console.warn('[PanguPay] Saved DApp tx status poll failed:', error);
+            }
+        }
+    }
 }
 
 async function handleSendTransaction(
@@ -1114,11 +1211,15 @@ async function handleSendTransaction(
 // ========================================
 
 chrome.alarms.create('autoLock', { periodInMinutes: 1 });
+chrome.alarms.create(DAPP_TX_STATUS_ALARM, { periodInMinutes: 1 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === 'autoLock') {
         // 妫€鏌ユ槸鍚﹂渶瑕佽嚜鍔ㄩ攣瀹?
         // 鍙互鏍规嵁璁剧疆鐨勮嚜鍔ㄩ攣瀹氭椂闂存潵鍐冲畾
+    }
+    if (alarm.name === DAPP_TX_STATUS_ALARM) {
+        void pollSavedDappTxWatches();
     }
 });
 

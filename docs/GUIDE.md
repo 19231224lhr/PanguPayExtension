@@ -64,7 +64,7 @@ npm run build
 
 ## 3. 使用 Demo 测试连接
 
-我们提供了一个演示页面用于测试 DApp 连接功能。
+我们提供了一个演示页面用于测试 DApp 连接、签名和地址读取功能。
 
 ### 3.1 打开 Demo 页面
 
@@ -108,6 +108,8 @@ Demo 页面提供三个按钮：
 3. 选择地址（需已解锁私钥）
 4. 点击 **签名并连接**
 5. Demo 页面显示签名结果（`signature` 和 `publicKey`）
+
+链上交易接入请参考下方 `sendTransaction()` 示例。交易会触发插件确认页，需要用户逐项确认收款地址、金额、币种和 Gas。
 
 ---
 
@@ -173,7 +175,42 @@ if (info) {
 }
 ```
 
-### 4.5 监听事件
+### 4.5 发起交易
+
+DApp 可以通过 `sendTransaction()` 请求插件构造并提交交易。插件会复用与前端转账页一致的交易构建逻辑和后端接口。
+
+```javascript
+const result = await window.pangu.sendTransaction({
+    toAddress: '0123456789abcdef0123456789abcdef01234567',
+    amount: 10,
+    coinType: 0,
+    transferMode: 'quick',
+    gas: 0,
+    howMuchPayForGas: 0,
+    recipientPublicKey: 'pubXHex,pubYHex',
+    recipientOrgId: '10000000'
+});
+
+console.log(result);
+// { txId: '...', mode: 'quick', status: 'submitted' }
+```
+
+多收款方交易使用 `recipients`。多收款方场景下，`publicKey`、`orgId`、`seedAnchor`、`seedChainStep`、`defaultSpendAlgorithm` 等收款方元数据应放在各自 recipient 上；单收款方可使用根级 `recipientPublicKey`、`recipientOrgId` 等字段。
+
+```javascript
+await window.pangu.sendTransaction({
+    transferMode: 'normal',
+    coinType: 0,
+    recipients: [
+        { toAddress: 'first...', amount: 1, publicKey: 'x1,y1', orgId: '10000000' },
+        { toAddress: 'second...', amount: 2, publicKey: 'x2,y2', orgId: '10000000' }
+    ]
+});
+```
+
+`sendTransaction()` 返回 `submitted` 表示后端已经接收提交请求。组织交易会继续通过 `txStatus` 事件通知最终 `success` 或 `failed`。普通无组织交易目前以后端现有能力为准，后端没有提供最终状态查询接口，因此不会伪造最终成功事件。
+
+### 4.6 监听事件
 
 ```javascript
 // 用户在插件中断开连接
@@ -185,9 +222,14 @@ window.pangu.on('disconnect', () => {
 window.pangu.on('accountChanged', (newAddress) => {
     console.log('新地址:', newAddress);
 });
+
+// DApp 交易状态变化
+window.pangu.on('txStatus', (event) => {
+    console.log('交易状态:', event.txId, event.status, event.mode, event.error);
+});
 ```
 
-### 4.6 断开连接
+### 4.7 断开连接
 
 ```javascript
 await window.pangu.disconnect();
@@ -226,6 +268,10 @@ await window.pangu.disconnect();
 ### Q: 如何查看已连接的网站？
 
 在插件中进入 **设置 → 已连接网站**，可查看和断开已授权站点。
+
+### Q: 为什么普通无组织交易只有 `submitted`，没有最终 `success`？
+
+普通无组织交易走 `/api/v1/com/submit-noguargroup-tx`。当前后端没有提供对应的最终状态查询接口；插件不会在没有后端确认的情况下伪造成功状态。组织交易会通过 `/api/v1/{groupID}/assign/tx-status/{txID}` 查询并推送最终状态。
 
 ---
 
