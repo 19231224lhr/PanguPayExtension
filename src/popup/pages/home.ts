@@ -21,7 +21,7 @@ import { requestCapsuleAddress } from '../../core/capsule';
 import { registerAddressesOnMainEntry, unbindAddressOnBackend } from '../../core/address';
 import { syncAccountAddresses } from '../../core/walletSync';
 import { bigIntToHex } from '../../core/signature';
-import { isTXCerLocked } from '../../core/txCerLockManager';
+import { sumSpendableTXCerValue } from '../../core/txCerStatus';
 import { getLockedUTXOs } from '../../core/utxoLock';
 import { getActiveLanguage } from '../utils/appSettings';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
@@ -184,7 +184,7 @@ export async function renderHome(): Promise<void> {
   );
 
   const addressList = walletAddresses.length
-    ? walletAddresses.map((item) => renderAddressCard(item, t)).join('')
+    ? walletAddresses.map((item) => renderAddressCard(account, item, t)).join('')
     : `
         <div class="empty-state address-empty">
           <div class="empty-title">${t.noAddressTitle}</div>
@@ -384,22 +384,19 @@ function renderAssetCard(coinType: number, balance: number): string {
     `;
 }
 
-function renderAddressCard(address: AddressInfo, t: HomeText): string {
+function renderAddressCard(account: UserAccount, address: AddressInfo, t: HomeText): string {
   const meta = getCoinMeta(address.type);
   const coinName = COIN_NAMES[address.type as keyof typeof COIN_NAMES] || 'PGC';
   const sourceLabel = address.source === 'created' ? t.createdLabel : t.importedLabel;
   const shortAddress = address.address.slice(0, 8) + '...' + address.address.slice(-6);
   const detailsId = `address-details-${address.address}`;
-  const balanceSnapshot = getAddressBalanceSnapshot(address);
+  const balanceSnapshot = getAddressBalanceSnapshot(account, address);
   const totalBalance = balanceSnapshot.total.toFixed(meta.decimals);
   const availableBalance = balanceSnapshot.available.toFixed(meta.decimals);
   const txCerEntries = Object.entries(address.txCers || {});
   const txCerTotal = txCerEntries.reduce((sum, [, value]) => sum + (Number(value) || 0), 0);
-  const txCerLocked = txCerEntries.reduce((sum, [id, value]) => {
-    if (!isTXCerLocked(id)) return sum;
-    return sum + (Number(value) || 0);
-  }, 0);
-  const txCerAvailable = Math.max(0, txCerTotal - txCerLocked);
+  const txCerAvailable = sumSpendableTXCerValue(account, address.txCers || {});
+  const txCerLocked = Math.max(0, txCerTotal - txCerAvailable);
   const gasValue = Number(address.estInterest || 0).toFixed(2);
 
   return `
@@ -526,19 +523,7 @@ function getAvailableTotals(account: UserAccount): { pgc: number; btc: number; e
     const lockedBalance = lockedByAddress[addrLower] || 0;
     const unlockedUtxoBalance = Math.max(0, utxoBalance - lockedBalance);
 
-    const txCerIds = Object.keys(txCers);
-    let txCerBalance = 0;
-    if (txCerIds.length > 0) {
-      txCerBalance = Object.values(txCers).reduce<number>((sum, val) => sum + (Number(val) || 0), 0);
-    } else if (Number.isFinite(Number(rawTxCerValue))) {
-      txCerBalance = Number(rawTxCerValue || 0);
-    }
-
-    const lockedTxCerBalance = txCerIds.reduce((sum, id) => {
-      if (!isTXCerLocked(id)) return sum;
-      return sum + (Number((txCers as Record<string, number>)[id]) || 0);
-    }, 0);
-    const unlockedTxCerBalance = Math.max(0, txCerBalance - lockedTxCerBalance);
+    const unlockedTxCerBalance = sumSpendableTXCerValue(account, txCers);
 
     const available = unlockedUtxoBalance + unlockedTxCerBalance;
 
@@ -574,7 +559,7 @@ function getCoinMeta(type: number): { short: string; label: string; className: s
   return COIN_META[type] || COIN_META[0];
 }
 
-function getAddressBalanceSnapshot(address: AddressInfo): {
+function getAddressBalanceSnapshot(account: UserAccount, address: AddressInfo): {
   total: number;
   available: number;
   utxoBalance: number;
@@ -613,11 +598,8 @@ function getAddressBalanceSnapshot(address: AddressInfo): {
     txCerBalance = Number(rawTxCerValue || 0);
   }
 
-  const lockedTxCer = Object.keys(txCers).reduce((sum, id) => {
-    if (!isTXCerLocked(id)) return sum;
-    return sum + (Number((txCers as Record<string, number>)[id]) || 0);
-  }, 0);
-  const availableTxCer = Math.max(0, txCerBalance - lockedTxCer);
+  const availableTxCer = sumSpendableTXCerValue(account, txCers);
+  const lockedTxCer = Math.max(0, txCerBalance - availableTxCer);
 
   return {
     total: utxoBalance + txCerBalance,

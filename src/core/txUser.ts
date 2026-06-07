@@ -1,4 +1,4 @@
-import type { PublicKeyEnvelope, TxCertificate, UTXOData } from './blockchain';
+import type { PublicKeyEnvelope, TxCertificate, TXCerStatusView, UTXOData } from './blockchain';
 
 export interface WalletKeys {
     privHex: string;
@@ -56,6 +56,7 @@ export interface AddressData {
 export interface Wallet {
     addressMsg: Record<string, AddressData>;
     totalTXCers: Record<string, TxCertificate>;
+    txCerStatuses?: Record<string, TXCerStatusView>;
     totalValue: number;
     valueDivision: Record<number, number>;
     updateTime: number;

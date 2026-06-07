@@ -20,8 +20,9 @@ import {
     type UserAccount,
 } from './storage';
 import { COIN_NAMES } from './types';
-import type { TxCertificate, UTXOData } from './blockchain';
+import type { TxCertificate, TXCerStatusView, UTXOData } from './blockchain';
 import { cacheTXCerUpdate, shouldBlockTXCerUpdate, unlockTXCers } from './txCerLockManager';
+import { applyTXCerStatus, markTXCerActive } from './txCerStatus';
 import { unlockUTXOs } from './utxoLock';
 import { notifyDappTxStatus } from './dappTxStatus';
 
@@ -83,6 +84,18 @@ interface TXCerChangeResponse {
     success: boolean;
     count: number;
     changes: TXCerChangeToUser[];
+}
+
+interface TXCerStatusResponse {
+    success: boolean;
+    count: number;
+    statuses: TXCerStatusView[];
+}
+
+interface TXCerStatusChangeResponse {
+    success: boolean;
+    count: number;
+    changes: TXCerStatusView[];
 }
 
 interface CrossOrgTXCerResponse {
@@ -328,20 +341,51 @@ function processTxCerChange(account: UserAccount, change: TXCerChangeToUser): vo
 
     switch (change.Status) {
         case 0:
+            applyTXCerStatus(account, {
+                txCerID: txCerId,
+                userID: account.accountId,
+                address: '',
+                status: 'ConvertedToUTXO',
+                value: 0,
+                sourcePosition: { BlockHeight: 0, Index: 0, InIndex: 0 },
+                utxo: change.UTXO,
+                reason: 'legacy_txcer_change',
+                blockHeight: 0,
+                updatedAt: Date.now(),
+            });
             removeTxCer(account, txCerId);
             unlockTXCers([txCerId], false);
             notifyToast(`TXCer ${formatTxCerId(txCerId)} 已转换为 UTXO`, 'success');
             return;
         case 1:
+            applyTXCerStatus(account, {
+                txCerID: txCerId,
+                userID: account.accountId,
+                address: '',
+                status: 'Invalid',
+                value: 0,
+                sourcePosition: { BlockHeight: 0, Index: 0, InIndex: 0 },
+                reason: 'legacy_txcer_change',
+                blockHeight: 0,
+                updatedAt: Date.now(),
+            });
             removeTxCer(account, txCerId);
             unlockTXCers([txCerId], false);
             notifyToast(`TXCer ${formatTxCerId(txCerId)} 验证失败`, 'error');
             return;
         case 2:
+            markTXCerActive(account, txCerId, '', account.txCerStore?.[txCerId]?.Value || 0);
             notifyToast(`TXCer ${formatTxCerId(txCerId)} 已解除怀疑`, 'info');
             return;
         default:
             console.warn('[AccountPolling] Unknown TXCer status:', change.Status);
+    }
+}
+
+function processTxCerStatusChange(account: UserAccount, view: TXCerStatusView): void {
+    applyTXCerStatus(account, view);
+    if (view.status === 'ConvertedToUTXO' || view.status === 'Exchanged' || view.status === 'Invalid') {
+        unlockTXCers([view.txCerID], false);
     }
 }
 
@@ -371,8 +415,55 @@ function processTxCerToUser(account: UserAccount, item: TXCerToUser): void {
     const store = account.txCerStore || {};
     store[item.TXCer.TXCerID] = item.TXCer;
     account.txCerStore = store;
+    markTXCerActive(account, item.TXCer.TXCerID, normalized, item.TXCer.Value);
 
     recalcAddressBalance(info);
+}
+
+async function syncTXCerStatuses(force = false): Promise<void> {
+    if (!activeAccountId || !activeGroupId) return;
+    try {
+        const account = await getAccount(activeAccountId);
+        if (!account) return;
+        const baseUrl = activeAssignUrl || API_BASE_URL;
+        const endpoint = buildApiUrl(baseUrl, API_ENDPOINTS.ASSIGN_TXCER_STATUSES(activeGroupId));
+        const url = `${endpoint}?userID=${activeAccountId}`;
+        const data = await apiClient.get<TXCerStatusResponse>(url, {
+            timeout: 5000,
+            retries: force ? 0 : 1,
+            silent: true,
+            useBigIntParsing: true,
+        });
+        if (!data.success || !Array.isArray(data.statuses)) return;
+        for (const view of data.statuses) {
+            processTxCerStatusChange(account, view);
+        }
+        recalcTotals(account);
+        await saveAccount(account);
+        dispatchAccountUpdate(account.accountId);
+    } catch (error) {
+        console.debug('[TXCerStatus] Full status sync skipped:', error);
+    }
+}
+
+async function pollTXCerStatusChanges(account: UserAccount): Promise<boolean> {
+    if (!activeGroupId) return false;
+    const baseUrl = activeAssignUrl || API_BASE_URL;
+    const endpoint = buildApiUrl(baseUrl, API_ENDPOINTS.ASSIGN_TXCER_STATUS_CHANGE(activeGroupId));
+    const url = `${endpoint}?userID=${account.accountId}&limit=10&consume=true`;
+    const data = await apiClient.get<TXCerStatusChangeResponse>(url, {
+        timeout: 5000,
+        retries: 0,
+        silent: true,
+        useBigIntParsing: true,
+    });
+    if (!data.success || !Array.isArray(data.changes) || data.changes.length === 0) {
+        return false;
+    }
+    for (const view of data.changes) {
+        processTxCerStatusChange(account, view);
+    }
+    return true;
 }
 
 async function processAccountUpdate(account: UserAccount, update: AccountUpdateInfo): Promise<void> {
@@ -518,13 +609,26 @@ async function pollTXCerChanges(force = false): Promise<void> {
             useBigIntParsing: true,
         });
         txCerFailures = 0;
-        if (!data.success || !data.changes?.length) return;
 
         const account = await getAccount(activeAccountId);
         if (!account) return;
 
-        for (const change of data.changes) {
-            processTxCerChange(account, change);
+        let hasChanges = false;
+        if (data.success && data.changes?.length) {
+            for (const change of data.changes) {
+                processTxCerChange(account, change);
+                hasChanges = true;
+            }
+        }
+        try {
+            if (await pollTXCerStatusChanges(account)) {
+                hasChanges = true;
+            }
+        } catch (statusError) {
+            console.debug('[TXCerStatus] Incremental poll skipped:', statusError);
+        }
+        if (!hasChanges) {
+            return;
         }
 
         recalcTotals(account);
@@ -582,6 +686,7 @@ async function pollCrossOrgTXCers(force = false): Promise<void> {
 function startTXCerChangePolling(): void {
     if (txCerPollingTimer || !activeAccountId || !activeGroupId) return;
     txCerFailures = 0;
+    void syncTXCerStatuses(true);
     void pollTXCerChanges(true);
     txCerPollingTimer = setInterval(pollTXCerChanges, TXCER_POLLING_INTERVAL);
 }
@@ -681,6 +786,22 @@ function startSSESync(): void {
                     dispatchAccountUpdate(account.accountId);
                 } catch (error) {
                     console.error('[AccountSSE] Failed to parse txcer_change:', error);
+                }
+            })();
+        });
+
+        eventSource.addEventListener('txcer_status_change', (event) => {
+            void (async () => {
+                try {
+                    const data = parseBigIntJson<TXCerStatusView>((event as MessageEvent).data);
+                    const account = await getAccount(activeAccountId as string);
+                    if (!account) return;
+                    processTxCerStatusChange(account, data);
+                    recalcTotals(account);
+                    await saveAccount(account);
+                    dispatchAccountUpdate(account.accountId);
+                } catch (error) {
+                    console.error('[AccountSSE] Failed to parse txcer_status_change:', error);
                 }
             })();
         });

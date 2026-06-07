@@ -33,6 +33,7 @@ import {
 } from './storage';
 import { lockUTXOs } from './utxoLock';
 import { lockTXCers, markTXCersSubmitted, unlockTXCers } from './txCerLockManager';
+import { isTXCerSpendable } from './txCerStatus';
 import { COIN_NAMES } from './types';
 
 export type TransferMode = 'normal' | 'quick' | 'cross';
@@ -378,7 +379,7 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
     try {
         for (const addr of normalizedFrom) {
             const info = account.addresses?.[addr];
-            const txCers = info?.txCers ? Object.keys(info.txCers) : [];
+            const txCers = info?.txCers ? Object.keys(info.txCers).filter((id) => isTXCerSpendable(account, id)) : [];
             if (txCers.length > 0) {
                 const lockedIds = lockTXCers(txCers, `构造交易 - 地址 ${addr.slice(0, 8)}...`);
                 lockedTXCerIds.push(...lockedIds);

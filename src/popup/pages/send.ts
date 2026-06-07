@@ -7,13 +7,14 @@ import {
     getOrganization,
     getWalletAddresses,
     type AddressInfo,
+    type UserAccount,
 } from '../../core/storage';
 import { COIN_NAMES } from '../../core/types';
 import { GROUP_ID_NOT_EXIST, GROUP_ID_RETAIL, queryAddressGroupInfo } from '../../core/address';
 import { isCapsuleAddress, verifyCapsuleAddress } from '../../core/capsule';
 import { buildAndSubmitTransfer, type TransferMode, type TransferRecipient } from '../../core/transfer';
 import { watchSubmittedTransaction } from '../../core/txStatus';
-import { isTXCerLocked } from '../../core/txCerLockManager';
+import { sumSpendableTXCerValue } from '../../core/txCerStatus';
 import { getLockedUTXOs } from '../../core/utxoLock';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 import { enhanceCustomSelects } from '../utils/customSelect';
@@ -38,6 +39,7 @@ let selectedTransferMode: TransferModeView = 'quick';
 let selectedSourceAddresses = new Set<string>();
 let selectionTouched = false;
 let currentAddresses: AddressInfo[] = [];
+let currentAccount: UserAccount | null = null;
 let optionsOpen = false;
 
 const recipients: RecipientDraft[] = [];
@@ -89,6 +91,7 @@ export async function renderSend(): Promise<void> {
             recipient.coinType = 0;
         });
     }
+    currentAccount = account;
     currentAddresses = walletAddresses;
 
     if (!hasOrg && selectedTransferMode !== 'quick') {
@@ -1226,7 +1229,7 @@ function getDisplayDecimals(type: number): number {
     return 6;
 }
 
-function getAvailableBalanceForAddress(addr: AddressInfo): number {
+function getAvailableBalanceForAddress(addr: AddressInfo, account = currentAccount): number {
     const utxoValue = Number(addr.value?.utxoValue ?? addr.balance ?? 0) || 0;
     const lockedUtxoBalance = getLockedUTXOs()
         .filter((lock) => lock.address === addr.address)
@@ -1234,12 +1237,7 @@ function getAvailableBalanceForAddress(addr: AddressInfo): number {
     const availableUtxo = Math.max(0, utxoValue - lockedUtxoBalance);
 
     const txCers = addr.txCers || {};
-    const txCerBalance = Object.values(txCers).reduce((sum, val) => sum + Number(val || 0), 0);
-    const lockedTxCerBalance = Object.keys(txCers).reduce((sum, id) => {
-        if (!isTXCerLocked(id)) return sum;
-        return sum + (Number((txCers as Record<string, number>)[id]) || 0);
-    }, 0);
-    const availableTxCer = Math.max(0, txCerBalance - lockedTxCerBalance);
+    const availableTxCer = account ? sumSpendableTXCerValue(account, txCers) : 0;
 
     return availableUtxo + availableTxCer;
 }
