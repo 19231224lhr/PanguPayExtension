@@ -45,6 +45,11 @@ import {
   signStruct,
   type PublicKeyNew as SignaturePublicKey
 } from './signature';
+import { attachSettlementAuths, zeroSettlementAuth } from './settlementAuth';
+import {
+  calculateTXID as calculateCanonicalTXID,
+  getTXHash as getCanonicalTXHash
+} from './txHash';
 import {
   DefaultSeedChainLength,
   buildSeedSpendArtifacts,
@@ -166,7 +171,7 @@ export interface Transaction extends BlockchainTransaction {
   UserSignature: EcdsaSignatureJSON;
   UserSignatureV2?: SignatureEnvelope;
   TXInputsNormal: TXInputNormal[];
-  TXInputsCertificate: any[];          // 蹇€熻浆璐﹀～绌烘暟缁?
+  TXInputsCertificate: TxCertificate[];
   TXOutputs: TXOutput[];
   // Go: []byte -> base64 string in JSON
   Data: number[] | string;
@@ -396,20 +401,7 @@ export function getTXOutputHash(output: TXOutput): number[] {
  * @returns 32瀛楄妭鍝堝笇鍊?
  */
 export function getTXHash(tx: Transaction): number[] {
-  // 1. 杩囨护鎺夋媴淇濈粍缁囨瀯閫犵殑 Input 鍜?Output
-  const filteredInputs = tx.TXInputsNormal.filter(input => !input.IsGuarMake);
-  const filteredOutputs = tx.TXOutputs.filter(output => !output.IsGuarMake);
-
-  // 2. 鍒涘缓涓存椂浜ゆ槗瀵硅薄
-  const txForHash = {
-    ...tx,
-    TXInputsNormal: filteredInputs,
-    TXOutputs: filteredOutputs
-  };
-
-  const copy = JSON.parse(JSON.stringify(txForHash, bigintReplacer));
-  applyExcludeZeroValue(copy, ['TXID', 'Size', 'NewValue', 'UserSignature', 'TXType']);
-  return hashBackendJson(copy);
+  return getCanonicalTXHash(tx);
 }
 
 
@@ -423,15 +415,7 @@ export function getTXHash(tx: Transaction): number[] {
  * @returns TXID锛?6瀛楃 hex锛?
  */
 export function calculateTXID(tx: Transaction): string {
-  const hash = getTXHash(tx);
-
-  // 鍙栧墠8瀛楄妭锛岃浆涓哄崄鍏繘鍒?
-  let txid = '';
-  for (let i = 0; i < 8; i++) {
-    txid += hash[i].toString(16).padStart(2, '0');
-  }
-
-  return txid;
+  return calculateCanonicalTXID(tx);
 }
 
 // ============================================================================
@@ -524,6 +508,7 @@ export function getTXCerHash(txCer: TxCertificate): number[] {
   // 灏嗙鍚嶅瓧娈佃涓洪浂鍊?{R: null, S: null}
   copy.GuarGroupSignature = { R: null, S: null };
   copy.UserSignature = { R: null, S: null };
+  copy.SettlementAuth = zeroSettlementAuth();
 
   // JSON 搴忓垪鍖栵紝鎶?X/Y/R/S 鐨勫紩鍙峰幓鎺?
   let jsonStr = JSON.stringify(copy);
@@ -556,13 +541,14 @@ export function signTXCer(
     ...txCer,
     GuarGroupSignature: { R: null, S: null },
     UserSignature: { R: null, S: null },
-    UserSignatureV2: { Algorithm: '', Signature: null }
+    UserSignatureV2: { Algorithm: '', Signature: null },
+    SettlementAuth: zeroSettlementAuth()
   });
   signedTxCer.UserSignatureV2 = signHashEnvelope(AlgorithmECDSAP256, hash, accountPrivateKeyHex);
+  signedTxCer.SettlementAuth = zeroSettlementAuth();
 
   return signedTxCer;
 }
-
 
 // ============================================================================
 // 鍏挜宸ュ叿鍑芥暟
@@ -1668,6 +1654,8 @@ export async function buildTransaction(
     Data: []
   };
 
+  attachSettlementAuths(transaction, accountPrivKey);
+
   transaction.UserSignatureV2 = signHashEnvelope(
     AlgorithmECDSAP256,
     hashBackendJson({
@@ -1760,10 +1748,10 @@ export async function queryTXStatus(
   groupID: string,
   assignNodeUrl?: string
 ): Promise<TXStatusResponse> {
-  const { API_BASE_URL, API_ENDPOINTS } = await import('./api');
+  const { API_BASE_URL, API_ENDPOINTS, buildApiUrl } = await import('./api');
 
   const baseUrl = assignNodeUrl || API_BASE_URL;
-  const url = baseUrl + API_ENDPOINTS.ASSIGN_TX_STATUS(groupID, txID);
+  const url = buildApiUrl(baseUrl, API_ENDPOINTS.ASSIGN_TX_STATUS(groupID, txID));
 
   console.log('[浜ゆ槗鐘舵€佹煡璇 URL:', url);
 
@@ -2038,11 +2026,11 @@ export async function submitTransaction(
   groupID: string,
   assignNodeUrl?: string
 ): Promise<{ success: boolean; tx_id?: string; error?: string; errorCode?: string }> {
-  const { API_BASE_URL, API_ENDPOINTS } = await import('./api');
+  const { API_BASE_URL, API_ENDPOINTS, buildApiUrl } = await import('./api');
 
   // 濡傛灉鎻愪緵浜?AssignNode URL锛屽垯浣跨敤瀹冿紱鍚﹀垯浣跨敤榛樿鐨?API_BASE_URL
   const baseUrl = assignNodeUrl || API_BASE_URL;
-  const url = baseUrl + API_ENDPOINTS.ASSIGN_SUBMIT_TX(groupID);
+  const url = buildApiUrl(baseUrl, API_ENDPOINTS.ASSIGN_SUBMIT_TX(groupID));
   const body = serializeUserNewTX(userNewTX);
 
   console.log('[浜ゆ槗鎻愪氦] AssignNode URL:', assignNodeUrl || '(using default API_BASE_URL)');

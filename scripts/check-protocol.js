@@ -19,8 +19,12 @@ const contentSource = read('src/content/index.ts');
 const backgroundSource = read('src/background/index.ts');
 const dappTxRequestSource = read('src/core/dappTxRequest.ts');
 const apiSource = read('src/core/api.ts');
+const blockchainSource = read('src/core/blockchain.ts');
+const signatureSource = read('src/core/signature.ts');
 const accountPollingSource = read('src/core/accountPolling.ts');
 const txCerStatusSource = read('src/core/txCerStatus.ts');
+const settlementAuthSource = read('src/core/settlementAuth.ts');
+const txHashSource = read('src/core/txHash.ts');
 const txBuilderSource = read('src/core/txBuilder.ts');
 const transferSource = read('src/core/transfer.ts');
 const sendPageSource = read('src/popup/pages/send.ts');
@@ -92,6 +96,12 @@ for (const marker of ['ASSIGN_TXCER_STATUSES', 'ASSIGN_TXCER_STATUS', 'ASSIGN_TX
   }
 }
 
+for (const marker of ['VITE_PANGU_API_BASE_URL', 'getBuildTimeApiBaseUrl', 'normalizeBaseUrl']) {
+  if (!apiSource.includes(marker)) {
+    fail(`API config is missing service-worker build-time API override marker ${marker}.`);
+  }
+}
+
 for (const marker of ['ASSIGN_TXCER_CHANGE', 'ASSIGN_TXCER_STATUSES', 'ASSIGN_TXCER_STATUS_CHANGE']) {
   if (!accountPollingSource.includes(marker)) {
     fail(`account polling is missing TXCer lifecycle/compatibility sync marker ${marker}.`);
@@ -118,6 +128,22 @@ if (!txBuilderSource.includes('isTXCerSpendable(user, txCerId)')) {
   fail('txBuilder can still select TXCer without authoritative Active lifecycle status.');
 }
 
+if (
+  txBuilderSource.includes('baseUrl + API_ENDPOINTS.ASSIGN_SUBMIT_TX') ||
+  txBuilderSource.includes('baseUrl + API_ENDPOINTS.ASSIGN_TX_STATUS')
+) {
+  fail('txBuilder must use buildApiUrl for AssignNode submit/status URLs to avoid double-slash empty JSON responses.');
+}
+
+for (const marker of [
+  'buildApiUrl(baseUrl, API_ENDPOINTS.ASSIGN_SUBMIT_TX(groupID))',
+  'buildApiUrl(baseUrl, API_ENDPOINTS.ASSIGN_TX_STATUS(groupID, txID))',
+]) {
+  if (!txBuilderSource.includes(marker)) {
+    fail(`txBuilder AssignNode URL construction is missing ${marker}.`);
+  }
+}
+
 if (!transferSource.includes('isTXCerSpendable(account, id)')) {
   fail('transfer locking can still lock/spend TXCer without authoritative Active lifecycle status.');
 }
@@ -128,6 +154,40 @@ if (!sendPageSource.includes('sumSpendableTXCerValue(account, txCers)')) {
 
 if (!homePageSource.includes('sumSpendableTXCerValue(account')) {
   fail('home page balance does not use authoritative TXCer lifecycle availability.');
+}
+
+for (const marker of ['export interface SettlementAuth', 'SourcePledgeAddress', 'SettlementAuth?: SettlementAuth']) {
+  if (!blockchainSource.includes(marker)) {
+    fail(`blockchain types are missing ${marker}.`);
+  }
+}
+
+if (!signatureSource.includes("'ConsumeIntentHash'")) {
+  fail('ConsumeIntentHash must be serialized as a Go []byte/base64 field.');
+}
+
+for (const marker of ['zeroSettlementAuth', 'getSettlementIntentHash', 'buildSettlementAuth', 'attachSettlementAuths']) {
+  if (!settlementAuthSource.includes(marker)) {
+    fail(`settlementAuth helper module is missing TXCer SettlementAuth helper ${marker}.`);
+  }
+}
+
+if (!settlementAuthSource.includes('SettlementAuth: buildSettlementAuth')) {
+  fail('settlementAuth helper module does not attach SettlementAuth to consumed TXCers.');
+}
+
+if (!txHashSource.includes("obj.UserSignatureV2 = { Algorithm: '', Signature: null }")) {
+  fail('TXID hashing must exclude transaction UserSignatureV2.');
+}
+if (!txHashSource.includes('TXInputsNormal: filteredInputs')) {
+  fail('TXID hashing must mirror Go GetTXHash canonical empty-slice behavior.');
+}
+
+const attachIndex = txBuilderSource.indexOf('attachSettlementAuths(transaction, accountPrivKey);');
+const signIndex = txBuilderSource.indexOf('transaction.UserSignatureV2 = signHashEnvelope', attachIndex);
+const txidIndex = txBuilderSource.indexOf('transaction.TXID = calculateTXID(transaction)', signIndex);
+if (attachIndex < 0 || signIndex <= attachIndex || txidIndex <= signIndex) {
+  fail('TXCer SettlementAuth must be attached before transaction UserSignatureV2 and TXID calculation.');
 }
 
 if (process.exitCode) {

@@ -22,12 +22,27 @@ const DEV_MODE = getRuntimeDevFlag();
 const DEFAULT_DEV_BASE_URL = 'http://localhost:3001';
 const DEFAULT_PROD_BASE_URL = 'http://47.243.174.71:3001';
 
+function normalizeBaseUrl(value: string): string {
+    return value.trim().replace(/\/$/, '');
+}
+
+function getBuildTimeApiBaseUrl(): string {
+    const metaEnv = (import.meta as unknown as { env?: Record<string, unknown> }).env;
+    const raw = metaEnv?.VITE_PANGU_API_BASE_URL;
+    return typeof raw === 'string' && raw.trim() ? normalizeBaseUrl(raw) : '';
+}
+
 function getApiBaseUrl(): string {
     if (typeof window !== 'undefined') {
         const override = (window as any).__API_BASE_URL__ || (window as any).__PANGU_API_BASE_URL__;
         if (typeof override === 'string' && override.trim()) {
-            return override.trim().replace(/\/$/, '');
+            return normalizeBaseUrl(override);
         }
+    }
+
+    const buildTimeOverride = getBuildTimeApiBaseUrl();
+    if (buildTimeOverride) {
+        return buildTimeOverride;
     }
 
     if (DEV_MODE) {

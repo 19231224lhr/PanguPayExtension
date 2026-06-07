@@ -9,7 +9,14 @@
         "preview": "vite preview",
         "check:api": "node scripts/check-api-compat.js",
         "check:dapp": "node --experimental-strip-types scripts/check-dapp-tx-request.mjs",
-        "check:protocol": "node scripts/check-protocol.js"
+        "check:protocol": "node scripts/check-protocol.js",
+        "check:settlement-fixture": "node scripts/check-settlement-fixture.js",
+        "check:browser-smoke": "node scripts/check-extension-browser-smoke.js",
+        "check:dapp-browser-smoke": "node scripts/check-dapp-browser-smoke.js",
+        "check:dapp-tx-browser-smoke": "node scripts/check-dapp-tx-browser-smoke.js",
+        "check:dapp-tx-approve-browser-smoke": "node scripts/check-dapp-tx-approve-browser-smoke.js",
+        "check:dapp-tx-approve-local-api-smoke": "node scripts/check-dapp-tx-approve-local-api-smoke.js",
+        "check:dapp-tx-real-backend-e2e": "node scripts/check-dapp-tx-real-backend-e2e.js"
     },
     "dependencies": {
         "crypto-js": "^4.2.0",
