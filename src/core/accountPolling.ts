@@ -20,7 +20,7 @@ import {
     type UserAccount,
 } from './storage';
 import { COIN_NAMES } from './types';
-import type { TxCertificate, TXCerStatusView, UTXOData } from './blockchain';
+import type { TxCertificate, TXCerIssueProof, TXCerIssuanceMetadata, TXCerStatusView, UTXOData } from './blockchain';
 import { cacheTXCerUpdate, shouldBlockTXCerUpdate, unlockTXCers } from './txCerLockManager';
 import { applyTXCerStatus, markTXCerActive } from './txCerStatus';
 import { unlockUTXOs } from './utxoLock';
@@ -53,6 +53,11 @@ interface TXCerChangeToUser {
 interface TXCerToUser {
     ToAddress: string;
     TXCer: TxCertificate;
+    IssuanceRecordID?: string;
+    IssuanceStatus?: string;
+    IssuanceProof?: TXCerIssueProof;
+    IssueBatchID?: string;
+    DeliveredAt?: number;
 }
 
 interface UsedTXCerChangeData {
@@ -415,9 +420,29 @@ function processTxCerToUser(account: UserAccount, item: TXCerToUser): void {
     const store = account.txCerStore || {};
     store[item.TXCer.TXCerID] = item.TXCer;
     account.txCerStore = store;
+    const issuanceMetadata = extractTXCerIssuanceMetadata(item);
+    if (issuanceMetadata) {
+        account.txCerIssuanceRecords = {
+            ...(account.txCerIssuanceRecords || {}),
+            [item.TXCer.TXCerID]: issuanceMetadata,
+        };
+    }
     markTXCerActive(account, item.TXCer.TXCerID, normalized, item.TXCer.Value);
 
     recalcAddressBalance(info);
+}
+
+function extractTXCerIssuanceMetadata(item: TXCerToUser): TXCerIssuanceMetadata | null {
+    if (!item.IssuanceRecordID) {
+        return null;
+    }
+    return {
+        issuanceRecordID: item.IssuanceRecordID,
+        issuanceStatus: item.IssuanceStatus,
+        issuanceProof: item.IssuanceProof,
+        issueBatchID: item.IssueBatchID || item.IssuanceProof?.BatchID,
+        deliveredAt: item.DeliveredAt,
+    };
 }
 
 async function syncTXCerStatuses(force = false): Promise<void> {

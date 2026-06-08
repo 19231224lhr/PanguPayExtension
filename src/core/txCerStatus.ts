@@ -63,6 +63,7 @@ export function sumSpendableTXCerValue(account: UserAccount, txCers: Record<stri
 
 export function removeTXCerFromSpendableStores(account: UserAccount, txCerID: string): void {
     delete account.txCerStore?.[txCerID];
+    delete account.txCerIssuanceRecords?.[txCerID];
     for (const info of Object.values(account.addresses || {})) {
         if (info?.txCers && info.txCers[txCerID] !== undefined) {
             delete info.txCers[txCerID];

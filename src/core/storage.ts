@@ -4,7 +4,7 @@
  * 将 localStorage 操作替换为 chrome.storage.local
  */
 
-import type { PublicKeyEnvelope, TxCertificate, TXCerStatusView, UTXOData } from './blockchain';
+import type { PublicKeyEnvelope, TxCertificate, TXCerIssuanceMetadata, TXCerStatusView, UTXOData } from './blockchain';
 import { decryptJsonPayload, encryptJsonPayload, type EncryptedKeyData } from './keyEncryption';
 import {
     AlgorithmECDSAP256,
@@ -86,6 +86,7 @@ export interface UserAccount {
     defaultAddress?: string;
     txCerStore?: Record<string, TxCertificate>;
     txCerStatuses?: Record<string, TXCerStatusView>;
+    txCerIssuanceRecords?: Record<string, TXCerIssuanceMetadata>;
     organizationId?: string;
     organizationName?: string;
     onboardingComplete?: boolean;
@@ -474,6 +475,7 @@ export function normalizeAccountForStorage(account: UserAccount): UserAccount {
         addresses: {},
         txCerStore: { ...(account.txCerStore || {}) },
         txCerStatuses: { ...(account.txCerStatuses || {}) },
+        txCerIssuanceRecords: { ...(account.txCerIssuanceRecords || {}) },
         totalBalance: { 0: 0, 1: 0, 2: 0, ...(account.totalBalance || {}) },
     };
     for (const [rawAddress, info] of Object.entries(account.addresses || {})) {
@@ -572,6 +574,10 @@ export async function clearStaleTxCerData(accountId?: string): Promise<void> {
         }
         if (account.txCerStatuses && Object.keys(account.txCerStatuses).length > 0) {
             account.txCerStatuses = {};
+            accountChanged = true;
+        }
+        if (account.txCerIssuanceRecords && Object.keys(account.txCerIssuanceRecords).length > 0) {
+            account.txCerIssuanceRecords = {};
             accountChanged = true;
         }
 
