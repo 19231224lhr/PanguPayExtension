@@ -16,6 +16,7 @@
         "check:dapp-tx-browser-smoke": "node scripts/check-dapp-tx-browser-smoke.js",
         "check:dapp-tx-approve-browser-smoke": "node scripts/check-dapp-tx-approve-browser-smoke.js",
         "check:dapp-tx-approve-local-api-smoke": "node scripts/check-dapp-tx-approve-local-api-smoke.js",
+        "check:real-backend-protocol": "node scripts/check-real-backend-protocol.js",
         "check:dapp-tx-real-backend-e2e": "node scripts/check-dapp-tx-real-backend-e2e.js"
     },
     "dependencies": {

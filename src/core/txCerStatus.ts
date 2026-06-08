@@ -39,7 +39,7 @@ export function markTXCerActive(account: UserAccount, txCerID: string, address: 
 }
 
 type TXCerStatusOwner = (Partial<UserAccount> & {
-    wallet?: { txCerStatuses?: Record<string, TXCerStatusView> };
+    wallet?: { txCerStatuses?: Record<string, TXCerStatusView>; txCerIssuanceRecords?: UserAccount['txCerIssuanceRecords'] };
 }) | null | undefined;
 
 function readTXCerStatusStore(owner: TXCerStatusOwner): Record<string, TXCerStatusView> | undefined {
@@ -51,7 +51,8 @@ export function getTXCerStatus(account: TXCerStatusOwner, txCerID: string): TXCe
 }
 
 export function isTXCerSpendable(account: TXCerStatusOwner, txCerID: string): boolean {
-    return getTXCerStatus(account, txCerID) === 'Active' && !isTXCerLocked(txCerID);
+    const proofStatus = account?.txCerIssuanceRecords?.[txCerID]?.proofStatus || account?.wallet?.txCerIssuanceRecords?.[txCerID]?.proofStatus;
+    return getTXCerStatus(account, txCerID) === 'Active' && proofStatus !== 'invalid' && !isTXCerLocked(txCerID);
 }
 
 export function sumSpendableTXCerValue(account: UserAccount, txCers: Record<string, number> | undefined): number {
@@ -63,7 +64,6 @@ export function sumSpendableTXCerValue(account: UserAccount, txCers: Record<stri
 
 export function removeTXCerFromSpendableStores(account: UserAccount, txCerID: string): void {
     delete account.txCerStore?.[txCerID];
-    delete account.txCerIssuanceRecords?.[txCerID];
     for (const info of Object.values(account.addresses || {})) {
         if (info?.txCers && info.txCers[txCerID] !== undefined) {
             delete info.txCers[txCerID];

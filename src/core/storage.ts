@@ -576,11 +576,6 @@ export async function clearStaleTxCerData(accountId?: string): Promise<void> {
             account.txCerStatuses = {};
             accountChanged = true;
         }
-        if (account.txCerIssuanceRecords && Object.keys(account.txCerIssuanceRecords).length > 0) {
-            account.txCerIssuanceRecords = {};
-            accountChanged = true;
-        }
-
         for (const info of Object.values(account.addresses || {})) {
             if (!info) continue;
             if (info.txCers && Object.keys(info.txCers).length > 0) {

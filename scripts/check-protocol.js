@@ -21,8 +21,12 @@ const dappTxRequestSource = read('src/core/dappTxRequest.ts');
 const apiSource = read('src/core/api.ts');
 const blockchainSource = read('src/core/blockchain.ts');
 const signatureSource = read('src/core/signature.ts');
+const storageSource = read('src/core/storage.ts');
 const accountPollingSource = read('src/core/accountPolling.ts');
 const txCerStatusSource = read('src/core/txCerStatus.ts');
+const txCerIssuanceProofSource = read('src/core/txCerIssuanceProof.ts');
+const txCerIssuanceSource = read('src/core/txCerIssuance.ts');
+const protocolDiagnosticsSource = read('src/core/protocolDiagnostics.ts');
 const settlementAuthSource = read('src/core/settlementAuth.ts');
 const txHashSource = read('src/core/txHash.ts');
 const txBuilderSource = read('src/core/txBuilder.ts');
@@ -90,9 +94,29 @@ if (!backgroundSource.includes('useRequestWideMeta ? request.publicKey')) {
   fail('DApp recipient enrichment does not apply request-wide metadata for single-recipient requests.');
 }
 
-for (const marker of ['ASSIGN_TXCER_STATUSES', 'ASSIGN_TXCER_STATUS', 'ASSIGN_TXCER_STATUS_CHANGE']) {
+for (const marker of [
+  'ASSIGN_TXCER_STATUSES',
+  'ASSIGN_TXCER_STATUS',
+  'ASSIGN_TXCER_STATUS_CHANGE',
+  'ASSIGN_SCHEDULER_STATS',
+  'ASSIGN_SCHEDULER_DAG_RECORDS',
+  'ASSIGN_SCHEDULER_DAG_EVENTS',
+  'AGGR_TXCER_ISSUANCE_RECORDS',
+  'AGGR_TXCER_ISSUANCE_RECORD',
+  'AGGR_TXCER_ISSUANCE_BATCH',
+  'ASSIGN_AUDIT_EVENTS',
+  'ASSIGN_CHALLENGES',
+  'ASSIGN_PENALTIES',
+  'ASSIGN_CERTIFIERS',
+  'AGGR_AUDIT_EVENTS',
+  'AGGR_CHALLENGES',
+  'AGGR_CERTIFIERS',
+  'AGGR_CERTIFIER_STATS',
+  'AGGR_CERTIFIER_PENDING_REQUESTS',
+  'COM_CHALLENGES',
+]) {
   if (!apiSource.includes(marker)) {
-    fail(`API config is missing TXCer lifecycle endpoint ${marker}.`);
+    fail(`API config is missing TXCer endpoint ${marker}.`);
   }
 }
 
@@ -116,12 +140,79 @@ if (!accountPollingSource.includes('applyTXCerStatus')) {
   fail('account polling does not write authoritative lifecycle status into local account state.');
 }
 
-if (!txCerStatusSource.includes("getTXCerStatus(account, txCerID) === 'Active' && !isTXCerLocked(txCerID)")) {
-  fail('TXCer spendable helper must require authoritative Active status plus local construction lock.');
+if (!txCerStatusSource.includes("getTXCerStatus(account, txCerID) === 'Active'") || !txCerStatusSource.includes("proofStatus !== 'invalid'") || !txCerStatusSource.includes('!isTXCerLocked(txCerID)')) {
+  fail('TXCer spendable helper must require authoritative Active status, non-invalid proof, and local construction lock.');
 }
 
 if (!txCerStatusSource.includes('TXCER_TERMINAL_STATUSES.includes(view.status)')) {
   fail('terminal TXCer lifecycle states must remove TXCer from spendable stores.');
+}
+
+if (txCerStatusSource.includes('delete account.txCerIssuanceRecords?.[txCerID]')) {
+  fail('terminal TXCer removal must preserve issuance metadata for audit/history.');
+}
+
+if (/account\.txCerIssuanceRecords\s*=\s*\{\s*\}/.test(storageSource)) {
+  fail('stale TXCer cleanup must preserve issuance metadata for audit/history.');
+}
+
+for (const marker of [
+  'buildTXCerIssueKey',
+  'buildTXCerIssuanceRecordID',
+  'buildTXCerIssueLeaf',
+  'computeDirectionalMerkleRoot',
+  'verifyTXCerIssueProof',
+  "['Signature', 'RecordIDs', 'CreatedAt']",
+  'certifier mismatch',
+]) {
+  if (!txCerIssuanceProofSource.includes(marker)) {
+    fail(`TXCer issuance proof helper is missing ${marker}.`);
+  }
+}
+
+for (const marker of [
+  'fetchTXCerIssuanceRecords',
+  'fetchTXCerIssuanceRecord',
+  'fetchTXCerIssuanceBatch',
+  'fetchAggrCertifiers',
+  'fetchAssignCertifiers',
+  'fetchAggrCertifierStats',
+  'fetchAggrCertifierPendingRequests',
+  'certifierPublicKeyFromRegistry',
+  'buildTXCerIssuanceMetadataFromRegistry',
+  'buildTXCerIssuanceMetadata',
+  'evaluateTXCerIssueProof',
+]) {
+  if (!txCerIssuanceSource.includes(marker)) {
+    fail(`TXCer issuance query helper is missing ${marker}.`);
+  }
+}
+
+for (const marker of [
+  'export interface TxTaskDAGEvent',
+  'export interface TxTaskDAGRecord',
+  'export interface SchedulerStatsResponse',
+  'export interface CertifierIssueBatchRequest',
+]) {
+  if (!blockchainSource.includes(marker)) {
+    fail(`blockchain types are missing scheduler/certifier marker ${marker}.`);
+  }
+}
+
+for (const marker of [
+  'fetchAssignSchedulerStats',
+  'fetchAssignSchedulerDAGRecords',
+  'fetchAssignSchedulerDAGEvents',
+  'fetchAssignAuditEvents',
+  'fetchAggrAuditEvents',
+  'fetchAssignChallenges',
+  'fetchAggrChallenges',
+  'fetchComChallenges',
+  'fetchAssignPenalties',
+]) {
+  if (!protocolDiagnosticsSource.includes(marker)) {
+    fail(`protocol diagnostics helper is missing ${marker}.`);
+  }
 }
 
 if (!txBuilderSource.includes('isTXCerSpendable(user, txCerId)')) {
@@ -162,8 +253,20 @@ for (const marker of ['export interface SettlementAuth', 'SourcePledgeAddress', 
   }
 }
 
-if (!signatureSource.includes("'ConsumeIntentHash'")) {
-  fail('ConsumeIntentHash must be serialized as a Go []byte/base64 field.');
+for (const marker of ['export interface CommitteeReceipt', 'export interface PenaltyRecord', "'PendingGovernance'", "'TXCerIssuanceBatch'"]) {
+  if (!blockchainSource.includes(marker)) {
+    fail(`blockchain types are missing committee/penalty marker ${marker}.`);
+  }
+}
+
+for (const marker of ["'ConsumeIntentHash'", "'LeafHash'", "'MerkleRoot'", "'Hash'", "'Root'"]) {
+  if (!signatureSource.includes(marker)) {
+    fail(`${marker} must be serialized as a Go []byte/base64 field.`);
+  }
+}
+
+if (!signatureSource.includes("field === 'Signature'")) {
+  fail('Signature must be zeroed as ECDSA signature when excluded for TXCer issuance batch verification.');
 }
 
 for (const marker of ['zeroSettlementAuth', 'getSettlementIntentHash', 'buildSettlementAuth', 'attachSettlementAuths']) {
