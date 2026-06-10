@@ -95,6 +95,10 @@ if (!backgroundSource.includes('useRequestWideMeta ? request.publicKey')) {
 }
 
 for (const marker of [
+  'COMMITTEE_QC_STATUS',
+  'COMMITTEE_QC_PROPOSALS',
+  'COMMITTEE_QC_QCS',
+  'COMMITTEE_QC_FINALIZED_BLOCK',
   'ASSIGN_TXCER_STATUSES',
   'ASSIGN_TXCER_STATUS',
   'ASSIGN_TXCER_STATUS_CHANGE',
@@ -193,6 +197,8 @@ for (const marker of [
   'export interface TxTaskDAGRecord',
   'export interface SchedulerStatsResponse',
   'export interface CertifierIssueBatchRequest',
+  'export interface CommitteeQCStatus',
+  'export interface CommitteeQC',
 ]) {
   if (!blockchainSource.includes(marker)) {
     fail(`blockchain types are missing scheduler/certifier marker ${marker}.`);
@@ -201,6 +207,10 @@ for (const marker of [
 
 for (const marker of [
   'fetchAssignSchedulerStats',
+  'fetchCommitteeQCStatus',
+  'fetchCommitteeQCProposals',
+  'fetchCommitteeQCs',
+  'fetchCommitteeQCFinalizedBlock',
   'fetchAssignSchedulerDAGRecords',
   'fetchAssignSchedulerDAGEvents',
   'fetchAssignAuditEvents',
