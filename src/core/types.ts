@@ -51,7 +51,7 @@ export interface TXInputNormal {
 export interface InterestAssign {
     Gas: number;
     Output: number;
-    BackAssign: Record<string, number>;
+    BackAssign: Record<string, number | string>;
 }
 
 export interface Transaction {
