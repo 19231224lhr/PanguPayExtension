@@ -2,7 +2,8 @@
  * Account query helpers aligned with frontend logic.
  */
 
-import type { InterestAssign, TXInputNormal, TXOutput, TxCertificate, UTXOData } from './blockchain';
+import type { InterestAssign, ProtocolAmount, TXInputNormal, TXOutput, TxCertificate, UTXOData } from './blockchain';
+import { toAmountNumber, toAmountWire } from './amount';
 import {
     API_ENDPOINTS,
     apiClient,
@@ -26,7 +27,7 @@ export interface QueryTxPosition {
 
 export interface QueryUTXOData {
     UTXO?: Record<string, unknown>;
-    Value: number;
+    Value: ProtocolAmount;
     Type: number;
     Time?: number;
     Position?: QueryTxPosition;
@@ -34,7 +35,7 @@ export interface QueryUTXOData {
 }
 
 export interface PointAddressData {
-    Value: number;
+    Value: ProtocolAmount;
     Type: number;
     Interest: number;
     GroupID: string;
@@ -86,17 +87,18 @@ function normalizeAddress(address: string): string {
 }
 
 function normalizeAddressData(address: string, data: PointAddressData): AddressBalanceInfo {
+    const value = toAmountNumber(data.Value || 0);
     const exists =
-        data.Value > 0 ||
+        value > 0 ||
         data.Interest > 0 ||
         data.LastHeight > 0 ||
         Object.keys(data.UTXO || {}).length > 0;
 
     return {
         address,
-        balance: data.Value || 0,
+        balance: value,
         interest: data.Interest || 0,
-        totalAssets: (data.Value || 0) + (data.Interest || 0),
+        totalAssets: value + (data.Interest || 0),
         type: data.Type || 0,
         groupID: data.GroupID || '',
         isInGroup: !!(data.GroupID && data.GroupID !== '' && data.GroupID !== '1'),
@@ -181,10 +183,10 @@ export function convertToStorageUTXO(
             TXOutputs: [
                 {
                     ToAddress: address,
-                    ToValue: queryUtxo.Value,
+                    ToValue: toAmountWire(queryUtxo.Value),
                     ToGuarGroupID: '',
                     ToPublicKey: { Curve: 'P256' },
-                    ToInterest: 0,
+                    ToInterest: toAmountWire(0),
                     Type: queryUtxo.Type,
                     ToCoinType: queryUtxo.Type,
                     ToPeerID: '',
@@ -193,7 +195,7 @@ export function convertToStorageUTXO(
                     IsGuarMake: false,
                 },
             ],
-            InterestAssign: { Gas: 0, Output: 0, BackAssign: {} },
+            InterestAssign: { Gas: toAmountWire(0), Output: toAmountWire(0), BackAssign: {} },
             ExTXCerID: [],
             Data: [],
         },

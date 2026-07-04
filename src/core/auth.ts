@@ -18,6 +18,7 @@ import {
     type PublicKeyEnvelope,
     type PublicKeyNew,
 } from './signature';
+import { toAmountNumber } from './amount';
 
 export interface UserReOnlineMsg {
     UserID: string;
@@ -244,13 +245,13 @@ export async function syncAccountFromReOnline(
             typeof valuePayload === 'number'
                 ? valuePayload
                 : Number(valuePayload?.UTXOValue ?? valuePayload?.utxoValue ?? 0) || 0;
-        const computedUtxoValue = Object.values(utxos).reduce((sum, utxo) => sum + (utxo?.Value || 0), 0);
+        const computedUtxoValue = Object.values(utxos).reduce((sum, utxo) => sum + toAmountNumber(utxo?.Value || 0), 0);
         const utxoValue = rawUtxoValue || computedUtxoValue;
         const txCerValue =
             typeof valuePayload === 'number'
                 ? 0
                 : Number(valuePayload?.TXCerValue ?? valuePayload?.txCerValue ?? 0) ||
-                  Object.values(txCers).reduce((sum, val) => sum + Number(val || 0), 0);
+                  Object.values(txCers).reduce((sum, val) => sum + toAmountNumber(val || 0), 0);
         const normalizedPub = normalizePublicKey(payload.PublicKeyNew);
         let pubXHex = normalizePubHex(existing.pubXHex) || (normalizedPub ? bigIntToHex(normalizedPub.X) : undefined);
         let pubYHex = normalizePubHex(existing.pubYHex) || (normalizedPub ? bigIntToHex(normalizedPub.Y) : undefined);

@@ -1,3 +1,7 @@
+import type { AmountInput } from './amount';
+
+export type ProtocolAmount = AmountInput;
+
 /**
  * 类型定义
  */
@@ -26,10 +30,10 @@ export interface TxPosition {
 
 export interface TXOutput {
     ToAddress: string;
-    ToValue: number;
+    ToValue: ProtocolAmount;
     ToGuarGroupID: string;
     ToPublicKey: PublicKeyNewJSON;
-    ToInterest: number;
+    ToInterest: ProtocolAmount;
     Type: number;
     ToPeerID: string;
     IsPayForGas: boolean;
@@ -49,8 +53,8 @@ export interface TXInputNormal {
 }
 
 export interface InterestAssign {
-    Gas: number;
-    Output: number;
+    Gas: ProtocolAmount;
+    Output: ProtocolAmount;
     BackAssign: Record<string, number | string>;
 }
 
@@ -60,10 +64,10 @@ export interface Transaction {
     Version: number;
     GuarantorGroup: string;
     TXType: number;
-    Value: number;
-    ValueDivision: Record<number, number>;
-    NewValue: number;
-    NewValueDiv: Record<number, number>;
+    Value: ProtocolAmount;
+    ValueDivision: Record<number, ProtocolAmount>;
+    NewValue: ProtocolAmount;
+    NewValueDiv: Record<number, ProtocolAmount>;
     InterestAssign: InterestAssign;
     UserSignature: EcdsaSignatureJSON;
     TXInputsNormal: TXInputNormal[];
@@ -86,7 +90,7 @@ export interface UserNewTX {
 export interface UTXOData {
     txId: string;
     position: TxPosition;
-    value: number;
+    value: ProtocolAmount;
     address: string;
     coinType: number;
     locked?: boolean;

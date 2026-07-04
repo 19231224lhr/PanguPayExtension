@@ -25,6 +25,7 @@ import { cacheTXCerUpdate, shouldBlockTXCerUpdate, unlockTXCers } from './txCerL
 import { applyTXCerStatus, markTXCerActive } from './txCerStatus';
 import { unlockUTXOs } from './utxoLock';
 import { notifyDappTxStatus } from './dappTxStatus';
+import { toAmountNumber } from './amount';
 
 type TxStatusPayload = {
     tx_id: string;
@@ -185,8 +186,8 @@ function dispatchHistoryUpdate(accountId: string, txHash: string, status: string
 
 function recalcAddressBalance(info: AddressInfo): void {
     const utxos = info.utxos || {};
-    const txCerValue = Object.values(info.txCers || {}).reduce((sum, value) => sum + (value || 0), 0);
-    const utxoValue = Object.values(utxos).reduce((sum, utxo) => sum + (utxo?.Value || 0), 0);
+    const txCerValue = Object.values(info.txCers || {}).reduce((sum, value) => sum + toAmountNumber(value || 0), 0);
+    const utxoValue = Object.values(utxos).reduce((sum, utxo) => sum + toAmountNumber(utxo?.Value || 0), 0);
     info.balance = utxoValue;
     info.utxoCount = Object.keys(utxos).length;
     info.txCerCount = Object.keys(info.txCers || {}).length;
