@@ -210,6 +210,15 @@ await window.pangu.sendTransaction({
 
 `sendTransaction()` 返回 `submitted` 表示后端已经接收提交请求。组织交易会继续通过 `txStatus` 事件通知最终 `success` 或 `failed`。普通无组织交易目前以后端现有能力为准，后端没有提供最终状态查询接口，因此不会伪造最终成功事件。
 
+当前插件交易构造会同时检查：
+
+- 后端 TXCer lifecycle 是否为 `Active`。
+- 本地 TXCer 是否被构造锁占用。
+- CFAA issuance proof 是否明确为 `invalid`。
+- 使用 TXCer 时是否能构造有效 `SettlementAuth`。
+
+DApp 不需要自己选择 TXCer，也不能绕过这些判断。
+
 ### 4.6 监听事件
 
 ```javascript

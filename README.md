@@ -22,10 +22,11 @@ PanguPay 是盘古 UTXO 区块链系统的官方浏览器钱包扩展，参考 M
 |:-----|:-----|
 | 账户管理 | 创建/导入钱包，密码加密存储 |
 | 资产查看 | PGC/BTC/ETH 多币种余额展示 |
-| 快速转账 | 组织内即时确认（TXCer 特色） |
+| 快速转账 | 组织内 TXCer 可流通预确认，支持 TXCer 再消费 |
 | 跨链交易 | BTC/ETH 跨链桥接转账 |
 | 担保组织 | 加入/退出担保组织 |
 | DApp 连接与交易 | 标准 `window.pangu` API，支持交易确认与状态事件 |
+| 协议对齐 | 支持 TXCer lifecycle、SettlementAuth、CFAA issuance proof 和 certifier registry |
 
 ---
 
@@ -75,10 +76,16 @@ PanguPayExtension/
 │   │   ├── pages/          # 各页面组件
 │   │   └── styles/         # 样式文件
 │   └── core/               # 核心业务逻辑
-│       ├── signature.ts    # 签名算法
-│       ├── storage.ts      # 存储适配
-│       ├── api.ts          # 后端通信
-│       └── auth.ts         # 认证逻辑
+│       ├── api.ts                    # Gateway endpoint
+│       ├── blockchain.ts             # 后端协议类型
+│       ├── signature.ts              # Go 签名序列化与 P-256 签名
+│       ├── storage.ts                # 扩展存储适配
+│       ├── txBuilder.ts              # 普通/快速/DApp 交易构造
+│       ├── settlementAuth.ts         # TXCer 消费授权
+│       ├── txCerStatus.ts            # TXCer lifecycle 与可用性判断
+│       ├── txCerIssuance.ts          # CFAA issuance 查询
+│       ├── txCerIssuanceProof.ts     # Merkle proof 验证
+│       └── protocolDiagnostics.ts    # CommitteeQC 等诊断接口
 ├── demo/                   # DApp 演示页面
 ├── docs/                   # 文档
 └── dist/                   # 构建产物
@@ -121,12 +128,14 @@ npm run build
 | [开发者接入指南](docs/GUIDE.md) | 网页如何接入钱包、如何使用 Demo 测试 |
 | [DApp 连接技术文档](docs/DAPP_CONNECT.md) | 详细 API 参考、返回值、错误码 |
 
+后端协议以 `UTXO-Area/docs/04-api-integration.md` 为准。插件核心协议文件需要与正式前端 `TransferAreaInterface/js/services` 同步维护。
+
 ---
 
 ## 设计原则
 
 1. **简洁优先**：只保留核心功能，界面简洁
-2. **代码复用**：最大化复用主钱包 TransferAreaInterface 的核心逻辑
+2. **协议一致**：交易构造、SettlementAuth、TXCer 可用性判断与正式前端保持一致
 3. **安全第一**：私钥加密存储，交互式授权
 
 ---
