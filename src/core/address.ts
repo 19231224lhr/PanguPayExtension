@@ -28,15 +28,20 @@ import {
 } from './signature';
 import { buildInitialSeedMetaFromPrivateKey } from './seedChain';
 import {
+    buildAssignAddressRegistrationMaterial,
+    buildRetailAddressOwnershipMaterial,
+    buildRetailAddressRegistrationRequest,
+} from '../protocol-v2';
+import {
     getAccount,
     getAccountSignPublicKeyV2,
     getOrganization,
     getSessionAddressKey,
     getSessionKey,
     hasAddressProtocolMetadata,
+    mutateAccount,
     normalizeAddressDataForStorage,
     publicKeyEnvelopeEquals,
-    saveAccount,
     type OrganizationChoice,
     type UserAccount,
 } from './storage';
@@ -44,12 +49,12 @@ import {
 export interface UserNewAddressInfo {
     NewAddress: string;
     PublicKeyNew: PublicKeyNew;
+    UserID: string;
+    Type: number;
     SignPublicKeyV2: PublicKeyEnvelope;
     SeedAnchor: number[] | string;
     SeedChainStep: number;
     DefaultSpendAlgorithm: string;
-    UserID: string;
-    Type: number;
     Sig?: EcdsaSignature;
 }
 
@@ -70,7 +75,6 @@ export interface RegisterAddressRequest {
     SeedChainStep: number;
     DefaultSpendAlgorithm: string;
     AddressOwnershipSig?: SignatureEnvelope;
-    Sig?: EcdsaSignature;
 }
 
 export interface RegisterAddressResponse {
@@ -205,16 +209,16 @@ export async function createNewAddressOnBackendWithPriv(
             accountPrivHex,
         });
 
-        const requestBody: UserNewAddressInfo = {
-            NewAddress: normalizedAddress,
-            PublicKeyNew: convertHexToPublicKey(pubXHex, pubYHex),
-            SignPublicKeyV2: protocolMeta.signPublicKeyV2,
-            SeedAnchor: protocolMeta.seedAnchor,
-            SeedChainStep: protocolMeta.seedChainStep,
-            DefaultSpendAlgorithm: protocolMeta.defaultSpendAlgorithm,
-            UserID: accountId,
-            Type: addressType,
-        };
+        const requestBody = buildAssignAddressRegistrationMaterial({
+            address: normalizedAddress,
+            publicKeyNew: convertHexToPublicKey(pubXHex, pubYHex),
+            userID: accountId,
+            type: addressType,
+            signPublicKeyV2: protocolMeta.signPublicKeyV2,
+            seedAnchor: protocolMeta.seedAnchor,
+            seedChainStep: protocolMeta.seedChainStep,
+            defaultSpendAlgorithm: protocolMeta.defaultSpendAlgorithm,
+        }) as UserNewAddressInfo;
 
         requestBody.Sig = signStruct(requestBody as unknown as Record<string, unknown>, accountPrivHex, ['Sig']);
 
@@ -284,41 +288,26 @@ export async function registerAddressOnComNode(
             addressPrivHex,
             accountPrivHex,
         });
-        const ownershipPayload = {
-            Address: normalizedAddress,
-            PublicKeyNew: convertHexToPublicKey(pubXHex, pubYHex),
-            GroupID: '',
-            TimeStamp: getTimestamp(),
-            Type: addressType,
-            SignPublicKeyV2: protocolMeta.signPublicKeyV2,
-            SeedAnchor: protocolMeta.seedAnchor,
-            SeedChainStep: protocolMeta.seedChainStep,
-            DefaultSpendAlgorithm: protocolMeta.defaultSpendAlgorithm,
-        };
+        const ownershipPayload = buildRetailAddressOwnershipMaterial({
+            address: normalizedAddress,
+            publicKeyNew: convertHexToPublicKey(pubXHex, pubYHex),
+            timestamp: getTimestamp(),
+            type: addressType,
+            signPublicKeyV2: protocolMeta.signPublicKeyV2,
+            seedAnchor: protocolMeta.seedAnchor,
+            seedChainStep: protocolMeta.seedChainStep,
+            defaultSpendAlgorithm: protocolMeta.defaultSpendAlgorithm,
+        });
         const addressOwnershipSig = signHashEnvelope(
             AlgorithmECDSAP256,
             hashBackendJson(ownershipPayload),
             addressPrivHex
         );
 
-        const requestBody: RegisterAddressRequest = {
-            Address: normalizedAddress,
-            PublicKeyNew: convertHexToPublicKey(pubXHex, pubYHex),
-            GroupID: '',
-            TimeStamp: ownershipPayload.TimeStamp,
-            Type: addressType,
-            SignPublicKeyV2: protocolMeta.signPublicKeyV2,
-            SeedAnchor: protocolMeta.seedAnchor,
-            SeedChainStep: protocolMeta.seedChainStep,
-            DefaultSpendAlgorithm: protocolMeta.defaultSpendAlgorithm,
-            AddressOwnershipSig: addressOwnershipSig,
-        };
-
-        requestBody.Sig = signStruct(
-            requestBody as unknown as Record<string, unknown>,
-            addressPrivHex,
-            ['Sig', 'AddressOwnershipSig']
-        );
+        const requestBody = buildRetailAddressRegistrationRequest(
+            ownershipPayload,
+            addressOwnershipSig
+        ) as RegisterAddressRequest;
 
         const response = await apiClient.request<RegisterAddressResponse>(
             buildApiUrl(comNodeURL, API_ENDPOINTS.COM_REGISTER_ADDRESS),
@@ -717,6 +706,37 @@ export async function registerAddressesOnMainEntry(account: UserAccount): Promis
     }
 
     if (changed) {
-        await saveAccount(account);
+        const registrationPatches = new Map<string, Partial<UserAccount['addresses'][string]>>();
+        for (const rawAddr of addresses) {
+            const addr = normalizeAddress(rawAddr);
+            const current = account.addresses[addr] || account.addresses[rawAddr];
+            if (!current) continue;
+            registrationPatches.set(addr, {
+                publicKeyNew: current.publicKeyNew,
+                signPublicKeyV2: current.signPublicKeyV2,
+                seedAnchor: current.seedAnchor,
+                seedChainStep: current.seedChainStep,
+                defaultSpendAlgorithm: current.defaultSpendAlgorithm,
+                registrationState: current.registrationState,
+                registrationError: current.registrationError,
+                seedLocalState: current.seedLocalState,
+                readOnly: current.readOnly,
+                seedRepairRequired: current.seedRepairRequired,
+                lastProtocolSyncAt: current.lastProtocolSyncAt,
+            });
+        }
+        await mutateAccount(account.accountId, (latest) => {
+            for (const [addr, registrationPatch] of registrationPatches) {
+                const current = latest.addresses[addr];
+                if (!current) continue;
+                latest.addresses[addr] = normalizeAddressDataForStorage(
+                    addr,
+                    { ...current, ...registrationPatch },
+                    latest
+                );
+            }
+            if (!hadErrors) latest.mainAddressRegistered = true;
+            return latest;
+        });
     }
 }

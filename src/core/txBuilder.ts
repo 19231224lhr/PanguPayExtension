@@ -46,7 +46,16 @@ import {
   signStruct,
   type PublicKeyNew as SignaturePublicKey
 } from './signature';
-import { toAmountNumber, toAmountRecordWire, toAmountWire } from './amount';
+import { formatAmount, parseAmount, toAmountWire } from './amount';
+import {
+  canonicalizeTXCerSourceSignatureMaterialV2,
+  computeTransactionHashV2,
+  computeTXOutputHashCompatV2,
+  normalizeTXCerForGoStructJSON,
+  TRANSACTION_PROTOCOL_VERSION
+} from '../protocol-v2/transaction';
+import { canonicalJSONStringify, sha256Bytes } from '../protocol-v2/canonical';
+import { formatRatio, RATIO_SCALE } from '../protocol-v2/amount';
 import { attachSettlementAuths, zeroSettlementAuth } from './settlementAuth';
 import {
   calculateTXID as calculateCanonicalTXID,
@@ -197,12 +206,12 @@ export interface BuildTransactionParams {
   /** 鏀舵鏂逛俊鎭?*/
   recipients: Array<{
     address: string;
-    amount: number;
+    amount: ProtocolAmount;
     coinType: number;           // 0=PGC, 1=BTC, 2=ETH
     publicKeyX: string;         // hex 鏍煎紡
     publicKeyY: string;         // hex 鏍煎紡
     guarGroupID: string;
-    interest?: number;          // 鍒嗛厤鐨勫埄鎭?
+    interest?: ProtocolAmount;  // 鍒嗛厤鐨勫埄鎭?
     seedAnchor?: number[] | string;
     seedChainStep?: number;
     defaultSpendAlgorithm?: string;
@@ -210,13 +219,15 @@ export interface BuildTransactionParams {
   /** 鎵鹃浂鍦板潃锛堟寜甯佺锛?*/
   changeAddresses: Record<number, string>;
   /** Gas 璐?*/
-  gas: number;
+  gas: ProtocolAmount;
   /** 鏄惁璺ㄩ摼浜ゆ槗 */
   isCrossChain?: boolean;
   /** 棰濆 PGC 鍏戞崲 Gas 鐨勬暟閲忥紙鐢ㄤ簬鏀粯浜ゆ槗璐癸級 */
-  howMuchPayForGas?: number;
+  howMuchPayForGas?: ProtocolAmount;
   /** 鏄惁浼樺厛浣跨敤 TXCer锛堜富甯佺 0锛?*/
   preferTXCer?: boolean;
+  /** Draft lock owner created by this transfer; other transfers' locks remain unavailable. */
+  txCerLockOwner?: string;
 }
 
 function normalizeUtxoIdForLockCheck(utxoId: string): { raw: string; normalized: string; backendStyle: string } {
@@ -536,16 +547,9 @@ export function signTXCer(
   txCer: TxCertificate,
   accountPrivateKeyHex: string
 ): TxCertificate {
-  // 娣辨嫹璐?
-  const signedTxCer = JSON.parse(JSON.stringify(txCer, bigintReplacer));
+  const signedTxCer = normalizeTXCerForGoStructJSON(txCer) as TxCertificate;
 
-  const hash = hashBackendJson({
-    ...txCer,
-    GuarGroupSignature: { R: null, S: null },
-    UserSignature: { R: null, S: null },
-    UserSignatureV2: { Algorithm: '', Signature: null },
-    SettlementAuth: zeroSettlementAuth()
-  });
+  const hash = sha256Bytes(canonicalJSONStringify(canonicalizeTXCerSourceSignatureMaterialV2(txCer)));
   signedTxCer.UserSignatureV2 = signHashEnvelope(AlgorithmECDSAP256, hash, accountPrivateKeyHex);
   signedTxCer.SettlementAuth = zeroSettlementAuth();
 
@@ -634,11 +638,7 @@ function toSignaturePublicKey(publicKey: unknown): SignaturePublicKey {
 }
 
 function getOutputHashCompat(output: TXOutput): number[] {
-  const normalizedOutput: Record<string, unknown> = {
-    ...output,
-    SeedAnchor: output.SeedAnchor || []
-  };
-  return hashBackendJson(normalizedOutput);
+  return computeTXOutputHashCompatV2(output);
 }
 
 function getAddressPrivateKey(address: string, walletData: Record<string, AddressData>): string {
@@ -783,7 +783,7 @@ function buildSeedSweepSelection(
   }> = [];
 
   for (const [candidateKey, candidateData] of Object.entries(addrData.utxos || {})) {
-    if (!candidateData || toAmountNumber(candidateData.Value) <= 0) {
+    if (!candidateData || parseAmount(candidateData.Value) <= 0n) {
       continue;
     }
     const candidateOutput = getReferencedOutputForUTXO(candidateData);
@@ -893,7 +893,7 @@ function recoverSeedStateForSpend(address: string, addrData: AddressData, refere
 function selectUTXOs(
   addresses: string[],
   walletData: Record<string, AddressData>,
-  requiredAmounts: Record<number, number>,
+  requiredAmounts: AmountUnitsByCoin,
   options: { requireRegistration?: boolean } = {}
 ): Array<{
   address: string;
@@ -910,7 +910,7 @@ function selectUTXOs(
   const consumedKeys = new Set<string>();
 
   // 鎸夊竵绉嶇粺璁″凡鏀堕泦閲戦
-  const collected: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
+  const collected = emptyAmountUnits();
 
   console.log('[UTXO閫夋嫨] 鍙敤鍦板潃:', addresses);
   console.log('[UTXO閫夋嫨] 闇€瑕侀噾棰?', requiredAmounts);
@@ -933,7 +933,7 @@ function selectUTXOs(
     console.log(`  - 鏈夌閽? ${!!addrData.privHex}`);
 
     // 妫€鏌ヨ甯佺鏄惁杩橀渶瑕佹洿澶?
-    const needed = requiredAmounts[coinType] || 0;
+    const needed = requiredAmounts[coinType] || 0n;
     if (collected[coinType] >= needed) {
       console.log(`  - 甯佺 ${coinType} 宸叉弧瓒抽渶姹傦紝璺宠繃`);
       continue;
@@ -952,7 +952,7 @@ function selectUTXOs(
         continue;
       }
 
-      if (toAmountNumber(utxoData.Value) <= 0) {
+      if (parseAmount(utxoData.Value) <= 0n) {
         console.log(`  - UTXO ${utxoKey}: 閲戦涓?鎴栬礋鏁?(${utxoData.Value})`);
         continue;
       }
@@ -983,7 +983,7 @@ function selectUTXOs(
         if (consumedKeys.has(item.utxoKey)) continue;
         selected.push(item);
         consumedKeys.add(item.utxoKey);
-        collected[item.coinType] += toAmountNumber(item.utxoData.Value);
+        collected[item.coinType] = (collected[item.coinType] || 0n) + parseAmount(item.utxoData.Value);
       }
 
       // 妫€鏌ユ槸鍚﹀凡婊¤冻闇€姹?
@@ -997,8 +997,8 @@ function selectUTXOs(
   // 楠岃瘉鏄惁婊¤冻鎵€鏈夐渶姹?
   for (const [coinTypeStr, needed] of Object.entries(requiredAmounts)) {
     const coinType = Number(coinTypeStr);
-    if (needed > 0 && collected[coinType] < needed) {
-      const errMsg = `浣欓涓嶈冻锛氶渶瑕?${needed} 绫诲瀷${coinType}锛屽彧鏈?${collected[coinType]}`;
+    if (needed > 0n && collected[coinType] < needed) {
+      const errMsg = `浣欓涓嶈冻锛氶渶瑕?${formatAmount(needed)} 绫诲瀷${coinType}锛屽彧鏈?${formatAmount(collected[coinType] || 0n)}`;
       console.error('[UTXO閫夋嫨]', errMsg);
       throw new Error(errMsg);
     }
@@ -1020,7 +1020,7 @@ function selectUTXOs(
 function selectUTXOsPartial(
   addresses: string[],
   walletData: Record<string, AddressData>,
-  requiredAmounts: Record<number, number>,
+  requiredAmounts: AmountUnitsByCoin,
   options: { requireRegistration?: boolean } = {}
 ): Array<{
   address: string;
@@ -1037,7 +1037,7 @@ function selectUTXOsPartial(
   const consumedKeys = new Set<string>();
 
   // 鎸夊竵绉嶇粺璁″凡鏀堕泦閲戦
-  const collected: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
+  const collected = emptyAmountUnits();
 
   for (const address of addresses) {
     const addrData = walletData[address];
@@ -1047,7 +1047,7 @@ function selectUTXOsPartial(
     const utxos = addrData.utxos || {};
 
     // 妫€鏌ヨ甯佺鏄惁杩橀渶瑕佹洿澶?
-    const needed = requiredAmounts[coinType] || 0;
+    const needed = requiredAmounts[coinType] || 0n;
     if (collected[coinType] >= needed) continue;
     assertAddressSpendable(address, addrData, options);
 
@@ -1055,7 +1055,7 @@ function selectUTXOsPartial(
     for (const [utxoKey, utxoData] of Object.entries(utxos)) {
       if (consumedKeys.has(utxoKey)) continue;
       if (isUtxoLockedAnyFormat(utxoKey)) continue;
-      if (!utxoData || toAmountNumber(utxoData.Value) <= 0) continue;
+      if (!utxoData || parseAmount(utxoData.Value) <= 0n) continue;
       if (!utxoData.UTXO || !utxoData.UTXO.TXOutputs?.length) continue;
 
       const sweepGroup = buildSeedSweepSelection(address, utxoKey, utxoData, walletData);
@@ -1064,7 +1064,7 @@ function selectUTXOsPartial(
         if (consumedKeys.has(item.utxoKey)) continue;
         selected.push(item);
         consumedKeys.add(item.utxoKey);
-        collected[item.coinType] += toAmountNumber(item.utxoData.Value);
+        collected[item.coinType] = (collected[item.coinType] || 0n) + parseAmount(item.utxoData.Value);
       }
       if (collected[coinType] >= needed) break;
     }
@@ -1107,8 +1107,9 @@ export async function buildTransaction(
     changeAddresses,
     gas,
     isCrossChain = false,
-    howMuchPayForGas = 0,
-    preferTXCer = false
+    howMuchPayForGas = '0',
+    preferTXCer = false,
+    txCerLockOwner,
   } = params;
 
   // 鑾峰彇閽卞寘鏁版嵁
@@ -1137,14 +1138,15 @@ export async function buildTransaction(
   console.log('[浜ゆ槗鏋勯€燷 璐︽埛绉侀挜瀛樺湪:', !!accountPrivKey);
 
   // ========== Step 1: 璁＄畻鍚勫竵绉嶉渶瑕佺殑閲戦 ==========
-  const requiredAmounts: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
+  const requiredAmounts = emptyAmountUnits();
   for (const recipient of recipients) {
-    requiredAmounts[recipient.coinType] = (requiredAmounts[recipient.coinType] || 0) + recipient.amount;
+    addAmountUnits(requiredAmounts, recipient.coinType, recipient.amount);
   }
 
   // 棰濆鍏戞崲 Gas 鐨?PGC 涔熼渶瑕佷粠 UTXO 涓墸闄わ紙甯佺 0 = PGC锛?
-  if (howMuchPayForGas > 0) {
-    requiredAmounts[0] += howMuchPayForGas;
+  const extraGasUnits = parseAmount(howMuchPayForGas);
+  if (extraGasUnits > 0n) {
+    requiredAmounts[0] += extraGasUnits;
     console.log('[浜ゆ槗鏋勯€燷 鍖呭惈棰濆 Gas 鍏戞崲:', howMuchPayForGas, 'PGC');
   }
 
@@ -1169,8 +1171,8 @@ export async function buildTransaction(
 
   let txType = 0; // 0 = 鏅€氳浆璐︼紝1 = 浣跨敤浜?TXCer
 
-  const buildAvailableTXCers = (): Array<{ txCerId: string; txCer: TxCertificate; address: string; value: number }> => {
-    const availableTXCers: Array<{ txCerId: string; txCer: TxCertificate; address: string; value: number }> = [];
+  const buildAvailableTXCers = (): Array<{ txCerId: string; txCer: TxCertificate; address: string; value: bigint }> => {
+    const availableTXCers: Array<{ txCerId: string; txCer: TxCertificate; address: string; value: bigint }> = [];
     for (const address of fromAddresses) {
       const addrData = walletData[address];
       if (!addrData) continue;
@@ -1179,8 +1181,9 @@ export async function buildTransaction(
       const totalTXCers = user.wallet?.totalTXCers || {};
       for (const [txCerId, value] of Object.entries(txCerIds)) {
         const txCer = totalTXCers[txCerId];
-        if (txCer && typeof value === 'number' && value > 0 && isTXCerSpendable(user, txCerId)) {
-          availableTXCers.push({ txCerId, txCer, address, value });
+        const units = txCer ? parseAmount(txCer.Value ?? value) : 0n;
+        if (txCer && units > 0n && isTXCerSpendable(user, txCerId, txCerLockOwner)) {
+          availableTXCers.push({ txCerId, txCer, address, value: units });
         }
       }
     }
@@ -1189,12 +1192,12 @@ export async function buildTransaction(
   };
 
   const selectTXCersForMainCurrency = (
-    availableTXCers: Array<{ txCerId: string; txCer: TxCertificate; address: string; value: number }>,
-    needed: number
+    availableTXCers: Array<{ txCerId: string; txCer: TxCertificate; address: string; value: bigint }>,
+    needed: bigint
   ) => {
     let remainingNeeded = needed;
     for (const txCerInfo of availableTXCers) {
-      if (remainingNeeded <= 0) break;
+      if (remainingNeeded <= 0n) break;
       selectedTXCers.push({ txCerId: txCerInfo.txCerId, txCer: txCerInfo.txCer, address: txCerInfo.address });
       remainingNeeded -= txCerInfo.value;
       console.log('[浜ゆ槗鏋勯€燷 閫変腑 TXCer:', txCerInfo.txCerId.slice(0, 8) + '...', '閲戦:', txCerInfo.value);
@@ -1208,14 +1211,14 @@ export async function buildTransaction(
       throw new Error('璺ㄩ摼浜ゆ槗涓嶈兘浣跨敤 TXCer');
     }
     const availableTXCers = buildAvailableTXCers();
-    const mainCurrencyNeeded = requiredAmounts[0] || 0;
+    const mainCurrencyNeeded = requiredAmounts[0] || 0n;
     const remainingMain = selectTXCersForMainCurrency(availableTXCers, mainCurrencyNeeded);
 
-    const requiredAfterTXCer: Record<number, number> = { ...requiredAmounts };
-    requiredAfterTXCer[0] = Math.max(0, remainingMain);
+    const requiredAfterTXCer: AmountUnitsByCoin = { ...requiredAmounts };
+    requiredAfterTXCer[0] = remainingMain > 0n ? remainingMain : 0n;
 
     // 涓诲竵绉嶄粛涓嶈冻锛屾垨鑰呭瓨鍦ㄩ潪涓诲竵绉嶉渶姹傦紝鍒欒ˉ鍏呴€夋嫨 UTXO
-    if (requiredAfterTXCer[0] > 0 || (requiredAfterTXCer[1] || 0) > 0 || (requiredAfterTXCer[2] || 0) > 0) {
+    if (requiredAfterTXCer[0] > 0n || (requiredAfterTXCer[1] || 0n) > 0n || (requiredAfterTXCer[2] || 0n) > 0n) {
       try {
         selectedUTXOs = selectUTXOs(fromAddresses, walletData, requiredAfterTXCer);
       } catch {
@@ -1224,15 +1227,15 @@ export async function buildTransaction(
     }
 
     // 鏍￠獙涓诲竵绉嶆槸鍚﹁冻澶燂紙UTXO+TXCer锛?
-    let mainCollected = 0;
+    let mainCollected = 0n;
     for (const { utxoData, coinType } of selectedUTXOs) {
-      if (coinType === 0) mainCollected += toAmountNumber(utxoData.Value);
+      if (coinType === 0) mainCollected += parseAmount(utxoData.Value);
     }
-    let txCerCollected = 0;
-    for (const { txCer } of selectedTXCers) txCerCollected += toAmountNumber(txCer.Value);
+    let txCerCollected = 0n;
+    for (const { txCer } of selectedTXCers) txCerCollected += parseAmount(txCer.Value);
     const stillNeed = mainCurrencyNeeded - (mainCollected + txCerCollected);
-    if (stillNeed > 0.00000001) {
-      throw new Error(`Insufficient balance: UTXO + TXCer still missing ${stillNeed.toFixed(4)} main coin`);
+    if (stillNeed > 0n) {
+      throw new Error(`Insufficient balance: UTXO + TXCer still missing ${formatAmount(stillNeed)} main coin`);
     }
 
     if (selectedTXCers.length > 0) {
@@ -1253,7 +1256,7 @@ export async function buildTransaction(
       }
 
       // 妫€鏌ユ槸鍚﹀彧娑夊強涓昏揣甯?
-      const hasNonMainCurrency = [1, 2].some(t => (requiredAmounts[t] || 0) > 0);
+      const hasNonMainCurrency = [1, 2].some(t => (requiredAmounts[t] || 0n) > 0n);
       if (hasNonMainCurrency) {
         // 闈炰富璐у竵浜ゆ槗锛岄噸鏂版姏鍑?UTXO 涓嶈冻閿欒
         throw utxoError;
@@ -1270,23 +1273,23 @@ export async function buildTransaction(
       }
 
       // 璁＄畻 UTXO 宸叉敹闆嗙殑閲戦
-      let utxoCollected = 0;
+      let utxoCollected = 0n;
       for (const { utxoData, coinType } of selectedUTXOs) {
         if (coinType === 0) {
-          utxoCollected += toAmountNumber(utxoData.Value);
+          utxoCollected += parseAmount(utxoData.Value);
         }
       }
 
       // 璁＄畻杩橀渶瑕佸灏戜富璐у竵
-      const mainCurrencyNeeded = requiredAmounts[0] || 0;
+      const mainCurrencyNeeded = requiredAmounts[0] || 0n;
       let remainingNeeded = mainCurrencyNeeded - utxoCollected;
 
       console.log('[浜ゆ槗鏋勯€燷 UTXO 宸叉敹闆?', utxoCollected, '杩橀渶:', remainingNeeded);
 
       remainingNeeded = selectTXCersForMainCurrency(availableTXCers, remainingNeeded);
 
-      if (remainingNeeded > 0.00000001) {
-        throw new Error(`Insufficient balance: UTXO + TXCer still missing ${remainingNeeded.toFixed(4)} main coin`);
+      if (remainingNeeded > 0n) {
+        throw new Error(`Insufficient balance: UTXO + TXCer still missing ${formatAmount(remainingNeeded)} main coin`);
       }
 
       // 鏍囪涓轰娇鐢ㄤ簡 TXCer
@@ -1300,13 +1303,13 @@ export async function buildTransaction(
   console.log('[浜ゆ槗鏋勯€燷 閫変腑 TXCer 鏁伴噺:', selectedTXCers.length);
 
   // 璁＄畻鍚勫竵绉嶆敹闆嗙殑鎬婚锛堝寘鍚?TXCer锛?
-  const collectedAmounts: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
+  const collectedAmounts = emptyAmountUnits();
   for (const { utxoData, coinType } of selectedUTXOs) {
-    collectedAmounts[coinType] += toAmountNumber(utxoData.Value);
+    collectedAmounts[coinType] = (collectedAmounts[coinType] || 0n) + parseAmount(utxoData.Value);
   }
   // TXCer 鍙兘鏄富璐у竵
   for (const { txCer } of selectedTXCers) {
-    collectedAmounts[0] += toAmountNumber(txCer.Value);
+    collectedAmounts[0] += parseAmount(txCer.Value);
   }
   console.log('[浜ゆ槗鏋勯€燷 鏀堕泦閲戦锛堝惈TXCer锛?', collectedAmounts);
 
@@ -1373,10 +1376,10 @@ export async function buildTransaction(
   // 3.2 鎵鹃浂杈撳嚭
   for (const [coinTypeStr, collected] of Object.entries(collectedAmounts)) {
     const coinType = Number(coinTypeStr);
-    const required = requiredAmounts[coinType] || 0;
+    const required = requiredAmounts[coinType] || 0n;
     const change = collected - required;
 
-    if (change > 0.00000001) {  // 鏈夋壘闆?
+    if (change > 0n) {  // 鏈夋壘闆?
       const changeAddr = changeAddresses[coinType];
       if (!changeAddr) {
         throw new Error(`缂哄皯甯佺 ${coinType} 鐨勬壘闆跺湴鍧€`);
@@ -1398,7 +1401,7 @@ export async function buildTransaction(
 
       txOutputs.push({
         ToAddress: changeAddr,
-        ToValue: toAmountWire(change),
+        ToValue: formatAmount(change),
         ToGuarGroupID: guarGroupID,
         ToPublicKey: convertHexToPublicKey(changePubX, changePubY) as unknown as PublicKeyNewJSON,
         ToInterest: toAmountWire(0),
@@ -1416,11 +1419,11 @@ export async function buildTransaction(
 
   // 3.3 棰濆 PGC 鍏戞崲 Gas 杈撳嚭锛圛sPayForGas: true锛?
   // 鐢ㄤ簬灏嗛澶栫殑 PGC 鍏戞崲涓?Gas锛屽悗绔細灏嗘杈撳嚭閲戦鍔犲埌鍙敤鍒╂伅涓?
-  if (howMuchPayForGas > 0) {
+  if (extraGasUnits > 0n) {
     console.log('[浜ゆ槗鏋勯€燷 鍒涘缓棰濆 Gas 杈撳嚭, 閲戦:', howMuchPayForGas);
     txOutputs.push({
       ToAddress: '',
-      ToValue: toAmountWire(howMuchPayForGas),
+      ToValue: formatAmount(extraGasUnits),
       ToGuarGroupID: '',
       ToPublicKey: hexToPublicKeyJSON('', ''),  // 浣跨敤绌哄瓧绗︿覆鐢熸垚闆跺€煎叕閽ワ紙涓庡叾浠栬緭鍑烘牸寮忎竴鑷达級
       ToInterest: toAmountWire(0),
@@ -1617,35 +1620,33 @@ export async function buildTransaction(
 
   // ========== Step 5: 鏋勯€?Transaction ==========
   // 璁＄畻鎬昏浆璐﹂噾棰濓紙鎸夋眹鐜囨崲绠楋級
-  const exchangeRates: Record<number, number> = { 0: 1, 1: 1000000, 2: 1000 };
-  let totalValue = 0;
+  const exchangeRates: Record<number, bigint> = { 0: 1n, 1: 1_000_000n, 2: 1_000n };
+  let totalValue = 0n;
   for (const [coinTypeStr, amount] of Object.entries(requiredAmounts)) {
     const coinType = Number(coinTypeStr);
-    totalValue += amount * (exchangeRates[coinType] || 1);
+    totalValue += amount * (exchangeRates[coinType] || 1n);
   }
-  const cleanValueDivision = Object.fromEntries(
-    Object.entries(requiredAmounts).filter(([, amount]) => Number(amount) > 0)
-  ) as Record<number, number>;
+  const cleanValueDivision = amountUnitsToWire(requiredAmounts);
 
   // 鏋勯€犲埄鎭洖閫€鍒嗛厤
-  const backAssign: Record<string, number> = {};
+  const backAssign: Record<string, string> = {};
   if (fromAddresses.length > 0) {
-    backAssign[fromAddresses[0]] = 1.0;  // 鍒╂伅鍥為€€缁欑涓€涓彂閫佸湴鍧€
+    backAssign[fromAddresses[0]] = '1';  // 鍒╂伅鍥為€€缁欑涓€涓彂閫佸湴鍧€
   }
 
   const transaction: Transaction = {
     TXID: '',
     Size: 0,   // 鍚庣浼氶噸鏂拌绠?
-    Version: 1.0,
+    Version: TRANSACTION_PROTOCOL_VERSION,
     GuarantorGroup: guarGroupID,
     TXType: isCrossChain ? 6 : txType,  // 6=璺ㄩ摼, 0=鏅€氳浆璐? 1=浣跨敤浜員XCer
-    Value: toAmountWire(totalValue),
-    ValueDivision: toAmountRecordWire(cleanValueDivision),
+    Value: formatAmount(totalValue),
+    ValueDivision: cleanValueDivision,
     NewValue: toAmountWire(0),
     NewValueDiv: {},
     InterestAssign: {
-      Gas: toAmountWire(gas),
-      Output: toAmountWire(recipients.reduce((sum, r) => sum + (r.interest || 0), 0)),
+      Gas: formatAmount(parseAmount(gas)),
+      Output: formatAmount(sumAmountUnits(recipients.map(recipient => parseAmount(recipient.interest ?? '0')))),
       BackAssign: backAssign
     },
     UserSignature: { R: null, S: null },
@@ -1658,19 +1659,7 @@ export async function buildTransaction(
 
   attachSettlementAuths(transaction, accountPrivKey);
 
-  transaction.UserSignatureV2 = signHashEnvelope(
-    AlgorithmECDSAP256,
-    hashBackendJson({
-      ...transaction,
-      TXID: '',
-      Size: 0,
-      NewValue: toAmountWire(0),
-      UserSignature: { R: null, S: null },
-      UserSignatureV2: { Algorithm: '', Signature: null },
-      TXType: 0
-    }),
-    accountPrivKey
-  );
+  transaction.UserSignatureV2 = signHashEnvelope(AlgorithmECDSAP256, computeTransactionHashV2(transaction), accountPrivKey);
 
   transaction.TXID = calculateTXID(transaction);
   console.log('[浜ゆ槗鏋勯€燷 TXID:', transaction.TXID);
@@ -2137,6 +2126,30 @@ export interface LegacyBuildTXInfo {
   };
 }
 
+type AmountUnitsByCoin = Record<number, bigint>;
+
+function emptyAmountUnits(): AmountUnitsByCoin {
+  return { 0: 0n, 1: 0n, 2: 0n };
+}
+
+function addAmountUnits(target: AmountUnitsByCoin, coinType: number, value: ProtocolAmount): void {
+  target[coinType] = (target[coinType] || 0n) + parseAmount(value);
+}
+
+function amountUnitsToWire(values: AmountUnitsByCoin): Record<number, string> {
+  const result: Record<number, string> = {};
+  for (const [coinType, units] of Object.entries(values)) {
+    if (units > 0n) result[Number(coinType)] = formatAmount(units);
+  }
+  return result;
+}
+
+function sumAmountUnits(values: Iterable<bigint>): bigint {
+  let total = 0n;
+  for (const value of values) total += value;
+  return total;
+}
+
 /**
  * 浠庢棫鐗?BuildTXInfo 鏍煎紡杞崲涓烘柊鐗?BuildTransactionParams
  * 
@@ -2149,12 +2162,12 @@ export function convertLegacyBuildInfo(buildInfo: LegacyBuildTXInfo): BuildTrans
   for (const [address, bill] of Object.entries(buildInfo.Bill)) {
     recipients.push({
       address,
-      amount: toAmountNumber(bill.Value),
+      amount: bill.Value,
       coinType: bill.MoneyType,
       publicKeyX: bill.PublicKey?.XHex || '',
       publicKeyY: bill.PublicKey?.YHex || '',
       guarGroupID: bill.GuarGroupID || '',
-      interest: toAmountNumber(bill.ToInterest || 0),
+      interest: bill.ToInterest || '0',
       seedAnchor: bill.SeedAnchor,
       seedChainStep: bill.SeedChainStep,
       defaultSpendAlgorithm: bill.DefaultSpendAlgorithm
@@ -2165,9 +2178,9 @@ export function convertLegacyBuildInfo(buildInfo: LegacyBuildTXInfo): BuildTrans
     fromAddresses: buildInfo.UserAddress,
     recipients,
     changeAddresses: buildInfo.ChangeAddress,
-    gas: toAmountNumber(buildInfo.InterestAssign.Gas),
+    gas: buildInfo.InterestAssign.Gas,
     isCrossChain: buildInfo.IsCrossChainTX,
-    howMuchPayForGas: toAmountNumber(buildInfo.HowMuchPayForGas || 0),
+    howMuchPayForGas: buildInfo.HowMuchPayForGas || '0',
     preferTXCer: !!buildInfo.PriUseTXCer
   };
 }
@@ -2334,7 +2347,7 @@ export async function buildNormalTransaction(
     recipients,
     changeAddresses,
     gas,
-    howMuchPayForGas = 0
+    howMuchPayForGas = '0'
   } = params;
 
   // 鑾峰彇閽卞寘鏁版嵁
@@ -2356,14 +2369,15 @@ export async function buildNormalTransaction(
   }
 
   // ========== Step 1: 璁＄畻鍚勫竵绉嶉渶瑕佺殑閲戦 ==========
-  const requiredAmounts: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
+  const requiredAmounts = emptyAmountUnits();
   for (const recipient of recipients) {
-    requiredAmounts[recipient.coinType] = (requiredAmounts[recipient.coinType] || 0) + recipient.amount;
+    addAmountUnits(requiredAmounts, recipient.coinType, recipient.amount);
   }
 
   // 棰濆鍏戞崲 Gas 鐨?PGC
-  if (howMuchPayForGas > 0) {
-    requiredAmounts[0] += howMuchPayForGas;
+  const extraGasUnits = parseAmount(howMuchPayForGas);
+  if (extraGasUnits > 0n) {
+    requiredAmounts[0] += extraGasUnits;
   }
 
   console.log('[鏅€氳浆璐 闇€瑕侀噾棰?', requiredAmounts);
@@ -2377,9 +2391,9 @@ export async function buildNormalTransaction(
   }> = [];
   selectedUTXOs = selectUTXOs(fromAddresses, walletData, requiredAmounts, { requireRegistration: true });
 
-  const collectedAmounts: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
+  const collectedAmounts = emptyAmountUnits();
   for (const { utxoData, coinType } of selectedUTXOs) {
-    collectedAmounts[coinType] += toAmountNumber(utxoData.Value);
+    collectedAmounts[coinType] = (collectedAmounts[coinType] || 0n) + parseAmount(utxoData.Value);
   }
 
   console.log('[normal tx] selected UTXOs:', selectedUTXOs.length);
@@ -2495,7 +2509,7 @@ export async function buildNormalTransaction(
   // 鎵鹃浂杈撳嚭
   for (const coinType of [0, 1, 2]) {
     const changeAmount = collectedAmounts[coinType] - requiredAmounts[coinType];
-    if (changeAmount > 0 && changeAddresses[coinType]) {
+    if (changeAmount > 0n && changeAddresses[coinType]) {
       const changeAddr = changeAddresses[coinType];
       const changeAddrData = walletData[changeAddr];
       const normalizedChangeAddr = normalizeAddress(changeAddr);
@@ -2503,7 +2517,7 @@ export async function buildNormalTransaction(
 
       const output: TXOutput = {
         ToAddress: changeAddr,
-        ToValue: toAmountWire(changeAmount),
+        ToValue: formatAmount(changeAmount),
         ToGuarGroupID: '',
         ToPublicKey: changeAddrData
           ? (convertHexToPublicKey(changeAddrData.pubXHex || '', changeAddrData.pubYHex || '') as unknown as PublicKeyNewJSON)
@@ -2523,10 +2537,10 @@ export async function buildNormalTransaction(
   }
 
   // Gas 杈撳嚭
-  if (howMuchPayForGas > 0) {
+  if (extraGasUnits > 0n) {
     const gasOutput: TXOutput = {
       ToAddress: '',
-      ToValue: toAmountWire(howMuchPayForGas),
+      ToValue: formatAmount(extraGasUnits),
       ToGuarGroupID: '',
       ToPublicKey: { CurveName: 'P256', X: '0', Y: '0' },
       ToInterest: toAmountWire(0),
@@ -2543,35 +2557,42 @@ export async function buildNormalTransaction(
   }
 
   // ========== Step 5: 鏋勯€?InterestAssign ==========
-  const backAssign: Record<string, number> = {};
+  const backAssign: Record<string, string> = {};
   const addressCount = fromAddresses.length;
-  for (const addr of fromAddresses) {
-    backAssign[addr] = 1 / addressCount;
+  if (addressCount > 0) {
+    const count = BigInt(addressCount);
+    const base = RATIO_SCALE / count;
+    let remainder = RATIO_SCALE % count;
+    for (const addr of fromAddresses) {
+      const units = base + (remainder > 0n ? 1n : 0n);
+      if (remainder > 0n) remainder--;
+      backAssign[addr] = formatRatio(units);
+    }
   }
 
   const interestAssign: InterestAssign = {
-    Gas: toAmountWire(gas),
+    Gas: formatAmount(parseAmount(gas)),
     Output: toAmountWire(0),
     BackAssign: backAssign
   };
 
   // ========== Step 6: 鏋勯€?Transaction ==========
-  const valueDivision: Record<number, number> = {};
+  const valueDivision = emptyAmountUnits();
   for (const recipient of recipients) {
-    valueDivision[recipient.coinType] = (valueDivision[recipient.coinType] || 0) + recipient.amount;
+    addAmountUnits(valueDivision, recipient.coinType, recipient.amount);
   }
-  if (howMuchPayForGas > 0) {
-    valueDivision[0] = (valueDivision[0] || 0) + howMuchPayForGas;
+  if (extraGasUnits > 0n) {
+    valueDivision[0] = (valueDivision[0] || 0n) + extraGasUnits;
   }
 
   const tx: Transaction = {
     TXID: '',
     Size: 0,
-    Version: 1.0,
+    Version: TRANSACTION_PROTOCOL_VERSION,
     GuarantorGroup: '',  // 鏁ｆ埛娌℃湁鎷呬繚缁勭粐
     TXType: 8,           // 鏁ｆ埛浜ゆ槗绫诲瀷
-    Value: toAmountWire(Object.values(valueDivision).reduce((a, b) => a + b, 0)),
-    ValueDivision: toAmountRecordWire(valueDivision),
+    Value: formatAmount(sumAmountUnits(Object.values(valueDivision))),
+    ValueDivision: amountUnitsToWire(valueDivision),
     NewValue: toAmountWire(0),
     NewValueDiv: {},
     InterestAssign: interestAssign,
@@ -2583,19 +2604,7 @@ export async function buildNormalTransaction(
     Data: []
   };
 
-  tx.UserSignatureV2 = signHashEnvelope(
-    AlgorithmECDSAP256,
-    hashBackendJson({
-      ...tx,
-      TXID: '',
-      Size: 0,
-      NewValue: toAmountWire(0),
-      UserSignature: { R: null, S: null },
-      UserSignatureV2: { Algorithm: '', Signature: null },
-      TXType: 0
-    }),
-    accountPrivKey
-  );
+  tx.UserSignatureV2 = signHashEnvelope(AlgorithmECDSAP256, computeTransactionHashV2(tx), accountPrivKey);
 
   tx.TXID = calculateTXID(tx);
   console.log('[鏅€氳浆璐 TXID:', tx.TXID);

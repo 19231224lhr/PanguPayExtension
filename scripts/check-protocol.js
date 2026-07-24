@@ -95,10 +95,6 @@ if (!backgroundSource.includes('useRequestWideMeta ? request.publicKey')) {
 }
 
 for (const marker of [
-  'COMMITTEE_QC_STATUS',
-  'COMMITTEE_QC_PROPOSALS',
-  'COMMITTEE_QC_QCS',
-  'COMMITTEE_QC_FINALIZED_BLOCK',
   'ASSIGN_TXCER_STATUSES',
   'ASSIGN_TXCER_STATUS',
   'ASSIGN_TXCER_STATUS_CHANGE',
@@ -144,8 +140,8 @@ if (!accountPollingSource.includes('applyTXCerStatus')) {
   fail('account polling does not write authoritative lifecycle status into local account state.');
 }
 
-if (!txCerStatusSource.includes("getTXCerStatus(account, txCerID) === 'Active'") || !txCerStatusSource.includes("proofStatus !== 'invalid'") || !txCerStatusSource.includes('!isTXCerLocked(txCerID)')) {
-  fail('TXCer spendable helper must require authoritative Active status, non-invalid proof, and local construction lock.');
+if (!txCerStatusSource.includes("getTXCerStatus(account, txCerID) === 'Active'") || !txCerStatusSource.includes("fastEvidenceStatus === 'Failed'") || !txCerStatusSource.includes('!isTXCerLocked(txCerID)')) {
+  fail('TXCer spendable helper must require authoritative Active status, non-failed FastEvidence, and local construction lock.');
 }
 
 if (!txCerStatusSource.includes('TXCER_TERMINAL_STATUSES.includes(view.status)')) {
@@ -163,11 +159,10 @@ if (/account\.txCerIssuanceRecords\s*=\s*\{\s*\}/.test(storageSource)) {
 for (const marker of [
   'buildTXCerIssueKey',
   'buildTXCerIssuanceRecordID',
-  'buildTXCerIssueLeaf',
+  'buildTXCerIssueLeafV2',
   'computeDirectionalMerkleRoot',
-  'verifyTXCerIssueProof',
-  "['Signature', 'RecordIDs', 'CreatedAt']",
-  'certifier mismatch',
+  'verifyProtocolV2IssueProof',
+  'asProtocolTXCerIssuanceRecord',
 ]) {
   if (!txCerIssuanceProofSource.includes(marker)) {
     fail(`TXCer issuance proof helper is missing ${marker}.`);
@@ -197,8 +192,6 @@ for (const marker of [
   'export interface TxTaskDAGRecord',
   'export interface SchedulerStatsResponse',
   'export interface CertifierIssueBatchRequest',
-  'export interface CommitteeQCStatus',
-  'export interface CommitteeQC',
 ]) {
   if (!blockchainSource.includes(marker)) {
     fail(`blockchain types are missing scheduler/certifier marker ${marker}.`);
@@ -207,10 +200,6 @@ for (const marker of [
 
 for (const marker of [
   'fetchAssignSchedulerStats',
-  'fetchCommitteeQCStatus',
-  'fetchCommitteeQCProposals',
-  'fetchCommitteeQCs',
-  'fetchCommitteeQCFinalizedBlock',
   'fetchAssignSchedulerDAGRecords',
   'fetchAssignSchedulerDAGEvents',
   'fetchAssignAuditEvents',
@@ -249,11 +238,11 @@ if (!transferSource.includes('isTXCerSpendable(account, id)')) {
   fail('transfer locking can still lock/spend TXCer without authoritative Active lifecycle status.');
 }
 
-if (!sendPageSource.includes('sumSpendableTXCerValue(account, txCers)')) {
+if (!sendPageSource.includes('sumSpendableTXCerUnits(account, txCers)')) {
   fail('send page balance does not use authoritative TXCer lifecycle availability.');
 }
 
-if (!homePageSource.includes('sumSpendableTXCerValue(account')) {
+if (!homePageSource.includes('sumSpendableTXCerUnits(account')) {
   fail('home page balance does not use authoritative TXCer lifecycle availability.');
 }
 
@@ -289,11 +278,10 @@ if (!settlementAuthSource.includes('SettlementAuth: buildSettlementAuth')) {
   fail('settlementAuth helper module does not attach SettlementAuth to consumed TXCers.');
 }
 
-if (!txHashSource.includes("obj.UserSignatureV2 = { Algorithm: '', Signature: null }")) {
-  fail('TXID hashing must exclude transaction UserSignatureV2.');
-}
-if (!txHashSource.includes('TXInputsNormal: filteredInputs')) {
-  fail('TXID hashing must mirror Go GetTXHash canonical empty-slice behavior.');
+for (const marker of ['computeTransactionHashV2', 'computeTransactionIDV2']) {
+  if (!txHashSource.includes(marker)) {
+    fail(`TXID adapter must delegate canonical protocol-v2 behavior to ${marker}.`);
+  }
 }
 
 const attachIndex = txBuilderSource.indexOf('attachSettlementAuths(transaction, accountPrivKey);');

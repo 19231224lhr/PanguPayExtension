@@ -5,6 +5,7 @@
  */
 
 import { parseBigIntJson } from './bigIntJson';
+import type { TxCertificate } from './blockchain';
 
 // ========================================
 // 环境配置
@@ -72,10 +73,6 @@ export const API_ENDPOINTS = {
     GROUPS_LIST: '/api/v1/groups',
     GROUP_INFO: (groupId: string) => `/api/v1/groups/${groupId}`,
     COMMITTEE_ENDPOINT: '/api/v1/committee/endpoint',
-    COMMITTEE_QC_STATUS: '/api/v1/committee/qc/status',
-    COMMITTEE_QC_PROPOSALS: '/api/v1/committee/qc/proposals',
-    COMMITTEE_QC_QCS: '/api/v1/committee/qc/qcs',
-    COMMITTEE_QC_FINALIZED_BLOCK: (height: number | string) => `/api/v1/committee/qc/finalized-block/${height}`,
     ORG_PUBLIC_KEY: '/api/v1/org/publickey',
 
     ASSIGN_HEALTH: (groupId: string) => `/api/v1/${groupId}/assign/health`,
@@ -101,7 +98,6 @@ export const API_ENDPOINTS = {
     ASSIGN_CERTIFIERS: (groupId: string) => `/api/v1/${groupId}/assign/certifiers`,
     ASSIGN_CROSS_ORG_TXCER: (groupId: string) => `/api/v1/${groupId}/assign/poll-cross-org-txcers`,
 
-    AGGR_TXCER: (groupId: string) => `/api/v1/${groupId}/aggr/txcer`,
     AGGR_TXCER_ISSUANCE_RECORDS: (groupId: string) => `/api/v1/${groupId}/aggr/txcer-issuance-records`,
     AGGR_TXCER_ISSUANCE_RECORD: (groupId: string, recordId: string) => `/api/v1/${groupId}/aggr/txcer-issuance-record/${recordId}`,
     AGGR_TXCER_ISSUANCE_BATCH: (groupId: string, batchId: string) => `/api/v1/${groupId}/aggr/txcer-issuance-batch/${batchId}`,
@@ -119,7 +115,6 @@ export const API_ENDPOINTS = {
     COM_PUBLIC_KEY: '/api/v1/com/public-key',
     COM_SUBMIT_NOGUARGROUP_TX: '/api/v1/com/submit-noguargroup-tx',
     COM_CHALLENGES: '/api/v1/com/challenges',
-    COM_UTXO_CHANGE: (committeeId: string) => `/api/v1/${committeeId}/com/utxo-change`,
 } as const;
 
 // ========================================
@@ -481,12 +476,7 @@ export interface TxPosition {
     IndexZ: number;
 }
 
-export interface TxCer {
-    txCerId: string;
-    value: number;
-    status: number; // 0=NoUse, 1=Using, 2=Used
-    fromTxId: string;
-}
+export type TxCer = TxCertificate;
 
 // ========================================
 // 基础工具
@@ -550,6 +540,7 @@ export function buildNodeUrl(endpoint: string): string {
 export function buildAssignNodeUrl(assignEndpoint: string): string {
     const raw = String(assignEndpoint || '').trim();
     if (!raw) return '';
+    if (/^https?:\/\//i.test(raw)) return raw.replace(/\/+$/, '');
 
     let protocol = 'http:';
     let currentHost = 'localhost';
@@ -595,6 +586,7 @@ export function buildAssignNodeUrl(assignEndpoint: string): string {
 export function buildAggrNodeUrl(aggrEndpoint: string): string {
     const raw = String(aggrEndpoint || '').trim();
     if (!raw) return '';
+    if (/^https?:\/\//i.test(raw)) return raw.replace(/\/+$/, '');
 
     let protocol = 'http:';
     let currentHost = 'localhost';

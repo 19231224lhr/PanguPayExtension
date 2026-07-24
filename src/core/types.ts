@@ -1,109 +1,20 @@
-import type { AmountInput } from './amount';
-
-export type ProtocolAmount = AmountInput;
+export type { AmountInput as ProtocolAmount } from './amount';
+export type {
+    EcdsaSignature as EcdsaSignatureJSON,
+    InterestAssign,
+    PublicKeyNew as PublicKeyNewJSON,
+    Transaction,
+    TxCertificate,
+    TXInputNormal,
+    TXOutput,
+    TxPosition,
+    UserNewTX,
+    UTXOData,
+} from './blockchain';
 
 /**
  * 类型定义
  */
-
-// ========================================
-// 交易相关类型
-// ========================================
-
-export interface EcdsaSignatureJSON {
-    R: string | null;
-    S: string | null;
-}
-
-export interface PublicKeyNewJSON {
-    CurveName: string;
-    X: string;
-    Y: string;
-}
-
-export interface TxPosition {
-    Blocknum: number;
-    IndexX: number;
-    IndexY: number;
-    IndexZ: number;
-}
-
-export interface TXOutput {
-    ToAddress: string;
-    ToValue: ProtocolAmount;
-    ToGuarGroupID: string;
-    ToPublicKey: PublicKeyNewJSON;
-    ToInterest: ProtocolAmount;
-    Type: number;
-    ToPeerID: string;
-    IsPayForGas: boolean;
-    IsCrossChain: boolean;
-    IsGuarMake: boolean;
-}
-
-export interface TXInputNormal {
-    FromTXID: string;
-    FromTxPosition: TxPosition;
-    FromAddress: string;
-    IsGuarMake: boolean;
-    IsCommitteeMake: boolean;
-    IsCrossChain: boolean;
-    InputSignature: EcdsaSignatureJSON;
-    TXOutputHash: number[];
-}
-
-export interface InterestAssign {
-    Gas: ProtocolAmount;
-    Output: ProtocolAmount;
-    BackAssign: Record<string, number | string>;
-}
-
-export interface Transaction {
-    TXID: string;
-    Size: number;
-    Version: number;
-    GuarantorGroup: string;
-    TXType: number;
-    Value: ProtocolAmount;
-    ValueDivision: Record<number, ProtocolAmount>;
-    NewValue: ProtocolAmount;
-    NewValueDiv: Record<number, ProtocolAmount>;
-    InterestAssign: InterestAssign;
-    UserSignature: EcdsaSignatureJSON;
-    TXInputsNormal: TXInputNormal[];
-    TXInputsCertificate: unknown[];
-    TXOutputs: TXOutput[];
-    Data: number[] | string;
-}
-
-export interface UserNewTX {
-    TX: Transaction;
-    UserID: string;
-    Height: number;
-    Sig: EcdsaSignatureJSON;
-}
-
-// ========================================
-// UTXO 和 TXCer 类型
-// ========================================
-
-export interface UTXOData {
-    txId: string;
-    position: TxPosition;
-    value: ProtocolAmount;
-    address: string;
-    coinType: number;
-    locked?: boolean;
-}
-
-export interface TxCertificate {
-    txCerId: string;
-    value: number;
-    status: TxCerStatus;
-    fromTxId: string;
-    coinType: number;
-    timestamp: number;
-}
 
 export enum TxCerStatus {
     NoUse = 0,

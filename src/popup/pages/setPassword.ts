@@ -213,7 +213,7 @@ async function handleSetPassword(e: Event): Promise<void> {
             addresses: {},
             onboardingComplete: false,
             onboardingStep: 'wallet',
-            totalBalance: { 0: 0, 1: 0, 2: 0 },
+            totalBalance: { 0: '0', 1: '0', 2: '0' },
             createdAt: Date.now(),
             lastLogin: Date.now(),
         };
@@ -275,4 +275,3 @@ function clearFieldError(input: HTMLInputElement, errorId: string): void {
     const errorEl = document.getElementById(errorId);
     if (errorEl) errorEl.classList.remove('is-visible');
 }
-

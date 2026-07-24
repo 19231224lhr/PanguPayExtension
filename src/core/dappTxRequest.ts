@@ -1,4 +1,5 @@
 import type { DappTransactionRequest } from './storage';
+import { parseAmount, toAmountWire } from './amount';
 
 function readDappStringField(raw: Record<string, unknown>, keys: string[]): string | undefined {
     for (const key of keys) {
@@ -15,6 +16,16 @@ function readDappNumberField(raw: Record<string, unknown>, keys: string[]): numb
         if (value === null || value === undefined || value === '') continue;
         const numeric = Number(value);
         if (Number.isFinite(numeric)) return numeric;
+    }
+    return undefined;
+}
+
+function readDappAmountField(raw: Record<string, unknown>, keys: string[]): string | undefined {
+    for (const key of keys) {
+        const value = raw[key];
+        if (value === null || value === undefined || value === '') continue;
+        if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'bigint') continue;
+        return toAmountWire(value);
     }
     return undefined;
 }
@@ -53,22 +64,22 @@ export function normalizeDappTxRequest(payload: unknown): DappTransactionRequest
         'recipientOrgID',
         'GuarGroupID',
     ]);
-    const rootTransferGas = readDappNumberField(raw, ['transferGas', 'interest', 'estInterest', 'EstInterest']);
+    const rootTransferGas = readDappAmountField(raw, ['transferGas', 'interest', 'estInterest', 'EstInterest']);
     const rootSeedAnchor = readDappSeedAnchor(raw);
     const rootSeedChainStep = readDappNumberField(raw, ['seedChainStep', 'SeedChainStep']);
     const rootDefaultSpendAlgorithm = readDappStringField(raw, ['defaultSpendAlgorithm', 'DefaultSpendAlgorithm']);
     const rootCoinType = readDappNumberField(raw, ['coinType', 'type', 'Type']);
     const rootToAddress = readDappStringField(raw, ['to', 'toAddress', 'address']);
-    const rootAmount = readDappNumberField(raw, ['amount', 'value']);
+    const rootAmount = readDappAmountField(raw, ['amount', 'value']);
     const recipients = Array.isArray(raw.recipients)
         ? raw.recipients
               .map((item) => {
                   const entry = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
                   const coinType = readDappNumberField(entry, ['coinType', 'type', 'Type']);
-                  const transferGas = readDappNumberField(entry, ['transferGas', 'interest', 'estInterest', 'EstInterest']);
+                  const transferGas = readDappAmountField(entry, ['transferGas', 'interest', 'estInterest', 'EstInterest']);
                   return {
                       to: readDappStringField(entry, ['to', 'toAddress', 'address']) || '',
-                      amount: Number(readDappNumberField(entry, ['amount', 'value']) ?? 0),
+                      amount: readDappAmountField(entry, ['amount', 'value']) ?? '0',
                       coinType: Number(coinType ?? rootCoinType ?? 0),
                       publicKey: readDappPublicKey(entry),
                       orgId: readDappStringField(entry, [
@@ -89,13 +100,13 @@ export function normalizeDappTxRequest(payload: unknown): DappTransactionRequest
                       ]),
                   };
               })
-              .filter((item) => item.to && item.amount > 0)
+              .filter((item) => item.to && parseAmount(item.amount) > 0n)
         : [];
 
-    if (recipients.length === 0 && rootToAddress && Number(rootAmount || 0) > 0) {
+    if (recipients.length === 0 && rootToAddress && parseAmount(rootAmount || '0') > 0n) {
         recipients.push({
             to: rootToAddress,
-            amount: Number(rootAmount || 0),
+            amount: rootAmount || '0',
             coinType: Number(rootCoinType ?? 0),
             publicKey: rootPublicKey,
             orgId: rootOrgId,
@@ -114,8 +125,8 @@ export function normalizeDappTxRequest(payload: unknown): DappTransactionRequest
         amount: rootAmount,
         coinType: Number(rootCoinType ?? 0),
         mode,
-        gas: Number(readDappNumberField(raw, ['gas', 'Gas']) ?? 0),
-        extraGas: Number(readDappNumberField(raw, ['extraGas', 'howMuchPayForGas', 'HowMuchPayForGas']) ?? 0),
+        gas: readDappAmountField(raw, ['gas', 'Gas']) ?? '0',
+        extraGas: readDappAmountField(raw, ['extraGas', 'howMuchPayForGas', 'HowMuchPayForGas']) ?? '0',
         publicKey: rootPublicKey,
         orgId: rootOrgId,
         transferGas: rootTransferGas,

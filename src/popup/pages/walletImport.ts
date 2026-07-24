@@ -298,7 +298,7 @@ async function handleImport(e: Event): Promise<void> {
             account.addresses[normalizedAddress] = {
                 address: normalizedAddress,
                 type: addressType,
-                balance: 0,
+                balance: '0',
                 utxoCount: 0,
                 txCerCount: 0,
                 source: 'imported',
@@ -312,7 +312,7 @@ async function handleImport(e: Event): Promise<void> {
                 pubYHex,
                 utxos: {},
                 txCers: {},
-                value: { totalValue: 0, utxoValue: 0, txCerValue: 0 },
+                value: { totalValue: '0', utxoValue: '0', txCerValue: '0' },
                 estInterest: 0,
             };
         } else {

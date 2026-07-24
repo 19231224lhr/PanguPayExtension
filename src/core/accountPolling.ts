@@ -2,6 +2,7 @@ import {
     API_BASE_URL,
     API_ENDPOINTS,
     apiClient,
+    buildAggrNodeUrl,
     buildApiUrl,
     buildAssignNodeUrl,
     isNetworkError,
@@ -11,7 +12,8 @@ import { parseBigIntJson } from './bigIntJson';
 import {
     getAccount,
     getActiveAccountId,
-    saveAccount,
+    getOrganization,
+    mutateAccount,
     saveTransaction,
     getTransactionHistory,
     updateTransactionStatus,
@@ -20,12 +22,15 @@ import {
     type UserAccount,
 } from './storage';
 import { COIN_NAMES } from './types';
-import type { TxCertificate, TXCerIssueProof, TXCerIssuanceMetadata, TXCerStatusView, UTXOData } from './blockchain';
+import type { TxCertificate, TXCerIssueProof, TXCerIssuanceDetailView, TXCerIssuanceMetadata, TXCerStatusView, UTXOData } from './blockchain';
+import type { FastLiabilityReceiptV2 } from '../protocol-v2/types';
 import { cacheTXCerUpdate, shouldBlockTXCerUpdate, unlockTXCers } from './txCerLockManager';
-import { applyTXCerStatus, markTXCerActive } from './txCerStatus';
+import { applyTXCerStatus, getTXCerStatus, markTXCerActive } from './txCerStatus';
+import { buildTXCerIssuanceMetadata, refreshTXCerIssuanceMetadata } from './txCerIssuance';
+import { mergeTXCerEvidenceMetadata } from '../protocol-v2/security';
 import { unlockUTXOs } from './utxoLock';
 import { notifyDappTxStatus } from './dappTxStatus';
-import { toAmountNumber } from './amount';
+import { formatAmount, normalizeStoredAmount, parseAmount } from './amount';
 
 type TxStatusPayload = {
     tx_id: string;
@@ -57,6 +62,8 @@ interface TXCerToUser {
     IssuanceRecordID?: string;
     IssuanceStatus?: string;
     IssuanceProof?: TXCerIssueProof;
+    IssuanceRecord?: TXCerIssuanceDetailView;
+    LiabilityReceipt?: FastLiabilityReceiptV2;
     IssueBatchID?: string;
     DeliveredAt?: number;
 }
@@ -132,6 +139,55 @@ let txCerFailures = 0;
 let crossOrgFailures = 0;
 let hasShownAssignNodeConnectedToast = false;
 let hasShownAssignNodeDisconnectedToast = false;
+const txCerEvidenceRefreshes = new Map<string, Promise<void>>();
+
+function scheduleTXCerEvidenceRefresh(accountID: string, txCerID: string): void {
+    const key = `${accountID}:${txCerID}`;
+    if (txCerEvidenceRefreshes.has(key)) return;
+    const task = Promise.resolve().then(async () => {
+        const account = await getAccount(accountID);
+        const organization = await getOrganization(accountID);
+        const metadata = account?.txCerIssuanceRecords?.[txCerID];
+        if (!account || !metadata) return;
+        const authorityBaseUrl = organization?.aggrNodeUrl
+            || buildAggrNodeUrl(organization?.aggrAPIEndpoint || '')
+            || organization?.assignNodeUrl
+            || buildAssignNodeUrl(organization?.assignAPIEndpoint || '');
+        const refreshed = await refreshTXCerIssuanceMetadata(
+            metadata,
+            accountID,
+            getTXCerStatus(account, txCerID),
+            authorityBaseUrl,
+        );
+        await mutateAccount(accountID, (latest) => {
+            latest.txCerIssuanceRecords = latest.txCerIssuanceRecords || {};
+            latest.txCerIssuanceRecords[txCerID] = mergeTXCerEvidenceMetadata(
+                latest.txCerIssuanceRecords[txCerID],
+                refreshed,
+            ) as TXCerIssuanceMetadata;
+            return latest;
+        });
+        dispatchAccountUpdate(accountID);
+    }).catch((error) => {
+        console.warn(`[TXCerEvidence] Refresh failed for ${txCerID}:`, error);
+    }).finally(() => {
+        txCerEvidenceRefreshes.delete(key);
+    });
+    txCerEvidenceRefreshes.set(key, task);
+}
+
+async function schedulePendingTXCerEvidenceRefreshes(): Promise<void> {
+    if (!activeAccountId) return;
+    const account = await getAccount(activeAccountId);
+    if (!account) return;
+    for (const [txCerID, metadata] of Object.entries(account.txCerIssuanceRecords || {})) {
+        const fastStatus = metadata.security?.fastEvidenceStatus;
+        const auditStatus = metadata.security?.cfaaAuditStatus;
+        if (!metadata.security || fastStatus === 'Pending' || auditStatus === 'Pending' || auditStatus === 'Unavailable') {
+            scheduleTXCerEvidenceRefresh(account.accountId, txCerID);
+        }
+    }
+}
 
 type ToastType = 'success' | 'error' | 'info' | 'warning';
 
@@ -186,32 +242,36 @@ function dispatchHistoryUpdate(accountId: string, txHash: string, status: string
 
 function recalcAddressBalance(info: AddressInfo): void {
     const utxos = info.utxos || {};
-    const txCerValue = Object.values(info.txCers || {}).reduce((sum, value) => sum + toAmountNumber(value || 0), 0);
-    const utxoValue = Object.values(utxos).reduce((sum, utxo) => sum + toAmountNumber(utxo?.Value || 0), 0);
-    info.balance = utxoValue;
+    const txCerUnits = Object.values(info.txCers || {}).reduce<bigint>((sum, value) => sum + parseAmount(value || '0'), 0n);
+    const utxoUnits = Object.values(utxos).reduce<bigint>((sum, utxo) => sum + parseAmount(utxo?.Value || '0'), 0n);
+    info.balance = formatAmount(utxoUnits);
     info.utxoCount = Object.keys(utxos).length;
     info.txCerCount = Object.keys(info.txCers || {}).length;
     info.value = {
-        totalValue: utxoValue + txCerValue,
-        utxoValue,
-        txCerValue,
+        totalValue: formatAmount(utxoUnits + txCerUnits),
+        utxoValue: formatAmount(utxoUnits),
+        txCerValue: formatAmount(txCerUnits),
     };
 }
 
 function recalcTotals(account: UserAccount): void {
-    const totals: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
+    const totalUnits: Record<number, bigint> = { 0: 0n, 1: 0n, 2: 0n };
     const mainAddress = account.mainAddress?.toLowerCase() || '';
     for (const [addr, info] of Object.entries(account.addresses || {})) {
         if (mainAddress && addr.toLowerCase() === mainAddress) continue;
-        const rawTotal = Number(info.value?.totalValue);
-        const utxoValue = Number(info.value?.utxoValue ?? info.balance ?? 0) || 0;
-        const txCerValue =
-            Number(info.value?.txCerValue) ||
-            Object.values(info.txCers || {}).reduce((sum, value) => sum + (Number(value) || 0), 0);
-        const totalValue = Number.isFinite(rawTotal) ? rawTotal : utxoValue + txCerValue;
-        totals[info.type || 0] = (totals[info.type || 0] || 0) + totalValue;
+        const utxoUnits = parseAmount(info.value?.utxoValue ?? info.balance ?? '0');
+        const txCerUnits = info.value?.txCerValue != null
+            ? parseAmount(info.value.txCerValue)
+            : Object.values(info.txCers || {}).reduce<bigint>((sum, value) => sum + parseAmount(value || '0'), 0n);
+        const combinedUnits = info.value?.totalValue != null
+            ? parseAmount(info.value.totalValue)
+            : utxoUnits + txCerUnits;
+        const type = info.type || 0;
+        totalUnits[type] = (totalUnits[type] || 0n) + combinedUnits;
     }
-    account.totalBalance = totals;
+    account.totalBalance = Object.fromEntries(
+        Object.entries(totalUnits).map(([type, units]) => [Number(type), formatAmount(units)])
+    );
     account.lastLogin = Date.now();
 }
 
@@ -229,11 +289,11 @@ async function maybeAddReceiveRecord(
     const outgoing = history.filter((item) => item.txHash === txHash && item.type === 'send');
     if (outgoing.length > 0) {
         const normalizedAddr = normalizeAddress(address);
-        const amount = Number(utxo.Value || 0) || 0;
+        const amount = parseAmount(utxo.Value || '0');
         const matchesRecipient = outgoing.some((item) => {
             const toAddr = normalizeAddress(item.to || '');
-            const amt = Number(item.amount || 0) || 0;
-            return toAddr === normalizedAddr && Math.abs(amt - amount) < 1e-8;
+            const candidateAmount = parseAmount(item.amount || '0');
+            return toAddr === normalizedAddr && candidateAmount === amount;
         });
         if (!matchesRecipient) {
             return false;
@@ -251,7 +311,7 @@ async function maybeAddReceiveRecord(
         type: 'receive',
         status: 'success',
         transferMode: transferMode || 'incoming',
-        amount: utxo.Value || 0,
+        amount: normalizeStoredAmount(utxo.Value || '0'),
         coinType: utxo.Type || 0,
         currency: COIN_NAMES[utxo.Type as keyof typeof COIN_NAMES] || 'PGC',
         from: fromAddress,
@@ -399,61 +459,88 @@ export async function processTxCerChangeDirectly(change: TXCerChangeToUser): Pro
     if (!change?.TXCerID) return;
     const accountId = activeAccountId || (await getActiveAccountId());
     if (!accountId) return;
-    const account = await getAccount(accountId);
-    if (!account) return;
-    processTxCerChange(account, change);
-    recalcTotals(account);
-    await saveAccount(account);
-    dispatchAccountUpdate(account.accountId);
+    await mutateAccount(accountId, (latest) => {
+        processTxCerChange(latest, change);
+        recalcTotals(latest);
+        return latest;
+    });
+    dispatchAccountUpdate(accountId);
 }
 
-function processTxCerToUser(account: UserAccount, item: TXCerToUser): void {
+interface TXCerDeliveryResult {
+    accepted: boolean;
+    newlyStored: boolean;
+    txCerID?: string;
+    reason?: string;
+}
+
+function processTxCerToUser(account: UserAccount, item: TXCerToUser): TXCerDeliveryResult {
     const normalized = normalizeAddress(item.ToAddress);
     const info = account.addresses[normalized];
-    if (!info) return;
-    if (info.type !== 0) return;
+    if (!item?.TXCer?.TXCerID) {
+        return { accepted: false, newlyStored: false, reason: 'invalid_txcer_dto' };
+    }
+    if (!info) {
+        return { accepted: false, newlyStored: false, txCerID: item.TXCer.TXCerID, reason: 'target_address_missing' };
+    }
+    if (info.type !== 0) {
+        return { accepted: false, newlyStored: false, txCerID: item.TXCer.TXCerID, reason: 'target_address_type_unsupported' };
+    }
 
     if (!info.txCers) info.txCers = {};
-    if (info.txCers[item.TXCer.TXCerID] !== undefined) return;
-
-    info.txCers[item.TXCer.TXCerID] = item.TXCer.Value;
+    const alreadyStored = info.txCers[item.TXCer.TXCerID] !== undefined;
+    if (!alreadyStored) info.txCers[item.TXCer.TXCerID] = normalizeStoredAmount(item.TXCer.Value);
 
     const store = account.txCerStore || {};
     store[item.TXCer.TXCerID] = item.TXCer;
     account.txCerStore = store;
     const issuanceMetadata = extractTXCerIssuanceMetadata(item);
     if (issuanceMetadata) {
-        account.txCerIssuanceRecords = {
-            ...(account.txCerIssuanceRecords || {}),
-            [item.TXCer.TXCerID]: issuanceMetadata,
-        };
+        account.txCerIssuanceRecords = account.txCerIssuanceRecords || {};
+        account.txCerIssuanceRecords[item.TXCer.TXCerID] = mergeTXCerEvidenceMetadata(
+            account.txCerIssuanceRecords[item.TXCer.TXCerID],
+            issuanceMetadata,
+        ) as TXCerIssuanceMetadata;
     }
     markTXCerActive(account, item.TXCer.TXCerID, normalized, item.TXCer.Value);
 
     recalcAddressBalance(info);
+    return {
+        accepted: true,
+        newlyStored: !alreadyStored,
+        txCerID: item.TXCer.TXCerID,
+    };
 }
 
 function extractTXCerIssuanceMetadata(item: TXCerToUser): TXCerIssuanceMetadata | null {
     if (!item.IssuanceRecordID) {
         return null;
     }
-    return {
-        issuanceRecordID: item.IssuanceRecordID,
-        issuanceStatus: item.IssuanceStatus,
-        issuanceProof: item.IssuanceProof,
-        issueBatchID: item.IssueBatchID || item.IssuanceProof?.BatchID,
-        deliveredAt: item.DeliveredAt,
-    };
+    const detail = item.IssuanceRecord || {
+        RecordID: item.IssuanceRecordID,
+        Status: item.IssuanceStatus,
+        Proof: item.IssuanceProof,
+        BatchID: item.IssueBatchID,
+        TXCer: item.TXCer,
+        TXCerID: item.TXCer.TXCerID,
+        TXID: item.TXCer.TXID,
+        ToAddress: item.ToAddress,
+        GuarGroupID: item.TXCer.FromGuarGroupID,
+        LiabilityReceipt: item.LiabilityReceipt,
+    } as TXCerIssuanceDetailView;
+    const metadata = buildTXCerIssuanceMetadata(detail);
+    metadata.deliveredAt = item.DeliveredAt;
+    return metadata;
 }
 
 async function syncTXCerStatuses(force = false): Promise<void> {
     if (!activeAccountId || !activeGroupId) return;
+    const requestAccountId = activeAccountId;
+    const requestGroupId = activeGroupId;
+    const requestAssignUrl = activeAssignUrl || API_BASE_URL;
     try {
-        const account = await getAccount(activeAccountId);
-        if (!account) return;
-        const baseUrl = activeAssignUrl || API_BASE_URL;
-        const endpoint = buildApiUrl(baseUrl, API_ENDPOINTS.ASSIGN_TXCER_STATUSES(activeGroupId));
-        const url = `${endpoint}?userID=${activeAccountId}`;
+        const endpoint = buildApiUrl(requestAssignUrl, API_ENDPOINTS.ASSIGN_TXCER_STATUSES(requestGroupId));
+        const url = `${endpoint}?userID=${requestAccountId}`;
         const data = await apiClient.get<TXCerStatusResponse>(url, {
             timeout: 5000,
             retries: force ? 0 : 1,
@@ -461,22 +548,24 @@ async function syncTXCerStatuses(force = false): Promise<void> {
             useBigIntParsing: true,
         });
         if (!data.success || !Array.isArray(data.statuses)) return;
-        for (const view of data.statuses) {
-            processTxCerStatusChange(account, view);
-        }
-        recalcTotals(account);
-        await saveAccount(account);
-        dispatchAccountUpdate(account.accountId);
+        await mutateAccount(requestAccountId, (latest) => {
+            for (const view of data.statuses) processTxCerStatusChange(latest, view);
+            recalcTotals(latest);
+            return latest;
+        });
+        dispatchAccountUpdate(requestAccountId);
     } catch (error) {
         console.debug('[TXCerStatus] Full status sync skipped:', error);
     }
 }
 
-async function pollTXCerStatusChanges(account: UserAccount): Promise<boolean> {
-    if (!activeGroupId) return false;
-    const baseUrl = activeAssignUrl || API_BASE_URL;
-    const endpoint = buildApiUrl(baseUrl, API_ENDPOINTS.ASSIGN_TXCER_STATUS_CHANGE(activeGroupId));
-    const url = `${endpoint}?userID=${account.accountId}&limit=10&consume=true`;
+async function pollTXCerStatusChanges(
+    accountId: string,
+    groupId: string,
+    assignUrl: string
+): Promise<TXCerStatusView[]> {
+    const endpoint = buildApiUrl(assignUrl, API_ENDPOINTS.ASSIGN_TXCER_STATUS_CHANGE(groupId));
+    const url = `${endpoint}?userID=${accountId}&limit=10&consume=true`;
     const data = await apiClient.get<TXCerStatusChangeResponse>(url, {
         timeout: 5000,
         retries: 0,
@@ -484,12 +573,9 @@ async function pollTXCerStatusChanges(account: UserAccount): Promise<boolean> {
         useBigIntParsing: true,
     });
     if (!data.success || !Array.isArray(data.changes) || data.changes.length === 0) {
-        return false;
+        return [];
     }
-    for (const view of data.changes) {
-        processTxCerStatusChange(account, view);
-    }
-    return true;
+    return data.changes;
 }
 
 async function processAccountUpdate(account: UserAccount, update: AccountUpdateInfo): Promise<void> {
@@ -581,12 +667,14 @@ async function pollAccountUpdates(force = false): Promise<void> {
     if (isPolling) return;
     if (!force && isAccountPollingActive()) return;
     if (!activeAccountId || !activeGroupId) return;
+    const requestAccountId = activeAccountId;
+    const requestGroupId = activeGroupId;
+    const requestAssignUrl = activeAssignUrl || API_BASE_URL;
 
     isPolling = true;
     try {
-        const baseUrl = activeAssignUrl || API_BASE_URL;
-        const endpoint = buildApiUrl(baseUrl, API_ENDPOINTS.ASSIGN_ACCOUNT_UPDATE(activeGroupId));
-        const url = `${endpoint}?userID=${activeAccountId}&consume=true`;
+        const endpoint = buildApiUrl(requestAssignUrl, API_ENDPOINTS.ASSIGN_ACCOUNT_UPDATE(requestGroupId));
+        const url = `${endpoint}?userID=${requestAccountId}&consume=true`;
         const data = await apiClient.get<AccountUpdateResponse>(url, {
             timeout: 5000,
             retries: 0,
@@ -596,15 +684,11 @@ async function pollAccountUpdates(force = false): Promise<void> {
         consecutiveFailures = 0;
         if (!data.success || !data.updates?.length) return;
 
-        const account = await getAccount(activeAccountId);
-        if (!account) return;
-
-        for (const update of data.updates) {
-            await processAccountUpdate(account, update);
-        }
-
-        await saveAccount(account);
-        dispatchAccountUpdate(account.accountId);
+        await mutateAccount(requestAccountId, async (latest) => {
+            for (const update of data.updates) await processAccountUpdate(latest, update);
+            return latest;
+        });
+        dispatchAccountUpdate(requestAccountId);
     } catch (error) {
         consecutiveFailures += 1;
         if (isNetworkError(error) || isTimeoutError(error)) {
@@ -622,12 +706,14 @@ async function pollTXCerChanges(force = false): Promise<void> {
     if (isPollingTXCer) return;
     if (!force && isAccountPollingActive()) return;
     if (!activeAccountId || !activeGroupId) return;
+    const requestAccountId = activeAccountId;
+    const requestGroupId = activeGroupId;
+    const requestAssignUrl = activeAssignUrl || API_BASE_URL;
 
     isPollingTXCer = true;
     try {
-        const baseUrl = activeAssignUrl || API_BASE_URL;
-        const endpoint = buildApiUrl(baseUrl, API_ENDPOINTS.ASSIGN_TXCER_CHANGE(activeGroupId));
-        const url = `${endpoint}?userID=${activeAccountId}&limit=10&consume=true`;
+        const endpoint = buildApiUrl(requestAssignUrl, API_ENDPOINTS.ASSIGN_TXCER_CHANGE(requestGroupId));
+        const url = `${endpoint}?userID=${requestAccountId}&limit=10&consume=true`;
         const data = await apiClient.get<TXCerChangeResponse>(url, {
             timeout: 5000,
             retries: 0,
@@ -636,30 +722,22 @@ async function pollTXCerChanges(force = false): Promise<void> {
         });
         txCerFailures = 0;
 
-        const account = await getAccount(activeAccountId);
-        if (!account) return;
-
-        let hasChanges = false;
-        if (data.success && data.changes?.length) {
-            for (const change of data.changes) {
-                processTxCerChange(account, change);
-                hasChanges = true;
-            }
-        }
+        const changes = data.success && data.changes?.length ? data.changes : [];
+        let statusChanges: TXCerStatusView[] = [];
         try {
-            if (await pollTXCerStatusChanges(account)) {
-                hasChanges = true;
-            }
+            statusChanges = await pollTXCerStatusChanges(requestAccountId, requestGroupId, requestAssignUrl);
         } catch (statusError) {
             console.debug('[TXCerStatus] Incremental poll skipped:', statusError);
         }
-        if (!hasChanges) {
-            return;
-        }
+        if (changes.length === 0 && statusChanges.length === 0) return;
 
-        recalcTotals(account);
-        await saveAccount(account);
-        dispatchAccountUpdate(account.accountId);
+        await mutateAccount(requestAccountId, (latest) => {
+            for (const change of changes) processTxCerChange(latest, change);
+            for (const view of statusChanges) processTxCerStatusChange(latest, view);
+            recalcTotals(latest);
+            return latest;
+        });
+        dispatchAccountUpdate(requestAccountId);
     } catch (error) {
         txCerFailures += 1;
         if (txCerFailures >= MAX_CONSECUTIVE_FAILURES) {
@@ -670,16 +748,18 @@ async function pollTXCerChanges(force = false): Promise<void> {
     }
 }
 
-async function pollCrossOrgTXCers(force = false): Promise<void> {
+async function pollCrossOrgTXCers(_force = false): Promise<void> {
     if (isPollingCrossOrg) return;
-    if (!force && isAccountPollingActive()) return;
     if (!activeAccountId || !activeGroupId) return;
+
+    const requestAccountId = activeAccountId;
+    const requestGroupId = activeGroupId;
+    const requestAssignUrl = activeAssignUrl || API_BASE_URL;
 
     isPollingCrossOrg = true;
     try {
-        const baseUrl = activeAssignUrl || API_BASE_URL;
-        const endpoint = buildApiUrl(baseUrl, API_ENDPOINTS.ASSIGN_CROSS_ORG_TXCER(activeGroupId));
-        const url = `${endpoint}?userID=${activeAccountId}&limit=10&consume=true`;
+        const endpoint = buildApiUrl(requestAssignUrl, API_ENDPOINTS.ASSIGN_CROSS_ORG_TXCER(requestGroupId));
+        const url = `${endpoint}?userID=${requestAccountId}&limit=10&consume=false`;
         const data = await apiClient.get<CrossOrgTXCerResponse>(url, {
             timeout: 5000,
             retries: 0,
@@ -687,18 +767,28 @@ async function pollCrossOrgTXCers(force = false): Promise<void> {
             useBigIntParsing: true,
         });
         crossOrgFailures = 0;
-        if (!data.success || !data.txcers?.length) return;
-
-        const account = await getAccount(activeAccountId);
-        if (!account) return;
-
-        for (const item of data.txcers) {
-            processTxCerToUser(account, item);
+        if (!data.success || !data.txcers?.length) {
+            await schedulePendingTXCerEvidenceRefreshes();
+            return;
         }
 
-        recalcTotals(account);
-        await saveAccount(account);
-        dispatchAccountUpdate(account.accountId);
+        const acceptedIDs: string[] = [];
+        await mutateAccount(requestAccountId, (latest) => {
+            for (const item of data.txcers) {
+                const result = processTxCerToUser(latest, item);
+                if (result.accepted && result.txCerID) acceptedIDs.push(result.txCerID);
+                if (!result.accepted) {
+                    console.warn('[CrossOrgTXCer] Delivery retained for retry:', result.reason);
+                }
+            }
+            recalcTotals(latest);
+            return latest;
+        });
+        dispatchAccountUpdate(requestAccountId);
+        for (const txCerID of acceptedIDs) {
+            scheduleTXCerEvidenceRefresh(requestAccountId, txCerID);
+        }
+        await schedulePendingTXCerEvidenceRefreshes();
     } catch (error) {
         crossOrgFailures += 1;
         if (crossOrgFailures >= MAX_CONSECUTIVE_FAILURES) {
@@ -789,11 +879,13 @@ function startSSESync(): void {
             void (async () => {
                 try {
                     const data = parseBigIntJson<AccountUpdateInfo>((event as MessageEvent).data);
-                    const account = await getAccount(activeAccountId as string);
-                    if (!account) return;
-                    await processAccountUpdate(account, data);
-                    await saveAccount(account);
-                    dispatchAccountUpdate(account.accountId);
+                    const requestAccountId = activeAccountId;
+                    if (!requestAccountId) return;
+                    await mutateAccount(requestAccountId, async (latest) => {
+                        await processAccountUpdate(latest, data);
+                        return latest;
+                    });
+                    dispatchAccountUpdate(requestAccountId);
                 } catch (error) {
                     console.error('[AccountSSE] Failed to parse account_update:', error);
                 }
@@ -804,12 +896,14 @@ function startSSESync(): void {
             void (async () => {
                 try {
                     const data = parseBigIntJson<TXCerChangeToUser>((event as MessageEvent).data);
-                    const account = await getAccount(activeAccountId as string);
-                    if (!account) return;
-                    processTxCerChange(account, data);
-                    recalcTotals(account);
-                    await saveAccount(account);
-                    dispatchAccountUpdate(account.accountId);
+                    const requestAccountId = activeAccountId;
+                    if (!requestAccountId) return;
+                    await mutateAccount(requestAccountId, (latest) => {
+                        processTxCerChange(latest, data);
+                        recalcTotals(latest);
+                        return latest;
+                    });
+                    dispatchAccountUpdate(requestAccountId);
                 } catch (error) {
                     console.error('[AccountSSE] Failed to parse txcer_change:', error);
                 }
@@ -820,12 +914,14 @@ function startSSESync(): void {
             void (async () => {
                 try {
                     const data = parseBigIntJson<TXCerStatusView>((event as MessageEvent).data);
-                    const account = await getAccount(activeAccountId as string);
-                    if (!account) return;
-                    processTxCerStatusChange(account, data);
-                    recalcTotals(account);
-                    await saveAccount(account);
-                    dispatchAccountUpdate(account.accountId);
+                    const requestAccountId = activeAccountId;
+                    if (!requestAccountId) return;
+                    await mutateAccount(requestAccountId, (latest) => {
+                        processTxCerStatusChange(latest, data);
+                        recalcTotals(latest);
+                        return latest;
+                    });
+                    dispatchAccountUpdate(requestAccountId);
                 } catch (error) {
                     console.error('[AccountSSE] Failed to parse txcer_status_change:', error);
                 }
@@ -835,19 +931,21 @@ function startSSESync(): void {
         eventSource.addEventListener('cross_org_txcer', (event) => {
             void (async () => {
                 try {
+                    const requestAccountId = activeAccountId;
+                    if (!requestAccountId) return;
                     const data = parseBigIntJson<TXCerToUser | CrossOrgTXCerResponse>((event as MessageEvent).data);
-                    const account = await getAccount(activeAccountId as string);
-                    if (!account) return;
-                    if ((data as CrossOrgTXCerResponse).txcers) {
-                        for (const item of (data as CrossOrgTXCerResponse).txcers) {
-                            processTxCerToUser(account, item);
+                    const acceptedIDs: string[] = [];
+                    await mutateAccount(requestAccountId, (latest) => {
+                        const items = (data as CrossOrgTXCerResponse).txcers || [data as TXCerToUser];
+                        for (const item of items) {
+                            const result = processTxCerToUser(latest, item);
+                            if (result.accepted && result.txCerID) acceptedIDs.push(result.txCerID);
                         }
-                    } else {
-                        processTxCerToUser(account, data as TXCerToUser);
-                    }
-                    recalcTotals(account);
-                    await saveAccount(account);
-                    dispatchAccountUpdate(account.accountId);
+                        recalcTotals(latest);
+                        return latest;
+                    });
+                    dispatchAccountUpdate(requestAccountId);
+                    for (const txCerID of acceptedIDs) scheduleTXCerEvidenceRefresh(requestAccountId, txCerID);
                 } catch (error) {
                     console.error('[AccountSSE] Failed to parse cross_org_txcer:', error);
                 }

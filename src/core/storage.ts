@@ -5,6 +5,7 @@
  */
 
 import type { PublicKeyEnvelope, TxCertificate, TXCerIssuanceMetadata, TXCerStatusView, UTXOData } from './blockchain';
+import { formatAmount, normalizeStoredAmount, parseAmount, type AmountDecimal, type AmountInput } from './amount';
 import { decryptJsonPayload, encryptJsonPayload, type EncryptedKeyData } from './keyEncryption';
 import {
     AlgorithmECDSAP256,
@@ -20,6 +21,7 @@ import {
     buildInitialSeedMetaFromPrivateKey,
     recoverDeterministicSeedChainStateFromPrivateKey,
 } from './seedChain';
+import { createSerializedRecordMutator, withSerializedLock } from './serializedMutation';
 
 // ========================================
 // 类型定义
@@ -34,7 +36,7 @@ export interface WalletKeys {
 export interface AddressInfo {
     address: string;
     type: number; // 0=PGC, 1=BTC, 2=ETH
-    balance: number;
+    balance: AmountDecimal;
     utxoCount: number;
     txCerCount: number;
     source?: 'created' | 'imported';
@@ -42,8 +44,8 @@ export interface AddressInfo {
     pubXHex?: string;
     pubYHex?: string;
     utxos?: Record<string, UTXOData>;
-    txCers?: Record<string, number>;
-    value?: { totalValue: number; utxoValue: number; txCerValue: number };
+    txCers?: Record<string, AmountDecimal>;
+    value?: { totalValue: AmountDecimal; utxoValue: AmountDecimal; txCerValue: AmountDecimal };
     estInterest?: number;
     gas?: number;
     EstInterest?: number;
@@ -64,6 +66,24 @@ export interface AddressInfo {
     pendingSeedTxId?: string;
     pendingSeedAt?: number;
     lastProtocolSyncAt?: number;
+    amountResyncRequired?: boolean;
+}
+
+function normalizeTXCerAmountMap(value: unknown): { amounts: Record<string, AmountDecimal>; needsResync: boolean } {
+    const amounts: Record<string, AmountDecimal> = {};
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { amounts, needsResync: false };
+    let needsResync = false;
+    for (const [txCerID, raw] of Object.entries(value as Record<string, unknown>)) {
+        try {
+            const candidate = raw && typeof raw === 'object'
+                ? ((raw as Record<string, unknown>).Value ?? (raw as Record<string, unknown>).value)
+                : raw;
+            amounts[txCerID] = normalizeStoredAmount(candidate ?? '0');
+        } catch {
+            needsResync = true;
+        }
+    }
+    return { amounts, needsResync };
 }
 
 export type AddressRegistrationState = 'unknown' | 'pending' | 'registered' | 'failed';
@@ -92,7 +112,8 @@ export interface UserAccount {
     onboardingComplete?: boolean;
     onboardingStep?: OnboardingStep;
     mainAddressRegistered?: boolean;
-    totalBalance: Record<number, number>; // coinType -> balance
+    totalBalance: Record<number, AmountDecimal>; // coinType -> exact balance
+    amountResyncRequired?: boolean;
     createdAt: number;
     lastLogin: number;
 }
@@ -114,14 +135,14 @@ export interface TransactionRecord {
     type: 'send' | 'receive';
     status: 'pending' | 'success' | 'failed';
     transferMode?: 'normal' | 'quick' | 'cross' | 'incoming' | 'unknown';
-    amount: number;
+    amount: AmountInput;
     coinType: number;
     currency?: string;
     from: string;
     to: string;
     timestamp: number;
     txHash?: string;
-    gas?: number;
+    gas?: AmountInput;
     guarantorOrg?: string;
     blockNumber?: number;
     confirmations?: number;
@@ -160,12 +181,38 @@ function decodeOptionalBytes(value: unknown): number[] {
     }
 }
 
-function normalizeAddressValue(value: unknown, fallbackBalance = 0): { totalValue: number; utxoValue: number; txCerValue: number } {
+function normalizeOptionalAmount(value: unknown): { amount: AmountDecimal; valid: boolean } {
+    if (value == null || value === '') return { amount: '0', valid: true };
+    try {
+        return { amount: normalizeStoredAmount(value), valid: true };
+    } catch {
+        return { amount: '0', valid: false };
+    }
+}
+
+function normalizeAddressValue(
+    value: unknown,
+    fallbackBalance: unknown = '0'
+): { value: { totalValue: AmountDecimal; utxoValue: AmountDecimal; txCerValue: AmountDecimal }; needsResync: boolean } {
     const raw = (value && typeof value === 'object') ? value as Record<string, unknown> : {};
-    const totalValue = Number(raw.totalValue ?? raw.TotalValue ?? fallbackBalance) || 0;
-    const utxoValue = Number(raw.utxoValue ?? raw.UTXOValue ?? fallbackBalance) || 0;
-    const txCerValue = Number(raw.txCerValue ?? raw.TXCerValue ?? 0) || 0;
-    return { totalValue, utxoValue, txCerValue };
+    const rawTotal = raw.totalValue ?? raw.TotalValue;
+    const rawUTXO = raw.utxoValue ?? raw.UTXOValue ?? fallbackBalance;
+    const rawTXCer = raw.txCerValue ?? raw.TXCerValue;
+    const total = normalizeOptionalAmount(rawTotal);
+    const utxo = normalizeOptionalAmount(rawUTXO);
+    const txCer = normalizeOptionalAmount(rawTXCer);
+    const utxoUnits = parseAmount(utxo.amount);
+    const txCerUnits = parseAmount(txCer.amount);
+    const totalUnits = rawTotal == null ? utxoUnits + txCerUnits : parseAmount(total.amount);
+    const normalizedTotal = formatAmount(totalUnits);
+    return {
+        value: {
+            totalValue: normalizedTotal,
+            utxoValue: formatAmount(utxoUnits),
+            txCerValue: formatAmount(txCerUnits),
+        },
+        needsResync: !total.valid || !utxo.valid || !txCer.valid,
+    };
 }
 
 function isRegistrationState(value: unknown): value is AddressRegistrationState {
@@ -430,8 +477,12 @@ export function normalizeAddressDataForStorage(
         registrationState = 'failed';
     }
 
-    const balance = Number(current.balance ?? (current.Value as any)?.UTXOValue ?? 0) || 0;
-    const value = normalizeAddressValue(current.value ?? current.Value, balance);
+    const normalizedValue = normalizeAddressValue(
+        current.value ?? current.Value,
+        current.balance ?? (current.Value as any)?.UTXOValue ?? '0'
+    );
+    const balance = normalizedValue.value.utxoValue;
+    const normalizedTXCers = normalizeTXCerAmountMap(current.txCers ?? current.TXCers);
     return {
         address: normalizedAddress,
         type: Number(current.type ?? current.Type ?? 0) || 0,
@@ -443,8 +494,8 @@ export function normalizeAddressDataForStorage(
         pubXHex: pubXHex || undefined,
         pubYHex: pubYHex || undefined,
         utxos: ((current.utxos ?? current.UTXO) as Record<string, UTXOData>) || {},
-        txCers: ((current.txCers ?? current.TXCers) as Record<string, number>) || {},
-        value,
+        txCers: normalizedTXCers.amounts,
+        value: normalizedValue.value,
         estInterest: Number(current.estInterest ?? current.EstInterest ?? current.Interest ?? current.gas ?? 0) || 0,
         gas: Number(current.gas ?? current.estInterest ?? current.EstInterest ?? current.Interest ?? 0) || 0,
         EstInterest: Number(current.EstInterest ?? current.estInterest ?? current.Interest ?? current.gas ?? 0) || 0,
@@ -465,6 +516,7 @@ export function normalizeAddressDataForStorage(
         pendingSeedTxId: current.pendingSeedTxId ? String(current.pendingSeedTxId) : undefined,
         pendingSeedAt: Number(current.pendingSeedAt || 0) || undefined,
         lastProtocolSyncAt: Number(current.lastProtocolSyncAt || options.syncTime || 0) || undefined,
+        amountResyncRequired: normalizedValue.needsResync || normalizedTXCers.needsResync || Boolean(current.amountResyncRequired),
     };
 }
 
@@ -476,8 +528,13 @@ export function normalizeAccountForStorage(account: UserAccount): UserAccount {
         txCerStore: { ...(account.txCerStore || {}) },
         txCerStatuses: { ...(account.txCerStatuses || {}) },
         txCerIssuanceRecords: { ...(account.txCerIssuanceRecords || {}) },
-        totalBalance: { 0: 0, 1: 0, 2: 0, ...(account.totalBalance || {}) },
+        totalBalance: { 0: '0', 1: '0', 2: '0' },
     };
+    for (const [type, value] of Object.entries(account.totalBalance || {})) {
+        const normalizedAmount = normalizeOptionalAmount(value);
+        normalized.totalBalance[Number(type)] = normalizedAmount.amount;
+        normalized.amountResyncRequired ||= !normalizedAmount.valid;
+    }
     for (const [rawAddress, info] of Object.entries(account.addresses || {})) {
         const address = normalizeHexString(info?.address || rawAddress);
         if (!address) continue;
@@ -494,6 +551,25 @@ export function normalizeAccountForStorage(account: UserAccount): UserAccount {
         }
     }
     return normalized;
+}
+
+function markTXCerEvidenceForReverification(account: UserAccount): UserAccount {
+    for (const metadata of Object.values(account.txCerIssuanceRecords || {})) {
+        if (!metadata.security) continue;
+        metadata.security = {
+            ...metadata.security,
+            fastEvidenceStatus: metadata.security.fastEvidenceStatus === 'Failed' ? 'Failed' : 'Pending',
+            cfaaAuditStatus: metadata.security.cfaaAuditStatus === 'Failed' ? 'Failed' : 'Pending',
+            fastEvidenceError: metadata.security.fastEvidenceStatus === 'Failed'
+                ? metadata.security.fastEvidenceError
+                : 'Waiting for restart verification',
+            cfaaAuditError: metadata.security.cfaaAuditStatus === 'Failed'
+                ? metadata.security.cfaaAuditError
+                : 'Waiting for restart verification',
+            checkedAt: 0,
+        };
+    }
+    return account;
 }
 
 // ========================================
@@ -542,13 +618,41 @@ export async function getAccount(accountId: string): Promise<UserAccount | null>
     return normalized;
 }
 
+const mutateStoredAccount = createSerializedRecordMutator<UserAccount>({
+    lockName: 'pangupay-accounts',
+    load: async (accountId) => {
+        const accounts = await getStorageData<Record<string, UserAccount>>(STORAGE_KEYS.ACCOUNTS);
+        return accounts?.[accountId] ? normalizeAccountForStorage(accounts[accountId]) : null;
+    },
+    save: async (accountId, account) => {
+        const accounts = await getStorageData<Record<string, UserAccount>>(STORAGE_KEYS.ACCOUNTS) || {};
+        accounts[accountId] = normalizeAccountForStorage(account);
+        await setStorageData(STORAGE_KEYS.ACCOUNTS, accounts);
+    },
+    verify: async (accountId) => {
+        const accounts = await getStorageData<Record<string, UserAccount>>(STORAGE_KEYS.ACCOUNTS);
+        return accounts?.[accountId] ? normalizeAccountForStorage(accounts[accountId]) : null;
+    },
+});
+
+/**
+ * Reload and patch one account under a cross-context lock. Background jobs must
+ * use this instead of saving a network-request-era account snapshot.
+ */
+export async function mutateAccount(
+    accountId: string,
+    updater: (latest: UserAccount) => UserAccount | Promise<UserAccount>
+): Promise<UserAccount> {
+    return mutateStoredAccount(accountId, updater);
+}
+
 export async function getAllAccounts(): Promise<UserAccount[]> {
     const accounts = await getStorageData<Record<string, UserAccount>>(STORAGE_KEYS.ACCOUNTS);
     if (!accounts) return [];
     const normalizedAccounts: Record<string, UserAccount> = {};
     let changed = false;
     for (const [accountId, account] of Object.entries(accounts)) {
-        const normalized = normalizeAccountForStorage(account);
+        const normalized = markTXCerEvidenceForReverification(normalizeAccountForStorage(account));
         normalizedAccounts[accountId] = normalized;
         if (JSON.stringify(normalized) !== JSON.stringify(account)) changed = true;
     }
@@ -556,69 +660,6 @@ export async function getAllAccounts(): Promise<UserAccount[]> {
         await setStorageData(STORAGE_KEYS.ACCOUNTS, normalizedAccounts);
     }
     return Object.values(normalizedAccounts);
-}
-
-export async function clearStaleTxCerData(accountId?: string): Promise<void> {
-    const accounts = await getStorageData<Record<string, UserAccount>>(STORAGE_KEYS.ACCOUNTS) || {};
-    const targets = accountId ? [accountId] : Object.keys(accounts);
-    let changed = false;
-
-    for (const id of targets) {
-        const account = accounts[id];
-        if (!account) continue;
-        let accountChanged = false;
-
-        if (account.txCerStore && Object.keys(account.txCerStore).length > 0) {
-            account.txCerStore = {};
-            accountChanged = true;
-        }
-        if (account.txCerStatuses && Object.keys(account.txCerStatuses).length > 0) {
-            account.txCerStatuses = {};
-            accountChanged = true;
-        }
-        for (const info of Object.values(account.addresses || {})) {
-            if (!info) continue;
-            if (info.txCers && Object.keys(info.txCers).length > 0) {
-                info.txCers = {};
-                info.txCerCount = 0;
-                accountChanged = true;
-            }
-            if (info.value) {
-                if (info.value.txCerValue !== 0) {
-                    info.value.txCerValue = 0;
-                    accountChanged = true;
-                }
-                const baseUtxo = Number(info.value.utxoValue ?? info.balance ?? 0) || 0;
-                if (info.value.totalValue !== baseUtxo) {
-                    info.value.totalValue = baseUtxo;
-                    accountChanged = true;
-                }
-            } else {
-                info.value = {
-                    totalValue: info.balance || 0,
-                    utxoValue: info.balance || 0,
-                    txCerValue: 0,
-                };
-                accountChanged = true;
-            }
-        }
-
-        if (accountChanged) {
-            const totals: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
-            const mainAddress = account.mainAddress?.toLowerCase() || '';
-            for (const [addr, info] of Object.entries(account.addresses || {})) {
-                if (mainAddress && addr.toLowerCase() === mainAddress) continue;
-                totals[info.type || 0] = (totals[info.type || 0] || 0) + (info.balance || 0);
-            }
-            account.totalBalance = totals;
-            accounts[id] = account;
-            changed = true;
-        }
-    }
-
-    if (changed) {
-        await setStorageData(STORAGE_KEYS.ACCOUNTS, accounts);
-    }
 }
 
 export async function deleteAccount(accountId: string): Promise<void> {
@@ -921,6 +962,10 @@ export interface OrganizationChoice {
     assignAPIEndpoint?: string;
     aggrAPIEndpoint?: string;
     pledgeAddress: string;
+    aggrNodeId?: string;
+    assignNodeId?: string;
+    aggrPublicKey?: import('./signature').PublicKeyNew;
+    assignPublicKey?: import('./signature').PublicKeyNew;
 }
 
 export async function saveOrganization(accountId: string, org: OrganizationChoice): Promise<void> {
@@ -974,11 +1019,11 @@ export interface DappSignPendingConnection {
 
 export interface DappTransactionRecipient {
     to: string;
-    amount: number;
+    amount: AmountInput;
     coinType?: number;
     publicKey?: string;
     orgId?: string;
-    transferGas?: number;
+    transferGas?: AmountInput;
     seedAnchor?: number[] | string;
     seedChainStep?: number;
     defaultSpendAlgorithm?: string;
@@ -986,14 +1031,14 @@ export interface DappTransactionRecipient {
 
 export interface DappTransactionRequest {
     to?: string;
-    amount?: number;
+    amount?: AmountInput;
     coinType?: number;
     mode?: 'normal' | 'quick' | 'cross';
-    gas?: number;
-    extraGas?: number;
+    gas?: AmountInput;
+    extraGas?: AmountInput;
     publicKey?: string;
     orgId?: string;
-    transferGas?: number;
+    transferGas?: AmountInput;
     seedAnchor?: number[] | string;
     seedChainStep?: number;
     defaultSpendAlgorithm?: string;
@@ -1494,21 +1539,40 @@ function isSessionExpired(): boolean {
 }
 
 async function refreshSessionExpiry(): Promise<void> {
-    if (!sessionAccountId || !sessionPrivateKey) return;
-    try {
-        const settings = await getSettings();
-        sessionAutoLockMs = Math.max(1, settings.autoLockMinutes || DEFAULT_SETTINGS.autoLockMinutes) * 60 * 1000;
-    } catch {
-        sessionAutoLockMs = DEFAULT_SETTINGS.autoLockMinutes * 60 * 1000;
-    }
-    sessionExpiresAt = Date.now() + sessionAutoLockMs;
-    const record: SessionRecord = {
-        accountId: sessionAccountId,
-        privKey: sessionPrivateKey,
-        expiresAt: sessionExpiresAt,
-        addressKeys: Object.fromEntries(sessionAddressKeys),
-    };
-    await setStorageData(STORAGE_KEYS.SESSION, record);
+    const accountId = sessionAccountId;
+    const privateKey = sessionPrivateKey;
+    if (!accountId || !privateKey) return;
+
+    await withSerializedLock('pangupay-session', async () => {
+        if (sessionAccountId !== accountId || sessionPrivateKey !== privateKey) return;
+        if ((await getActiveAccountId()) !== accountId) return;
+
+        try {
+            const settings = await getSettings();
+            sessionAutoLockMs = Math.max(1, settings.autoLockMinutes || DEFAULT_SETTINGS.autoLockMinutes) * 60 * 1000;
+        } catch {
+            sessionAutoLockMs = DEFAULT_SETTINGS.autoLockMinutes * 60 * 1000;
+        }
+
+        // Recheck after asynchronous reads so a stale extension context cannot
+        // overwrite the session selected by another popup/background context.
+        if (
+            sessionAccountId !== accountId
+            || sessionPrivateKey !== privateKey
+            || (await getActiveAccountId()) !== accountId
+        ) {
+            return;
+        }
+
+        sessionExpiresAt = Date.now() + sessionAutoLockMs;
+        const record: SessionRecord = {
+            accountId,
+            privKey: privateKey,
+            expiresAt: sessionExpiresAt,
+            addressKeys: Object.fromEntries(sessionAddressKeys),
+        };
+        await setStorageData(STORAGE_KEYS.SESSION, record);
+    });
 }
 
 export async function hydrateSession(): Promise<void> {

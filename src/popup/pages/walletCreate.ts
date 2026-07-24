@@ -291,7 +291,7 @@ async function handleAddWallet(): Promise<void> {
       account.addresses[normalizedAddress] = {
         address: normalizedAddress,
         type: coinType,
-        balance: 0,
+        balance: '0',
         utxoCount: 0,
         txCerCount: 0,
         source: 'created',
@@ -301,7 +301,7 @@ async function handleAddWallet(): Promise<void> {
         pubYHex: generatedPubYHex || '',
         utxos: {},
         txCers: {},
-        value: { totalValue: 0, utxoValue: 0, txCerValue: 0 },
+        value: { totalValue: '0', utxoValue: '0', txCerValue: '0' },
         estInterest: 0,
       };
     } else if (!account.addresses[normalizedAddress].source) {

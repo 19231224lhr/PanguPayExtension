@@ -786,7 +786,7 @@ async function enrichDappRecipients(request: DappTransactionRequest): Promise<Tr
             (meta?.publicKey ? `${meta.publicKey.x},${meta.publicKey.y}` : '');
         out.push({
             address: recipient.to,
-            amount: Number(recipient.amount || 0),
+            amount: recipient.amount ?? '0',
             coinType: Number(recipient.coinType ?? request.coinType ?? meta?.type ?? 0),
             publicKey,
             orgId: recipient.orgId || (useRequestWideMeta ? request.orgId : '') || meta?.groupId || '',
@@ -877,8 +877,8 @@ async function handleTxApprove(requestId: string, payload: unknown): Promise<Pan
             coinType: recipients[0]?.coinType || 0,
             transferMode: mode,
             recipients,
-            gas: Number(pending.request.gas || 0),
-            extraGas: Number(pending.request.extraGas || 0),
+            gas: pending.request.gas ?? '0',
+            extraGas: pending.request.extraGas ?? '0',
             changeAddresses,
         });
     } catch (error) {

@@ -3,6 +3,7 @@ import type { UserAccount } from './storage';
 import { getSessionAddressKey, getSessionKey, saveAccount } from './storage';
 import { buildAddressBalanceInfo, convertToStorageUTXO, queryAddressInfo } from './accountQuery';
 import { convertHexToPublicKey, getPublicKeyHexFromPrivate } from './signature';
+import { formatAmount, parseAmount } from './amount';
 
 function toHexFromDec(value: number | string): string {
     try {
@@ -52,13 +53,13 @@ export async function syncAccountAddresses(
         const existing = account.addresses[normalized] || {
             address: normalized,
             type: info.type || 0,
-            balance: 0,
+            balance: '0',
             utxoCount: 0,
             txCerCount: 0,
         };
-        const existingTxCerValue = Object.values(existing.txCers || {}).reduce(
-            (sum, value) => sum + (Number(value) || 0),
-            0
+        const existingTXCerUnits = Object.values(existing.txCers || {}).reduce<bigint>(
+            (sum, value) => sum + parseAmount(value || '0'),
+            0n
         );
 
         const utxos: Record<string, ReturnType<typeof convertToStorageUTXO>> = {};
@@ -96,15 +97,15 @@ export async function syncAccountAddresses(
             ...existing,
             address: normalized,
             type: info.type || existing.type || 0,
-            balance: info.balance || 0,
+            balance: info.balance || '0',
             utxoCount: info.utxoCount || 0,
             txCerCount: Object.keys(existing.txCers || {}).length,
             utxos,
             txCers: existing.txCers || {},
             value: {
-                totalValue: (info.balance || 0) + existingTxCerValue,
-                utxoValue: info.balance || 0,
-                txCerValue: existingTxCerValue,
+                totalValue: formatAmount(parseAmount(info.balance || '0') + existingTXCerUnits),
+                utxoValue: info.balance || '0',
+                txCerValue: formatAmount(existingTXCerUnits),
             },
             estInterest: info.interest || 0,
             EstInterest: info.interest || 0,
@@ -124,19 +125,23 @@ export async function syncAccountAddresses(
 
     }
 
-    const totals: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
+    const totalUnits: Record<number, bigint> = { 0: 0n, 1: 0n, 2: 0n };
     const mainAddress = account.mainAddress?.toLowerCase() || '';
     for (const [addr, info] of Object.entries(account.addresses || {})) {
         if (mainAddress && addr.toLowerCase() === mainAddress) continue;
-        const rawTotal = Number(info.value?.totalValue);
-        const utxoValue = Number(info.value?.utxoValue ?? info.balance ?? 0) || 0;
-        const txCerValue =
-            Number(info.value?.txCerValue) ||
-            Object.values(info.txCers || {}).reduce((sum, value) => sum + (Number(value) || 0), 0);
-        const totalValue = Number.isFinite(rawTotal) ? rawTotal : utxoValue + txCerValue;
-        totals[info.type || 0] = (totals[info.type || 0] || 0) + totalValue;
+        const utxoUnits = parseAmount(info.value?.utxoValue ?? info.balance ?? '0');
+        const txCerUnits = info.value?.txCerValue != null
+            ? parseAmount(info.value.txCerValue)
+            : Object.values(info.txCers || {}).reduce<bigint>((sum, value) => sum + parseAmount(value || '0'), 0n);
+        const combinedUnits = info.value?.totalValue != null
+            ? parseAmount(info.value.totalValue)
+            : utxoUnits + txCerUnits;
+        const type = info.type || 0;
+        totalUnits[type] = (totalUnits[type] || 0n) + combinedUnits;
     }
-    account.totalBalance = totals;
+    account.totalBalance = Object.fromEntries(
+        Object.entries(totalUnits).map(([type, units]) => [Number(type), formatAmount(units)])
+    );
     account.lastLogin = Date.now();
 
     await saveAccount(account);
@@ -155,7 +160,7 @@ export function buildTxUserFromAccount(account: UserAccount): User {
             type: info.type || 0,
             utxos: info.utxos || {},
             txCers: info.txCers || {},
-            value: info.value || { totalValue: info.balance || 0, utxoValue: info.balance || 0, txCerValue: 0 },
+            value: info.value || { totalValue: info.balance || '0', utxoValue: info.balance || '0', txCerValue: '0' },
             estInterest: info.estInterest || 0,
             privHex: addrPriv || undefined,
             pubXHex: info.pubXHex,
@@ -200,8 +205,9 @@ export function buildTxUserFromAccount(account: UserAccount): User {
             addressMsg,
             totalTXCers: account.txCerStore || {},
             txCerStatuses: account.txCerStatuses || {},
-            totalValue: account.totalBalance?.[0] || 0,
-            valueDivision: account.totalBalance || { 0: 0, 1: 0, 2: 0 },
+            txCerIssuanceRecords: account.txCerIssuanceRecords || {},
+            totalValue: account.totalBalance?.[0] || '0',
+            valueDivision: account.totalBalance || { 0: '0', 1: '0', 2: '0' },
             updateTime: Date.now(),
             updateBlock: 0,
         },

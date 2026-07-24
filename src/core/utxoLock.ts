@@ -1,9 +1,10 @@
 import { getActiveAccountId, getStorageData, setStorageData, removeStorageData } from './storage';
+import { formatAmount, normalizeStoredAmount, parseAmount, type AmountDecimal } from './amount';
 
 export interface LockedUTXO {
     utxoId: string;
     address: string;
-    value: number;
+    value: AmountDecimal;
     type: number;
     lockTime: number;
     txId: string;
@@ -15,7 +16,7 @@ interface LockedUTXOStorage {
     lastUpdate: number;
 }
 
-const STORAGE_VERSION = 1;
+const STORAGE_VERSION = 2;
 const STORAGE_KEY_PREFIX = 'pangu_utxo_locks_';
 const LOCK_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
@@ -32,15 +33,22 @@ async function hydrateLocks(accountId: string): Promise<void> {
     const data = await getStorageData<LockedUTXOStorage>(key);
     lockedUtxos.clear();
     activeAccountId = accountId;
-    if (!data || data.version !== STORAGE_VERSION) {
+    if (!data || (data.version !== 1 && data.version !== STORAGE_VERSION)) {
         return;
     }
     const now = Date.now();
     for (const lock of data.lockedUtxos || []) {
         if (now - lock.lockTime < LOCK_EXPIRY_MS) {
-            lockedUtxos.set(lock.utxoId, lock);
+            let value: AmountDecimal = '0';
+            try {
+                value = normalizeStoredAmount(lock.value);
+            } catch {
+                // Keep the ID locked, but never guess an inexact legacy amount.
+            }
+            lockedUtxos.set(lock.utxoId, { ...lock, value });
         }
     }
+    if (data.version !== STORAGE_VERSION) await persistLocks();
 }
 
 async function ensureActiveAccount(): Promise<void> {
@@ -79,6 +87,7 @@ export async function lockUTXOs(
         if (!lockedUtxos.has(utxo.utxoId)) {
             lockedUtxos.set(utxo.utxoId, {
                 ...utxo,
+                value: formatAmount(parseAmount(utxo.value)),
                 lockTime: now,
                 txId,
             });

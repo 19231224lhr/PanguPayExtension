@@ -1,5 +1,28 @@
 import assert from 'node:assert/strict';
-import { normalizeDappTxRequest } from '../src/core/dappTxRequest.ts';
+import vm from 'node:vm';
+import { createRequire } from 'node:module';
+import * as esbuild from 'esbuild';
+
+const result = await esbuild.build({
+  stdin: {
+    contents: `import { normalizeDappTxRequest } from './src/core/dappTxRequest.ts'; globalThis.__normalizeDappTxRequest = normalizeDappTxRequest;`,
+    resolveDir: process.cwd(),
+    sourcefile: 'dapp-tx-request-check-entry.ts',
+    loader: 'ts',
+  },
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  target: 'es2022',
+  write: false,
+  logLevel: 'silent',
+  packages: 'external',
+});
+const context = { console, Buffer, process, require: createRequire(import.meta.url) };
+context.globalThis = context;
+vm.createContext(context);
+vm.runInContext(result.outputFiles[0].text, context, { timeout: 10_000 });
+const normalizeDappTxRequest = context.__normalizeDappTxRequest;
 
 const single = normalizeDappTxRequest({
   toAddress: '  abc123  ',
@@ -17,25 +40,25 @@ const single = normalizeDappTxRequest({
 });
 
 assert.equal(single.to, 'abc123');
-assert.equal(single.amount, 12.5);
+assert.equal(single.amount, '12.5');
 assert.equal(single.coinType, 1);
 assert.equal(single.mode, 'quick');
-assert.equal(single.gas, 2);
-assert.equal(single.extraGas, 3);
+assert.equal(single.gas, '2');
+assert.equal(single.extraGas, '3');
 assert.equal(single.publicKey, 'aa,bb');
 assert.equal(single.orgId, '20250601');
-assert.equal(single.transferGas, 0.25);
+assert.equal(single.transferGas, '0.25');
 assert.deepEqual(single.seedAnchor, [1, 2]);
 assert.equal(single.seedChainStep, 7);
 assert.equal(single.defaultSpendAlgorithm, 'ECDSA_P256');
 assert.equal(single.recipients.length, 1);
-assert.deepEqual(single.recipients[0], {
+assert.deepEqual(JSON.parse(JSON.stringify(single.recipients[0])), {
   to: 'abc123',
-  amount: 12.5,
+  amount: '12.5',
   coinType: 1,
   publicKey: 'aa,bb',
   orgId: '20250601',
-  transferGas: 0.25,
+  transferGas: '0.25',
   seedAnchor: [1, 2],
   seedChainStep: 7,
   defaultSpendAlgorithm: 'ECDSA_P256',
@@ -68,7 +91,7 @@ assert.equal(multi.recipients[0].publicKey, undefined);
 assert.equal(multi.recipients[0].orgId, undefined);
 assert.equal(multi.recipients[1].publicKey, '11,22');
 assert.equal(multi.recipients[1].orgId, '12345678');
-assert.equal(multi.recipients[1].transferGas, 4);
+assert.equal(multi.recipients[1].transferGas, '4');
 assert.equal(multi.recipients[1].seedAnchor, 'base64-anchor');
 assert.equal(multi.recipients[1].seedChainStep, 9);
 
@@ -82,5 +105,10 @@ const filtered = normalizeDappTxRequest({
 
 assert.equal(filtered.recipients.length, 1);
 assert.equal(filtered.recipients[0].to, 'ok');
+
+const large = normalizeDappTxRequest({ to: 'large', amount: '9007199254.74099301' });
+assert.equal(large.amount, '9007199254.74099301');
+assert.equal(large.recipients[0].amount, '9007199254.74099301');
+assert.throws(() => normalizeDappTxRequest({ to: 'unsafe', amount: Number.MAX_SAFE_INTEGER + 1 }));
 
 console.log('[check:dapp] DApp tx request normalization checks passed');

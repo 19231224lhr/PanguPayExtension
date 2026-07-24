@@ -275,7 +275,7 @@ async function handleImport(e: Event): Promise<void> {
                   addresses: {},
                   onboardingComplete: false,
                   onboardingStep: 'wallet',
-                  totalBalance: { 0: 0, 1: 0, 2: 0 },
+                  totalBalance: { 0: '0', 1: '0', 2: '0' },
                   createdAt: Date.now(),
                   lastLogin: Date.now(),
               };

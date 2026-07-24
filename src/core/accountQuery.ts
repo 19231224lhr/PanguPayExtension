@@ -3,7 +3,7 @@
  */
 
 import type { InterestAssign, ProtocolAmount, TXInputNormal, TXOutput, TxCertificate, UTXOData } from './blockchain';
-import { toAmountNumber, toAmountWire } from './amount';
+import { parseAmount, toAmountNumber, toAmountWire, type AmountDecimal } from './amount';
 import {
     API_ENDPOINTS,
     apiClient,
@@ -59,7 +59,7 @@ export interface QueryAddressResponse {
 
 export interface AddressBalanceInfo {
     address: string;
-    balance: number;
+    balance: AmountDecimal;
     interest: number;
     totalAssets: number;
     type: number;
@@ -87,9 +87,9 @@ function normalizeAddress(address: string): string {
 }
 
 function normalizeAddressData(address: string, data: PointAddressData): AddressBalanceInfo {
-    const value = toAmountNumber(data.Value || 0);
+    const value = toAmountWire(data.Value || '0');
     const exists =
-        value > 0 ||
+        parseAmount(value) > 0n ||
         data.Interest > 0 ||
         data.LastHeight > 0 ||
         Object.keys(data.UTXO || {}).length > 0;
@@ -98,7 +98,7 @@ function normalizeAddressData(address: string, data: PointAddressData): AddressB
         address,
         balance: value,
         interest: data.Interest || 0,
-        totalAssets: value + (data.Interest || 0),
+        totalAssets: toAmountNumber(value) + (data.Interest || 0),
         type: data.Type || 0,
         groupID: data.GroupID || '',
         isInGroup: !!(data.GroupID && data.GroupID !== '' && data.GroupID !== '1'),
@@ -273,7 +273,7 @@ export function buildAddressBalanceInfo(
         const normalizedAddr = normalizeAddress(address);
         return {
             address: normalizedAddr,
-            balance: 0,
+            balance: '0',
             interest: 0,
             totalAssets: 0,
             type: 0,

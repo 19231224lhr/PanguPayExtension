@@ -21,10 +21,12 @@ import { requestCapsuleAddress } from '../../core/capsule';
 import { registerAddressesOnMainEntry, unbindAddressOnBackend } from '../../core/address';
 import { syncAccountAddresses } from '../../core/walletSync';
 import { bigIntToHex } from '../../core/signature';
-import { sumSpendableTXCerValue } from '../../core/txCerStatus';
+import { getTXCerStatus, sumSpendableTXCerUnits } from '../../core/txCerStatus';
+import { formatAmount, parseAmount } from '../../core/amount';
 import { getLockedUTXOs } from '../../core/utxoLock';
 import { getActiveLanguage } from '../utils/appSettings';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
+import { escapeHtml } from '../utils/ui';
 
 const COIN_META: Record<number, { short: string; label: string; className: string; decimals: number }> = {
   0: { short: 'P', label: '盘古币', className: 'pgc', decimals: 2 },
@@ -179,8 +181,8 @@ export async function renderHome(): Promise<void> {
   const pgcBalance = totals.pgc;
   const btcBalance = totals.btc;
   const ethBalance = totals.eth;
-  const totalEstimate = Math.round(
-    pgcBalance * USDT_RATES[0] + btcBalance * USDT_RATES[1] + ethBalance * USDT_RATES[2]
+  const totalEstimate = formatAmount(
+    pgcBalance * BigInt(USDT_RATES[0]) + btcBalance * BigInt(USDT_RATES[1]) + ethBalance * BigInt(USDT_RATES[2])
   );
 
   const addressList = walletAddresses.length
@@ -373,9 +375,9 @@ export async function renderHome(): Promise<void> {
   attachAccountUpdateListener();
 }
 
-function renderAssetCard(coinType: number, balance: number): string {
+function renderAssetCard(coinType: number, balance: bigint): string {
   const meta = getCoinMeta(coinType);
-  const displayBalance = balance.toFixed(2);
+  const displayBalance = formatAmount(balance);
   return `
       <div class="asset-card">
         <div class="asset-name">${COIN_NAMES[coinType as keyof typeof COIN_NAMES]}</div>
@@ -391,13 +393,14 @@ function renderAddressCard(account: UserAccount, address: AddressInfo, t: HomeTe
   const shortAddress = address.address.slice(0, 8) + '...' + address.address.slice(-6);
   const detailsId = `address-details-${address.address}`;
   const balanceSnapshot = getAddressBalanceSnapshot(account, address);
-  const totalBalance = balanceSnapshot.total.toFixed(meta.decimals);
-  const availableBalance = balanceSnapshot.available.toFixed(meta.decimals);
+  const totalBalance = formatAmount(balanceSnapshot.total);
+  const availableBalance = formatAmount(balanceSnapshot.available);
   const txCerEntries = Object.entries(address.txCers || {});
-  const txCerTotal = txCerEntries.reduce((sum, [, value]) => sum + (Number(value) || 0), 0);
-  const txCerAvailable = sumSpendableTXCerValue(account, address.txCers || {});
-  const txCerLocked = Math.max(0, txCerTotal - txCerAvailable);
+  const txCerTotal = txCerEntries.reduce((sum, [, value]) => sum + parseAmount(value), 0n);
+  const txCerAvailable = sumSpendableTXCerUnits(account, address.txCers || {});
+  const txCerLocked = txCerTotal > txCerAvailable ? txCerTotal - txCerAvailable : 0n;
   const gasValue = Number(address.estInterest || 0).toFixed(2);
+  const txCerDetails = renderTXCerDetails(account, address, coinName);
 
   return `
       <div class="address-card">
@@ -442,16 +445,17 @@ function renderAddressCard(account: UserAccount, address: AddressInfo, t: HomeTe
       ? `
             <div class="balance-panel-row balance-panel-row--muted">
               <span>${t.txCerAvailable}</span>
-              <span>${txCerAvailable.toFixed(meta.decimals)} ${coinName}</span>
+              <span>${formatAmount(txCerAvailable)} ${coinName}</span>
             </div>
             <div class="balance-panel-row balance-panel-row--muted">
               <span>${t.txCerLocked}</span>
-              <span>${txCerLocked.toFixed(meta.decimals)} ${coinName}</span>
+              <span>${formatAmount(txCerLocked)} ${coinName}</span>
             </div>
             `
       : ''
     }
           </div>
+          ${txCerDetails}
           <div class="address-gas-row">
             <span>${t.gas}</span>
             <span>${gasValue}</span>
@@ -487,13 +491,39 @@ function renderAddressCard(account: UserAccount, address: AddressInfo, t: HomeTe
     `;
 }
 
-function getAvailableTotals(account: UserAccount): { pgc: number; btc: number; eth: number } {
-  const totals = { pgc: 0, btc: 0, eth: 0 };
+function renderTXCerDetails(account: UserAccount, address: AddressInfo, coinName: string): string {
+  const entries = Object.entries(address.txCers || {});
+  if (entries.length === 0) return '';
+  const items = entries.map(([id, rawValue]) => {
+    const txCer = account.txCerStore?.[id];
+    const issuance = account.txCerIssuanceRecords?.[id];
+    const security = issuance?.security;
+    const shares = txCer?.ExposureShares || issuance?.issuanceRecord?.TXCer?.ExposureShares || [];
+    const sharesDetail = shares.map((share) =>
+      `${share.RootID}/${share.LeafID}: ${formatAmount(parseAmount(share.Amount))}`
+    ).join(' | ');
+    const evidenceError = security?.fastEvidenceError || security?.cfaaAuditError || issuance?.proofError || '';
+    const lifecycle = getTXCerStatus(account, id) || 'Unknown';
+    return `
+      <div class="txcer-item">
+        <div class="txcer-full-id" title="${escapeHtml(id)}">${escapeHtml(id)}</div>
+        <div>${escapeHtml(formatAmount(parseAmount(rawValue)))} ${escapeHtml(coinName)} / ${escapeHtml(lifecycle)}</div>
+        <div>FastEvidence: ${escapeHtml(security?.fastEvidenceStatus || 'Pending')} / CFAA: ${escapeHtml(security?.cfaaAuditStatus || 'Pending')} / ExposureShares: ${shares.length}</div>
+        ${sharesDetail ? `<div class="txcer-shares" title="${escapeHtml(sharesDetail)}">${escapeHtml(sharesDetail)}</div>` : ''}
+        ${evidenceError ? `<div class="txcer-evidence-error">${escapeHtml(evidenceError)}</div>` : ''}
+      </div>
+    `;
+  }).join('');
+  return `<div class="txcer-evidence-list">${items}</div>`;
+}
+
+function getAvailableTotals(account: UserAccount): { pgc: bigint; btc: bigint; eth: bigint } {
+  const totals = { pgc: 0n, btc: 0n, eth: 0n };
   const lockedUtxos = getLockedUTXOs();
-  const lockedByAddress = lockedUtxos.reduce<Record<string, number>>((sum, item) => {
+  const lockedByAddress = lockedUtxos.reduce<Record<string, bigint>>((sum, item) => {
     const addr = item.address?.toLowerCase() || '';
     if (!addr) return sum;
-    sum[addr] = (sum[addr] || 0) + (Number(item.value) || 0);
+    sum[addr] = (sum[addr] || 0n) + parseAmount(item.value);
     return sum;
   }, {});
 
@@ -509,21 +539,21 @@ function getAvailableTotals(account: UserAccount): { pgc: number; btc: number; e
     const rawTxCerValue = info.value?.txCerValue;
     const rawTotalValue = info.value?.totalValue;
 
-    let utxoBalance = 0;
+    let utxoBalance = 0n;
     if (Object.keys(utxos).length > 0) {
-      utxoBalance = Object.values(utxos).reduce<number>((sum, val) => sum + (Number(val?.Value) || 0), 0);
-    } else if (Number.isFinite(Number(rawUtxoValue))) {
-      utxoBalance = Number(rawUtxoValue || 0);
-    } else if (Number.isFinite(Number(rawTotalValue))) {
-      const total = Number(rawTotalValue || 0);
-      const txc = Number(rawTxCerValue || 0);
-      utxoBalance = Math.max(0, total - txc);
+      utxoBalance = Object.values(utxos).reduce((sum, val) => sum + parseAmount(val?.Value || '0'), 0n);
+    } else if (rawUtxoValue != null) {
+      utxoBalance = parseAmount(rawUtxoValue);
+    } else if (rawTotalValue != null) {
+      const total = parseAmount(rawTotalValue);
+      const txc = parseAmount(rawTxCerValue || '0');
+      utxoBalance = total > txc ? total - txc : 0n;
     }
 
-    const lockedBalance = lockedByAddress[addrLower] || 0;
-    const unlockedUtxoBalance = Math.max(0, utxoBalance - lockedBalance);
+    const lockedBalance = lockedByAddress[addrLower] || 0n;
+    const unlockedUtxoBalance = utxoBalance > lockedBalance ? utxoBalance - lockedBalance : 0n;
 
-    const unlockedTxCerBalance = sumSpendableTXCerValue(account, txCers);
+    const unlockedTxCerBalance = sumSpendableTXCerUnits(account, txCers);
 
     const available = unlockedUtxoBalance + unlockedTxCerBalance;
 
@@ -560,12 +590,12 @@ function getCoinMeta(type: number): { short: string; label: string; className: s
 }
 
 function getAddressBalanceSnapshot(account: UserAccount, address: AddressInfo): {
-  total: number;
-  available: number;
-  utxoBalance: number;
-  lockedUtxo: number;
-  txCerBalance: number;
-  lockedTxCer: number;
+  total: bigint;
+  available: bigint;
+  utxoBalance: bigint;
+  lockedUtxo: bigint;
+  txCerBalance: bigint;
+  lockedTxCer: bigint;
 } {
   const utxos = address.utxos || {};
   const txCers = address.txCers || {};
@@ -573,33 +603,33 @@ function getAddressBalanceSnapshot(account: UserAccount, address: AddressInfo): 
   const rawTxCerValue = address.value?.txCerValue;
   const rawTotalValue = address.value?.totalValue;
 
-  let utxoBalance = 0;
+  let utxoBalance = 0n;
   if (Object.keys(utxos).length > 0) {
-    utxoBalance = Object.values(utxos).reduce<number>((sum, val) => sum + (Number(val?.Value) || 0), 0);
-  } else if (Number.isFinite(Number(rawUtxoValue))) {
-    utxoBalance = Number(rawUtxoValue || 0);
-  } else if (Number.isFinite(Number(rawTotalValue))) {
-    const total = Number(rawTotalValue || 0);
-    const txc = Number(rawTxCerValue || 0);
-    utxoBalance = Math.max(0, total - txc);
+    utxoBalance = Object.values(utxos).reduce((sum, val) => sum + parseAmount(val?.Value || '0'), 0n);
+  } else if (rawUtxoValue != null) {
+    utxoBalance = parseAmount(rawUtxoValue);
+  } else if (rawTotalValue != null) {
+    const total = parseAmount(rawTotalValue);
+    const txc = parseAmount(rawTxCerValue || '0');
+    utxoBalance = total > txc ? total - txc : 0n;
   } else {
-    utxoBalance = Number(address.balance || 0);
+    utxoBalance = parseAmount(address.balance || '0');
   }
 
   const lockedUtxo = getLockedUTXOs()
     .filter((lock) => lock.address?.toLowerCase() === address.address.toLowerCase())
-    .reduce((sum, lock) => sum + (Number(lock.value) || 0), 0);
-  const availableUtxo = Math.max(0, utxoBalance - lockedUtxo);
+    .reduce((sum, lock) => sum + parseAmount(lock.value), 0n);
+  const availableUtxo = utxoBalance > lockedUtxo ? utxoBalance - lockedUtxo : 0n;
 
-  let txCerBalance = 0;
+  let txCerBalance = 0n;
   if (Object.keys(txCers).length > 0) {
-    txCerBalance = Object.values(txCers).reduce<number>((sum, val) => sum + (Number(val) || 0), 0);
-  } else if (Number.isFinite(Number(rawTxCerValue))) {
-    txCerBalance = Number(rawTxCerValue || 0);
+    txCerBalance = Object.values(txCers).reduce((sum, val) => sum + parseAmount(val), 0n);
+  } else if (rawTxCerValue != null) {
+    txCerBalance = parseAmount(rawTxCerValue);
   }
 
-  const availableTxCer = sumSpendableTXCerValue(account, txCers);
-  const lockedTxCer = Math.max(0, txCerBalance - availableTxCer);
+  const availableTxCer = sumSpendableTXCerUnits(account, txCers);
+  const lockedTxCer = txCerBalance > availableTxCer ? txCerBalance - availableTxCer : 0n;
 
   return {
     total: utxoBalance + txCerBalance,

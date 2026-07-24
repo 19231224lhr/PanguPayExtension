@@ -35,16 +35,17 @@ import { lockUTXOs } from './utxoLock';
 import { lockTXCers, markTXCersSubmitted, unlockTXCers } from './txCerLockManager';
 import { isTXCerSpendable } from './txCerStatus';
 import { COIN_NAMES } from './types';
+import { AMOUNT_SCALE, formatAmount, parseAmount, toAmountWire, type AmountDecimal, type AmountInput } from './amount';
 
 export type TransferMode = 'normal' | 'quick' | 'cross';
 
 export interface TransferRecipient {
     address: string;
-    amount: number;
+    amount: AmountInput;
     coinType: number;
     publicKey?: string;
     orgId?: string;
-    transferGas?: number;
+    transferGas?: AmountInput;
     seedAnchor?: number[] | string;
     seedChainStep?: number;
     defaultSpendAlgorithm?: string;
@@ -54,15 +55,15 @@ export interface TransferRequest {
     account: UserAccount;
     fromAddresses: string[];
     toAddress: string;
-    amount: number;
+    amount: AmountInput;
     coinType: number;
     transferMode: TransferMode;
-    transferGas?: number;
+    transferGas?: AmountInput;
     recipientPublicKey?: string;
     recipientOrgId?: string;
     recipients?: TransferRecipient[];
-    gas: number;
-    extraGas: number;
+    gas: AmountInput;
+    extraGas: AmountInput;
     changeAddresses: Record<number, string>;
 }
 
@@ -205,7 +206,7 @@ async function lockSubmittedUtxos(
     txHash: string
 ): Promise<void> {
     if (!txHash || inputs.length === 0) return;
-    const utxosToLock: Array<{ utxoId: string; address: string; value: number; type: number }> = [];
+    const utxosToLock: Array<{ utxoId: string; address: string; value: AmountDecimal; type: number }> = [];
     for (const input of inputs) {
         const fromTxId = input.FromTXID || '';
         const indexZ = input.FromTxPosition?.IndexZ ?? 0;
@@ -230,7 +231,7 @@ async function lockSubmittedUtxos(
             }
         }
 
-        const value = Number(utxoData?.Value ?? 0) || 0;
+        const value = formatAmount(parseAmount(utxoData?.Value ?? '0'));
         const type = Number(utxoData?.Type ?? account.addresses?.[resolvedAddr]?.type ?? 0) || 0;
         utxosToLock.push({ utxoId, address: resolvedAddr || addressHint, value, type });
     }
@@ -366,7 +367,7 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
             if (recipient.coinType !== 0) {
                 return { success: false, error: '跨链交易只能使用主货币' };
             }
-            if (!Number.isInteger(recipient.amount)) {
+            if (parseAmount(recipient.amount) % AMOUNT_SCALE !== 0n) {
                 return { success: false, error: '跨链金额必须为整数' };
             }
             if (!/^0x[a-fA-F0-9]{40}$/.test(String(recipient.address || '').trim())) {
@@ -376,12 +377,17 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
     }
 
     const lockedTXCerIds: string[] = [];
+    const txCerLockOwner = `draft:${crypto.randomUUID()}`;
     try {
         for (const addr of normalizedFrom) {
             const info = account.addresses?.[addr];
             const txCers = info?.txCers ? Object.keys(info.txCers).filter((id) => isTXCerSpendable(account, id)) : [];
             if (txCers.length > 0) {
-                const lockedIds = lockTXCers(txCers, `构造交易 - 地址 ${addr.slice(0, 8)}...`);
+                const lockedIds = lockTXCers(
+                    txCers,
+                    `构造交易 - 地址 ${addr.slice(0, 8)}...`,
+                    txCerLockOwner,
+                );
                 lockedTXCerIds.push(...lockedIds);
             }
         }
@@ -401,7 +407,7 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
                 isCrossChain
                     ? ''
                     : recipient.orgId || request.recipientOrgId || '',
-            interest: isCrossChain ? 0 : recipient.transferGas ?? request.transferGas ?? 0,
+            interest: isCrossChain ? '0' : recipient.transferGas ?? request.transferGas ?? '0',
             seedAnchor: recipient.seedAnchor,
             seedChainStep: recipient.seedChainStep,
             defaultSpendAlgorithm: recipient.defaultSpendAlgorithm,
@@ -414,8 +420,9 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         changeAddresses,
         gas: request.gas,
         isCrossChain,
-        howMuchPayForGas: request.extraGas || 0,
+        howMuchPayForGas: request.extraGas || '0',
         preferTXCer,
+        txCerLockOwner,
     };
 
     const baseId = Date.now().toString();
@@ -426,13 +433,13 @@ export async function buildAndSubmitTransfer(request: TransferRequest): Promise<
         type: 'send',
         status: 'pending',
         transferMode: historyMode,
-        amount: recipient.amount,
+        amount: toAmountWire(recipient.amount),
         coinType: recipient.coinType,
         currency: COIN_NAMES[recipient.coinType as keyof typeof COIN_NAMES] || 'PGC',
         from: normalizedFrom[0] || account.mainAddress,
         to: recipient.address,
         timestamp: Date.now(),
-        gas: request.gas || 0,
+        gas: toAmountWire(request.gas || '0'),
         guarantorOrg: activeOrg ? activeOrg.groupId : '',
     }));
 

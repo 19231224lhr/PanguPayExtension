@@ -2,9 +2,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import {
+  buildBackendSmokeArguments,
+  getRealBrowserCommitDelaySeconds,
+} from './real-browser-flow-helpers.js';
 
 const root = process.cwd();
 const backendRoot = path.resolve(process.env.PANGU_UTXO_AREA_ROOT || path.join(root, '..', 'UTXO-Area'));
+const webRoot = path.resolve(process.env.PANGU_WEB_ROOT || path.join(root, '..', 'TransferAreaInterface'));
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pangupay-real-backend-e2e-'));
 const readyFile = path.join(tempDir, 'backend-ready.json');
 const stopFile = path.join(tempDir, 'backend-stop');
@@ -18,9 +23,15 @@ function log(message) {
 function run(command, args, options = {}) {
   let executable = command;
   let finalArgs = args;
-  if (command === 'npm' && process.env.npm_execpath && fs.existsSync(process.env.npm_execpath)) {
+  if (command === 'npm') {
+    const npmCli = process.env.npm_execpath && fs.existsSync(process.env.npm_execpath)
+      ? process.env.npm_execpath
+      : path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    if (!fs.existsSync(npmCli)) {
+      throw new Error(`npm CLI not found: ${npmCli}`);
+    }
     executable = process.execPath;
-    finalArgs = [process.env.npm_execpath, ...args];
+    finalArgs = [npmCli, ...args];
   }
   const result = spawnSync(executable, finalArgs, {
     stdio: 'inherit',
@@ -67,19 +78,13 @@ function startBackend() {
   log(`starting backend smoke nodes from ${backendRoot}`);
   const child = spawn(
     'powershell.exe',
-    [
-      '-NoProfile',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-File',
+    buildBackendSmokeArguments({
       smokeScript,
-      '-HoldSeconds',
-      String(holdSeconds),
-      '-ReadyFile',
+      commitDelaySec: getRealBrowserCommitDelaySeconds(process.env.PANGUPAY_GUAR_BLOCK_COMMIT_DELAY_SEC),
+      holdSeconds,
       readyFile,
-      '-StopFile',
       stopFile,
-    ],
+    }),
     {
       cwd: backendRoot,
       windowsHide: true,
@@ -105,8 +110,8 @@ async function runRealBackendE2E() {
   const backend = startBackend();
   let ready;
   try {
-    await waitForFile(readyFile, 'backend ready file', Number(process.env.PANGUPAY_REAL_BACKEND_READY_TIMEOUT_MS || 300000));
-    ready = JSON.parse(fs.readFileSync(readyFile, 'utf8'));
+    await waitForFile(readyFile, 'backend ready file', Number(process.env.PANGUPAY_REAL_BACKEND_READY_TIMEOUT_MS || 480000));
+    ready = JSON.parse(fs.readFileSync(readyFile, 'utf8').replace(/^\uFEFF/, ''));
     if (!ready?.ready || !ready?.configPath || !ready?.gatewayBase || !ready?.groupID) {
       throw new Error(`Invalid backend ready payload: ${JSON.stringify(ready)}`);
     }
@@ -143,6 +148,20 @@ async function runRealBackendE2E() {
         PANGUPAY_DAPP_APPROVE_AMOUNT: process.env.PANGUPAY_DAPP_APPROVE_AMOUNT || '12',
       },
     });
+
+    const protocolEnv = {
+      ...process.env,
+      PANGU_GATEWAY_BASE: ready.gatewayBase,
+      PANGU_GROUP_ID: ready.groupID,
+      PANGU_REQUIRE_REAL_FLOW: 'true',
+    };
+    log('checking the extension protocol client against the resulting real issuance record');
+    run('npm', ['run', 'check:real-backend-protocol'], { env: protocolEnv });
+    if (!fs.existsSync(webRoot)) {
+      throw new Error(`TransferAreaInterface root not found: ${webRoot}`);
+    }
+    log('checking the Web protocol client against the same real issuance record');
+    run('npm', ['run', 'test:real-backend'], { cwd: webRoot, env: protocolEnv });
 
     log('real backend DApp approve E2E passed');
   } finally {

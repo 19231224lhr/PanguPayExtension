@@ -4,6 +4,7 @@
 
 import { getActiveAccount, getTransactionHistory, type TransactionRecord } from '../../core/storage';
 import { COIN_NAMES } from '../../core/types';
+import { formatAmount, parseAmount, type AmountInput } from '../../core/amount';
 import { getActiveLanguage } from '../utils/appSettings';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 import {
@@ -178,9 +179,9 @@ function renderTransactionItem(tx: TransactionRecord, t: HistoryText, language: 
     `;
 }
 
-function formatHistoryAmount(amount: number, coinType: number): string {
-    const decimals = coinType === 0 ? 2 : 6;
-    return Number(amount || 0).toLocaleString(undefined, { maximumFractionDigits: decimals });
+function formatHistoryAmount(amount: AmountInput, coinType: number): string {
+    void coinType;
+    return formatAmount(parseAmount(amount));
 }
 
 function copyTxHash(txHash: string): void {

@@ -14,11 +14,12 @@ import { GROUP_ID_NOT_EXIST, GROUP_ID_RETAIL, queryAddressGroupInfo } from '../.
 import { isCapsuleAddress, verifyCapsuleAddress } from '../../core/capsule';
 import { buildAndSubmitTransfer, type TransferMode, type TransferRecipient } from '../../core/transfer';
 import { watchSubmittedTransaction } from '../../core/txStatus';
-import { sumSpendableTXCerValue } from '../../core/txCerStatus';
+import { sumSpendableTXCerUnits, sumSpendableTXCerValue } from '../../core/txCerStatus';
 import { getLockedUTXOs } from '../../core/utxoLock';
 import { bindInlineHandlers } from '../utils/inlineHandlers';
 import { enhanceCustomSelects } from '../utils/customSelect';
 import { bindNavigation, escapeHtml, renderHeaderBar, renderNotice, shortAddress } from '../utils/ui';
+import { AMOUNT_SCALE, formatAmount, parseAmount, toAmountNumber, type AmountInput } from '../../core/amount';
 
 type TransferModeView = 'quick' | 'cross' | 'pledge';
 
@@ -206,14 +207,14 @@ export async function renderSend(): Promise<void> {
                     <div class="options-split-group">
                       <label class="option-field-label">额外Gas</label>
                       <div class="option-input-wrapper">
-                        <input id="extraGasPGC" name="extraGasPGC" class="option-input" type="number" min="0" step="any" placeholder="0" value="0" />
+                        <input id="extraGasPGC" name="extraGasPGC" class="option-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="0" value="0" />
                         <span class="option-suffix option-suffix--pgc">PGC</span>
                       </div>
                     </div>
                     <div class="options-split-group">
                       <label class="option-field-label">交易Gas</label>
                       <div class="option-input-wrapper">
-                        <input id="txGasInput" name="txGasInput" class="option-input" type="number" min="0" step="any" placeholder="1" value="1" />
+                        <input id="txGasInput" name="txGasInput" class="option-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="1" value="1" />
                         <span class="option-suffix option-suffix--gas">GAS</span>
                       </div>
                     </div>
@@ -343,7 +344,7 @@ function renderRecipientCard(recipient: RecipientDraft, index: number, isCrossMo
           <div class="recipient-amount-row">
             <div class="recipient-field">
               <span class="recipient-field-label">转账金额</span>
-              <input class="input" type="number" min="0" step="any" placeholder="0.00" data-recipient-id="${recipient.id}" data-recipient-field="amount">
+              <input class="input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="0.00" data-recipient-id="${recipient.id}" data-recipient-field="amount">
             </div>
             <div class="recipient-field">
               <span class="recipient-field-label">币种</span>
@@ -366,7 +367,7 @@ function renderRecipientCard(recipient: RecipientDraft, index: number, isCrossMo
                 </div>
                 <div class="recipient-field">
                   <span class="recipient-field-label">转移Gas</span>
-                  <input class="input" type="number" min="0" step="any" placeholder="0" data-recipient-id="${recipient.id}" data-recipient-field="transferGas" ${isCrossMode ? 'disabled' : ''}>
+                  <input class="input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="0" data-recipient-id="${recipient.id}" data-recipient-field="transferGas" ${isCrossMode ? 'disabled' : ''}>
                 </div>
               </div>
             </div>
@@ -866,8 +867,8 @@ async function handleSend(e: Event): Promise<void> {
         const preparedRecipients: TransferRecipient[] = [];
         const recipientIndexMap = new Map<string, number>();
         const addressMetaMap = new Map<string, { coinType: number; publicKey: string; orgId: string }>();
-        const requiredByType: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
-        let totalTransferGas = 0;
+        const requiredByType: Record<number, bigint> = { 0: 0n, 1: 0n, 2: 0n };
+        let totalTransferGas = 0n;
 
         for (const recipient of recipients) {
             const rawAddress = recipient.toAddress.trim();
@@ -916,7 +917,7 @@ async function handleSend(e: Event): Promise<void> {
             return;
         }
 
-        if (isCross && !Number.isInteger(amountCheck.value)) {
+        if (isCross && amountCheck.units % AMOUNT_SCALE !== 0n) {
             (window as any).showToast('跨链金额必须为整数', 'error');
             return;
         }
@@ -940,11 +941,12 @@ async function handleSend(e: Event): Promise<void> {
             }
         }
 
-        const recipientGas = Number(recipient.transferGas || 0);
-        if (!Number.isFinite(recipientGas) || recipientGas < 0) {
+        const recipientGasCheck = parseNonNegativeAmountInput(recipient.transferGas || '0');
+        if (!recipientGasCheck.ok) {
             (window as any).showToast('转移Gas必须为非负数', 'error');
             return;
         }
+        const recipientGas = recipientGasCheck.value;
 
         const normalizedAddress = addressCheck.normalized;
         const existingMeta = addressMetaMap.get(normalizedAddress);
@@ -965,17 +967,17 @@ async function handleSend(e: Event): Promise<void> {
             });
         }
 
-        requiredByType[coinType] += amountCheck.value;
+        requiredByType[coinType] += amountCheck.units;
         if (!isCross) {
-            totalTransferGas += Math.max(0, recipientGas);
+            totalTransferGas += recipientGasCheck.units;
         }
 
         const mergeKey = `${normalizedAddress}_${coinType}_${recipientPubKey}_${recipientOrgId}`;
         const existingIndex = recipientIndexMap.get(mergeKey);
         if (existingIndex !== undefined) {
             const existing = preparedRecipients[existingIndex];
-            existing.amount += amountCheck.value;
-            existing.transferGas = (existing.transferGas || 0) + recipientGas;
+            existing.amount = formatAmount(parseAmount(existing.amount) + parseAmount(amountCheck.value));
+            existing.transferGas = formatAmount(parseAmount(existing.transferGas || '0') + parseAmount(recipientGas));
         } else {
             preparedRecipients.push({
                 address: normalizedAddress,
@@ -994,19 +996,21 @@ async function handleSend(e: Event): Promise<void> {
         return;
     }
 
-    const extraGas = Number(extraGasEl?.value || 0);
-    if (!Number.isFinite(extraGas) || extraGas < 0) {
+    const extraGasCheck = parseNonNegativeAmountInput(extraGasEl?.value || '0');
+    if (!extraGasCheck.ok) {
         (window as any).showToast('额外Gas必须为非负数', 'error');
         return;
     }
+    const extraGas = extraGasCheck.value;
 
-    requiredByType[0] += extraGas;
+    requiredByType[0] += extraGasCheck.units;
 
-    const txGas = Number(txGasEl?.value || 1);
-    if (!Number.isFinite(txGas) || txGas < 0) {
+    const txGasCheck = parseNonNegativeAmountInput(txGasEl?.value || '1');
+    if (!txGasCheck.ok) {
         (window as any).showToast('交易Gas必须为非负数', 'error');
         return;
     }
+    const txGas = txGasCheck.value;
 
     const changeAddresses: Record<number, string> = {
         0: changePGC?.value || '',
@@ -1016,7 +1020,7 @@ async function handleSend(e: Event): Promise<void> {
 
     const addressMap = new Map(currentAddresses.map((addr) => [addr.address, addr]));
     for (const type of [0, 1, 2]) {
-        if (requiredByType[type] <= 0) continue;
+        if (requiredByType[type] <= 0n) continue;
         const changeAddress = changeAddresses[type];
         if (!changeAddress) {
             (window as any).showToast('请选择找零地址', 'error');
@@ -1029,15 +1033,15 @@ async function handleSend(e: Event): Promise<void> {
         }
     }
 
-    const typeBalances: Record<number, number> = { 0: 0, 1: 0, 2: 0 };
-    let availableGas = 0;
+    const typeBalances: Record<number, bigint> = { 0: 0n, 1: 0n, 2: 0n };
+    let availableGas = 0n;
     for (const addr of selectedAddresses) {
-        typeBalances[addr.type] += getAvailableBalanceForAddress(addr);
-        availableGas += Number(addr.estInterest || 0);
+        typeBalances[addr.type] += getAvailableBalanceUnitsForAddress(addr);
+        availableGas += parseAmount(addr.estInterest || '0');
     }
 
     for (const type of [0, 1, 2]) {
-        if (requiredByType[type] > (typeBalances[type] || 0) + 1e-8) {
+        if (requiredByType[type] > (typeBalances[type] || 0n)) {
             const coinLabel = COIN_NAMES[type as keyof typeof COIN_NAMES];
             (window as any).showToast(`${coinLabel} 余额不足`, 'error');
             return;
@@ -1059,9 +1063,9 @@ async function handleSend(e: Event): Promise<void> {
         }
     }
 
-    const totalGasNeed = txGas + (isCross ? 0 : totalTransferGas);
-    const totalGasBudget = availableGas + extraGas;
-    if (totalGasNeed > totalGasBudget + 1e-8) {
+    const totalGasNeed = txGasCheck.units + (isCross ? 0n : totalTransferGas);
+    const totalGasBudget = availableGas + extraGasCheck.units;
+    if (totalGasNeed > totalGasBudget) {
         (window as any).showToast('Gas 不足，请调整转移Gas或额外Gas', 'error');
         return;
     }
@@ -1072,7 +1076,7 @@ async function handleSend(e: Event): Promise<void> {
             recipients: preparedRecipients,
             changeAddresses,
             txGas,
-            transferGas: totalTransferGas,
+            transferGas: formatAmount(totalTransferGas),
             extraGas,
         });
         if (!confirmed) return;
@@ -1081,10 +1085,10 @@ async function handleSend(e: Event): Promise<void> {
             account,
             fromAddresses: selectedAddresses.map((addr) => addr.address),
             toAddress: preparedRecipients[0]?.address || '',
-            amount: preparedRecipients[0]?.amount || 0,
+            amount: preparedRecipients[0]?.amount || '0',
             coinType: preparedRecipients[0]?.coinType || 0,
             transferMode,
-            transferGas: preparedRecipients[0]?.transferGas || 0,
+            transferGas: preparedRecipients[0]?.transferGas || '0',
             recipientPublicKey: preparedRecipients[0]?.publicKey || '',
             recipientOrgId: preparedRecipients[0]?.orgId || '',
             recipients: preparedRecipients,
@@ -1198,25 +1202,34 @@ function parseRecipientPublicKey(input: string): { ok: boolean; xHex: string; yH
     return { ok: false, xHex: '', yHex: '' };
 }
 
-function validateAmountInput(raw: string): { ok: boolean; value: number; error?: string } {
+function validateAmountInput(raw: string): { ok: boolean; value: string; units: bigint; error?: string } {
     if (!raw) {
-        return { ok: false, value: 0, error: '请输入有效金额' };
+        return { ok: false, value: '0', units: 0n, error: '请输入有效金额' };
     }
 
-    const value = Number(raw);
-    if (!Number.isFinite(value)) {
-        return { ok: false, value: 0, error: '金额格式不正确' };
+    try {
+        const units = parseAmount(raw);
+        if (units <= 0n) {
+            return { ok: false, value: '0', units: 0n, error: '金额必须大于0' };
+        }
+        return { ok: true, value: formatAmount(units), units };
+    } catch (error) {
+        const message = error instanceof Error && error.message.includes('decimal')
+            ? `金额最多支持 ${MAX_AMOUNT_DECIMALS} 位小数`
+            : '金额格式不正确';
+        return { ok: false, value: '0', units: 0n, error: message };
     }
-    if (value <= 0) {
-        return { ok: false, value: 0, error: '金额必须大于0' };
-    }
+}
 
-    const decimalPart = raw.split('.')[1];
-    if (decimalPart && decimalPart.length > MAX_AMOUNT_DECIMALS) {
-        return { ok: false, value: 0, error: `金额最多支持 ${MAX_AMOUNT_DECIMALS} 位小数` };
+function parseNonNegativeAmountInput(raw: AmountInput): { ok: boolean; value: string; units: bigint } {
+    try {
+        const units = parseAmount(raw);
+        return units < 0n
+            ? { ok: false, value: '0', units: 0n }
+            : { ok: true, value: formatAmount(units), units };
+    } catch {
+        return { ok: false, value: '0', units: 0n };
     }
-
-    return { ok: true, value };
 }
 
 function isValidOrgId(orgId: string): boolean {
@@ -1230,14 +1243,18 @@ function getDisplayDecimals(type: number): number {
 }
 
 function getAvailableBalanceForAddress(addr: AddressInfo, account = currentAccount): number {
-    const utxoValue = Number(addr.value?.utxoValue ?? addr.balance ?? 0) || 0;
+    return toAmountNumber(getAvailableBalanceUnitsForAddress(addr, account));
+}
+
+function getAvailableBalanceUnitsForAddress(addr: AddressInfo, account = currentAccount): bigint {
+    const utxoValue = parseAmount(addr.value?.utxoValue ?? addr.balance ?? '0');
     const lockedUtxoBalance = getLockedUTXOs()
         .filter((lock) => lock.address === addr.address)
-        .reduce((sum, lock) => sum + (lock.value || 0), 0);
-    const availableUtxo = Math.max(0, utxoValue - lockedUtxoBalance);
+        .reduce((sum, lock) => sum + parseAmount(lock.value || '0'), 0n);
+    const availableUtxo = utxoValue > lockedUtxoBalance ? utxoValue - lockedUtxoBalance : 0n;
 
     const txCers = addr.txCers || {};
-    const availableTxCer = account ? sumSpendableTXCerValue(account, txCers) : 0;
+    const availableTxCer = account ? sumSpendableTXCerUnits(account, txCers) : 0n;
 
     return availableUtxo + availableTxCer;
 }
@@ -1324,9 +1341,9 @@ interface TransactionReviewOptions {
     fromAddresses: AddressInfo[];
     recipients: TransferRecipient[];
     changeAddresses: Record<number, string>;
-    txGas: number;
-    transferGas: number;
-    extraGas: number;
+    txGas: AmountInput;
+    transferGas: AmountInput;
+    extraGas: AmountInput;
 }
 
 function formatTransferModeLabel(mode: TransferMode): string {
@@ -1335,9 +1352,9 @@ function formatTransferModeLabel(mode: TransferMode): string {
     return '普通转账';
 }
 
-function formatReviewAmount(value: number, coinType = 0): string {
+function formatReviewAmount(value: AmountInput, coinType = 0): string {
     const decimals = getDisplayDecimals(coinType);
-    return Number(value || 0).toLocaleString('zh-CN', {
+    return toAmountNumber(value).toLocaleString('zh-CN', {
         minimumFractionDigits: 0,
         maximumFractionDigits: Math.min(8, decimals),
     });
@@ -1362,16 +1379,17 @@ function renderAddressProtocolBadges(addr: AddressInfo): string {
     return badges.length ? `<div class="protocol-badges">${badges.join('')}</div>` : '';
 }
 
-function summarizeRecipientsByCoin(recipientsToReview: TransferRecipient[], extraGas: number): Array<[number, number]> {
-    const totals = new Map<number, number>();
+function summarizeRecipientsByCoin(recipientsToReview: TransferRecipient[], extraGas: AmountInput): Array<[number, string]> {
+    const totals = new Map<number, bigint>();
     recipientsToReview.forEach((recipient) => {
         const type = Number(recipient.coinType || 0);
-        totals.set(type, (totals.get(type) || 0) + Number(recipient.amount || 0));
+        totals.set(type, (totals.get(type) || 0n) + parseAmount(recipient.amount || '0'));
     });
-    if (extraGas > 0) {
-        totals.set(0, (totals.get(0) || 0) + extraGas);
+    const extraGasUnits = parseAmount(extraGas || '0');
+    if (extraGasUnits > 0n) {
+        totals.set(0, (totals.get(0) || 0n) + extraGasUnits);
     }
-    return Array.from(totals.entries());
+    return Array.from(totals.entries(), ([type, amount]) => [type, formatAmount(amount)]);
 }
 
 function showTransactionReviewModal(options: TransactionReviewOptions): Promise<boolean> {

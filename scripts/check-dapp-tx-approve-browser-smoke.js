@@ -4,6 +4,15 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { execFileSync, spawn } from 'node:child_process';
 import http from 'node:http';
+import {
+  assertEvidenceReplay,
+  assertPureTXCerSubmission,
+  buildExtensionFixtureStorage,
+  buildExtensionSession,
+  getInitialBrowserCompletionStatus,
+  getInitialBrowserHistoryStatus,
+  inspectGQNCFailFastState,
+} from './real-browser-flow-helpers.js';
 
 const require = createRequire(import.meta.url);
 const { ec: EC } = require('elliptic');
@@ -20,15 +29,18 @@ const isRealBackendMode = Boolean(realBackendFixture);
 const fixtureAlice = realBackendFixture?.alice || {};
 const fixtureBob = realBackendFixture?.bob || {};
 const accountId = String(fixtureAlice.accountID || '90000003');
+const bobAccountId = String(fixtureBob.accountID || '90000004');
 const groupId = String(realBackendFixture?.groupID || '10000000');
 const mainAddress = String(fixtureAlice.accountAddress || 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa').toLowerCase();
 const walletAddress = String(fixtureAlice.address || 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb').toLowerCase();
 const recipientAddress = String(fixtureBob.address || 'cccccccccccccccccccccccccccccccccccccccc').toLowerCase();
+const bobMainAddress = String(fixtureBob.accountAddress || 'dddddddddddddddddddddddddddddddddddddddd').toLowerCase();
 const mockBaseUrl = String(realBackendFixture?.gatewayBase || 'http://127.0.0.1:39999').replace(/\/$/, '');
 const accountPrivKey = String(fixtureAlice.accountPrivateKey || '3'.repeat(64));
 const addressPrivKey = String(fixtureAlice.addressPrivateKey || '4'.repeat(64));
 const recipientPrivKey = String(fixtureBob.addressPrivateKey || '5'.repeat(64));
 const transferAmount = Number(process.env.PANGUPAY_DAPP_APPROVE_AMOUNT || 12);
+const returnAmount = String(process.env.PANGUPAY_DAPP_RETURN_AMOUNT || '5');
 const txId = 'dapp-approve-smoke-tx-0001';
 const sourceTxId = 'dapp-approve-source-utxo-0001';
 const now = Date.now();
@@ -73,6 +85,103 @@ async function getJson(url) {
   return response.json();
 }
 
+async function readCrossOrgQueue(userId) {
+  const url = `${mockBaseUrl}/api/v1/${groupId}/assign/poll-cross-org-txcers?userID=${encodeURIComponent(userId)}&limit=10&consume=false`;
+  const response = await fetch(url);
+  const body = await response.text();
+  if (!response.ok) {
+    throw new Error(`cross-org queue diagnostic failed: ${response.status} ${body}`);
+  }
+  let parsed = null;
+  try { parsed = JSON.parse(body); } catch { /* diagnostic only */ }
+  const messages = parsed?.messages || parsed?.txcers || parsed?.data || [];
+  return {
+    url,
+    status: response.status,
+    messageCount: Array.isArray(messages) ? messages.length : undefined,
+    body: body.slice(0, 1200),
+  };
+}
+
+async function readGQNCCheckpoint() {
+  const [statusReply, safetyReply, actionsReply] = await Promise.all([
+    getJson(`${mockBaseUrl}/api/v1/committee/gqnc/status`),
+    getJson(`${mockBaseUrl}/api/v1/committee/gqnc/safety`),
+    getJson(`${mockBaseUrl}/api/v1/committee/gqnc/actions`),
+  ]);
+  return {
+    statusReply,
+    safetyReply,
+    actionsReply,
+    certifiedHeight: Number(statusReply?.status?.certifiedHeight || 0),
+    rejectedActionIDs: (actionsReply?.actions || [])
+      .filter((action) => String(action?.status || '') === 'Rejected')
+      .map((action) => String(action?.actionID || '')),
+  };
+}
+
+async function waitForGQNCCertifiedTransactions({
+  txIDs,
+  baselineHeight,
+  baselineRejectedActionIDs,
+  timeoutMs = Number(process.env.PANGUPAY_GQNC_CERTIFIED_TIMEOUT_MS || 120000),
+}) {
+  const wanted = new Set((txIDs || []).map((value) => String(value || '')).filter(Boolean));
+  const found = new Map();
+  let nextHeight = Number(baselineHeight || 0) + 1;
+  let lastCheckpoint = null;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    lastCheckpoint = await readGQNCCheckpoint();
+    const health = inspectGQNCFailFastState({
+      ...lastCheckpoint,
+      baselineRejectedActionIDs,
+    });
+    if (!health.ok) {
+      throw new Error(`GQNC failed before transaction certification: ${JSON.stringify({
+        reason: health.reason,
+        diagnostic: health.diagnostic,
+        wanted: [...wanted],
+        found: [...found.entries()],
+      })}`);
+    }
+
+    while (nextHeight <= lastCheckpoint.certifiedHeight) {
+      const blockReply = await getJson(
+        `${mockBaseUrl}/api/v1/committee/gqnc/certified-block/${nextHeight}`,
+      );
+      const encoded = JSON.stringify(blockReply?.envelope || {});
+      for (const txID of wanted) {
+        if (!found.has(txID) && encoded.includes(txID)) {
+          found.set(txID, {
+            height: nextHeight,
+            qcID: String(blockReply?.envelope?.QC?.QCID || ''),
+            observedAt: Date.now(),
+          });
+        }
+      }
+      nextHeight += 1;
+    }
+    if (found.size === wanted.size) {
+      return {
+        startedAt,
+        completedAt: Date.now(),
+        elapsedMs: Date.now() - startedAt,
+        transactions: Object.fromEntries(found),
+        certifiedHeight: lastCheckpoint.certifiedHeight,
+      };
+    }
+    await sleep(500);
+  }
+  throw new Error(`Timeout waiting for exact GQNC transaction certification: ${JSON.stringify({
+    wanted: [...wanted],
+    found: [...found.entries()],
+    baselineHeight,
+    lastCheckpoint,
+  })}`);
+}
+
 async function waitForDevTools() {
   for (let i = 0; i < 100; i += 1) {
     try {
@@ -90,6 +199,7 @@ function connect(wsUrl) {
     let nextId = 1;
     const pending = new Map();
     const events = [];
+    const listeners = new Map();
 
     ws.addEventListener('open', () => {
       resolve({
@@ -107,6 +217,11 @@ function connect(wsUrl) {
             // ignore cleanup errors
           }
         },
+        on(method, listener) {
+          const registered = listeners.get(method) || [];
+          registered.push(listener);
+          listeners.set(method, registered);
+        },
       });
     });
 
@@ -119,6 +234,11 @@ function connect(wsUrl) {
         else entry.res(data.result);
       } else {
         events.push(data);
+        for (const listener of listeners.get(data.method) || []) {
+          Promise.resolve()
+            .then(() => listener(data.params || {}))
+            .catch(() => {});
+        }
       }
     });
 
@@ -156,8 +276,8 @@ async function evaluatePage(client, expression) {
   return result.result.value;
 }
 
-async function waitFor(client, predicateSource, label) {
-  for (let i = 0; i < 240; i += 1) {
+async function waitFor(client, predicateSource, label, attempts = 240) {
+  for (let i = 0; i < attempts; i += 1) {
     const ok = await evaluatePage(
       client,
       `(() => {
@@ -344,7 +464,20 @@ function mockQueryAddressGroupResponse() {
 }
 
 function createDappServer() {
-  const html = `<!doctype html>
+  const server = http.createServer((request, response) => {
+    if (request.url === '/favicon.ico') {
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+    const requestURL = new URL(request.url || '/', `http://127.0.0.1:${dappPort}`);
+    const isReturnPayment = requestURL.searchParams.get('phase') === '2';
+    const targetAddress = isReturnPayment ? walletAddress : recipientAddress;
+    const targetPub = isReturnPayment ? addressPub : recipientPub;
+    const targetSeedMeta = isReturnPayment ? addressSeedMeta : recipientSeedMeta;
+    const amount = isReturnPayment ? returnAmount : String(transferAmount);
+    const mode = isReturnPayment ? 'quick' : 'normal';
+    const html = `<!doctype html>
     <html lang="zh-CN">
       <head>
         <meta charset="utf-8">
@@ -373,18 +506,18 @@ function createDappServer() {
               });
               setStatus('submitting');
               const result = await window.pangu.sendTransaction({
-                mode: 'normal',
+                mode: '${mode}',
                 coinType: 0,
                 gas: 0,
                 recipients: [{
-                  to: '${recipientAddress}',
-                  amount: ${transferAmount},
+                  to: '${targetAddress}',
+                  amount: '${amount}',
                   coinType: 0,
-                  publicKey: '${recipientPub.xHex},${recipientPub.yHex}',
+                  publicKey: '${targetPub.xHex},${targetPub.yHex}',
                   orgId: '${groupId}',
-                  seedAnchor: ${JSON.stringify(recipientSeedMeta.seedAnchor)},
-                  seedChainStep: ${recipientSeedMeta.seedChainStep},
-                  defaultSpendAlgorithm: '${recipientSeedMeta.defaultSpendAlgorithm}'
+                  seedAnchor: ${JSON.stringify(targetSeedMeta.seedAnchor)},
+                  seedChainStep: ${targetSeedMeta.seedChainStep},
+                  defaultSpendAlgorithm: '${targetSeedMeta.defaultSpendAlgorithm}'
                 }]
               });
               window.__panguTxResult = result;
@@ -398,12 +531,6 @@ function createDappServer() {
       </body>
     </html>`;
 
-  const server = http.createServer((request, response) => {
-    if (request.url === '/favicon.ico') {
-      response.writeHead(204);
-      response.end();
-      return;
-    }
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(html);
   });
@@ -415,6 +542,9 @@ function createDappServer() {
 }
 
 function smokeStoragePayload(origin) {
+  if (isRealBackendMode) {
+    return buildExtensionFixtureStorage(realBackendFixture, origin);
+  }
   const account = {
     accountId,
     mainAddress,
@@ -588,23 +718,73 @@ function installFetchCaptureExpression() {
   })()`;
 }
 
-function cleanup(edgeProcess, server) {
-  try {
-    server?.close();
-  } catch {
-    // ignore server cleanup errors
-  }
+function installIssuanceBlockExpression() {
+  return `(() => {
+    const originalFetch = globalThis.fetch.bind(globalThis);
+    globalThis.__panguAuthorityFetch = originalFetch;
+    globalThis.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input && input.url ? input.url : String(input);
+      if (/\\/aggr\\/txcer-issuance-record\\//.test(url)) {
+        throw new TypeError('authority issuance query blocked by restart test');
+      }
+      return originalFetch(input, init);
+    };
+    return true;
+  })()`;
+}
 
-  if (edgeProcess?.pid) {
-    try {
-      execFileSync('taskkill', ['/PID', String(edgeProcess.pid), '/T', '/F'], { stdio: 'ignore' });
-    } catch {
-      // Process may already be gone.
+function restoreAuthorityFetchAndCaptureExpression() {
+  return `(() => {
+    if (globalThis.__panguAuthorityFetch) {
+      globalThis.fetch = globalThis.__panguAuthorityFetch;
+      delete globalThis.__panguAuthorityFetch;
     }
-  }
+    const originalFetch = globalThis.fetch.bind(globalThis);
+    globalThis.__panguApproveSmokeRequests = [];
+    globalThis.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input && input.url ? input.url : String(input);
+      const method = String(init && init.method ? init.method : 'GET').toUpperCase();
+      const body = typeof init?.body === 'string' ? init.body : '';
+      let normalizedPath = '';
+      try { normalizedPath = new URL(url).pathname.replace(/^\\/+/g, '/'); }
+      catch { normalizedPath = String(url || ''); }
+      const entry = { url, method, normalizedPath, body, responseStatus: 0, responseBody: '' };
+      globalThis.__panguApproveSmokeRequests.push(entry);
+      const response = await originalFetch(input, init);
+      entry.responseStatus = response.status;
+      try { entry.responseBody = (await response.clone().text()).slice(0, 4000); }
+      catch { /* diagnostic only */ }
+      return response;
+    };
+    return true;
+  })()`;
+}
 
+function spawnEdgeProcess(edgePath) {
+  return spawn(edgePath, [
+    `--user-data-dir=${profileDir}`,
+    `--disable-extensions-except=${extensionDir}`,
+    `--load-extension=${extensionDir}`,
+    `--remote-debugging-port=${debugPort}`,
+    '--remote-allow-origins=*',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-popup-blocking',
+    '--window-position=-32000,-32000',
+    '--window-size=900,700',
+    'about:blank',
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+function stopEdgeProcess(edgeProcess) {
+  if (!edgeProcess?.pid) return;
   try {
-    const profileToken = path.basename(profileDir);
+    execFileSync('taskkill', ['/PID', String(edgeProcess.pid), '/T', '/F'], { stdio: 'ignore' });
+  } catch {
+    // Process may already be gone.
+  }
+  const profileToken = path.basename(profileDir);
+  try {
     const ps = `
       $profileToken = ${JSON.stringify(profileToken)};
       Get-CimInstance Win32_Process |
@@ -620,6 +800,448 @@ function cleanup(edgeProcess, server) {
   } catch {
     // Best-effort cleanup.
   }
+}
+
+async function findPanguExtensionRuntime() {
+  await waitForDevTools();
+  await sleep(2500);
+  const targets = await getJson(`http://127.0.0.1:${debugPort}/json/list`);
+  const workers = targets.filter(
+    (target) => target.type === 'service_worker' && String(target.url || '').startsWith('chrome-extension://'),
+  );
+  for (const target of workers) {
+    try {
+      const info = await evaluateTarget(target, `(() => ({ id: chrome.runtime.id, manifest: chrome.runtime.getManifest() }))()`);
+      if (info?.manifest?.name === 'PanguPay Wallet') return { target, info };
+    } catch {
+      // Ignore unrelated or stopping workers.
+    }
+  }
+  throw new Error('PanguPay service worker not found after Edge restart');
+}
+
+async function openBrowserTarget(url, { blockAuthority = false } = {}) {
+  const initialUrl = blockAuthority ? 'about:blank' : url;
+  const response = await fetch(`http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent(initialUrl)}`, { method: 'PUT' });
+  if (!response.ok) throw new Error(`Failed to create browser target: ${response.status} ${await response.text()}`);
+  const target = await response.json();
+  const client = await connect(target.webSocketDebuggerUrl);
+  await client.send('Runtime.enable');
+  await client.send('Page.enable');
+  if (blockAuthority) {
+    client.on('Fetch.requestPaused', async ({ requestId }) => {
+      await client.send('Fetch.failRequest', {
+        requestId,
+        errorReason: 'Failed',
+      });
+    });
+    await client.send('Fetch.enable', {
+      patterns: [{
+        urlPattern: '*txcer-issuance-record*',
+        requestStage: 'Request',
+      }],
+    });
+  }
+  await client.send('Page.navigate', { url });
+  return client;
+}
+
+async function readAccountEvidence(workerClient, targetAccountId) {
+  return evaluatePage(workerClient, `(async () => new Promise((resolve) => chrome.storage.local.get(null, (storage) => {
+    const account = storage.pangu_accounts?.[${JSON.stringify(targetAccountId)}] || {};
+    const records = account.txCerIssuanceRecords || {};
+    const statuses = account.txCerStatuses || {};
+    const store = account.txCerStore || {};
+    const entries = Object.entries(records).map(([txCerID, metadata]) => ({
+      txCerID,
+      lifecycleStatus: statuses[txCerID]?.status || metadata?.lifecycleStatus || metadata?.issuanceStatus || '',
+      security: metadata?.security || null,
+      issuanceRecordID: metadata?.issuanceRecordID || '',
+      hasAuthoritySnapshot: Boolean(metadata?.authoritySnapshot),
+      hasFastEvidence: Boolean(metadata?.fastEvidence || metadata?.issuanceRecord?.FastEvidence),
+      hasAck: Boolean(metadata?.assignAck || metadata?.issuanceRecord?.Ack),
+      hasReceipt: Boolean(metadata?.liabilityReceipt || metadata?.issuanceRecord?.LiabilityReceipt),
+      txCer: store[txCerID] || metadata?.txCer || metadata?.issuanceRecord?.TXCer || null,
+    }));
+    resolve({ activeAccount: storage.pangu_active_account || '', entries });
+  })))()`);
+}
+
+async function installStorageIdentityDiagnostics(workerClient) {
+  await evaluatePage(workerClient, `(() => {
+    if (globalThis.__panguStorageIdentityDiagnosticInstalled) return true;
+    globalThis.__panguStorageIdentityDiagnosticInstalled = true;
+    globalThis.__panguStorageIdentityChanges = [];
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local') return;
+      const active = changes.pangu_active_account;
+      const session = changes.pangu_session;
+      if (!active && !session) return;
+      globalThis.__panguStorageIdentityChanges.push({
+        at: Date.now(),
+        active: active ? {
+          oldValue: active.oldValue || '',
+          newValue: active.newValue || '',
+        } : null,
+        session: session ? {
+          oldAccountId: session.oldValue?.accountId || '',
+          newAccountId: session.newValue?.accountId || '',
+        } : null,
+      });
+    });
+    return true;
+  })()`);
+}
+
+async function readStorageIdentityDiagnostics(workerClient, label) {
+  return evaluatePage(workerClient, `(async () => new Promise((resolve) => {
+    chrome.storage.local.get(['pangu_active_account', 'pangu_session'], (storage) => resolve({
+      label: ${JSON.stringify(label)},
+      at: Date.now(),
+      activeAccount: storage.pangu_active_account || '',
+      sessionAccount: storage.pangu_session?.accountId || '',
+      changes: globalThis.__panguStorageIdentityChanges || [],
+    }));
+  }))()`);
+}
+
+async function waitForEvidenceState(workerClient, targetAccountId, expectedState, label) {
+  for (let attempt = 0; attempt < 240; attempt += 1) {
+    const snapshot = await readAccountEvidence(workerClient, targetAccountId);
+    const record = snapshot.entries.find((entry) => entry.security?.fastEvidenceStatus === expectedState);
+    if (record) return { ...snapshot, record };
+    await sleep(250);
+  }
+  throw new Error(`Timeout waiting for ${label}: ${JSON.stringify(await readAccountEvidence(workerClient, targetAccountId))}`);
+}
+
+async function approveDappPhase(workerClient, extensionId, dappOrigin, phase, expectedRecipient) {
+  const startedAt = Date.now();
+  const dappUrl = `${dappOrigin}/?phase=${phase}`;
+  const dappClient = await openBrowserTarget(dappUrl);
+  await waitFor(dappClient, `() => Boolean(window.pangu)`, `phase ${phase} window.pangu injection`);
+  await evaluatePage(dappClient, `(() => { document.querySelector('#send').click(); return true; })()`);
+  await waitFor(
+    dappClient,
+    `() => (document.querySelector('#status')?.textContent || '').includes('submitting')`,
+    `phase ${phase} pending request`,
+  );
+
+  const popupUrl = `chrome-extension://${extensionId}/src/popup/index.html`;
+  const popupClient = await openBrowserTarget(popupUrl);
+  await waitFor(
+    popupClient,
+    `() => window.__currentPage === 'dappTransaction' && document.querySelector('#dappTxApproveBtn') && document.body.innerText.includes('${expectedRecipient}')`,
+    `phase ${phase} transaction confirmation`,
+  );
+  await evaluatePage(popupClient, `(() => { document.querySelector('#dappTxApproveBtn').click(); return true; })()`);
+  await waitFor(
+    dappClient,
+    `() => Boolean(window.__panguTxResult) || Boolean(window.__panguTxError)`,
+    `phase ${phase} approve result`,
+  );
+  const early = await evaluatePage(dappClient, `(() => ({
+    result: window.__panguTxResult,
+    error: window.__panguTxError,
+    events: window.__panguTxEvents || [],
+  }))()`);
+  const requests = await evaluatePage(workerClient, `(() => globalThis.__panguApproveSmokeRequests || [])()`);
+  if (early.error) {
+    const submitDiagnostics = requests
+      .filter((request) => request.normalizedPath === `/api/v1/${groupId}/assign/submit-tx`)
+      .map((request) => ({
+        url: request.url,
+        method: request.method,
+        body: request.body,
+        responseStatus: request.responseStatus,
+        responseBody: request.responseBody,
+      }));
+    throw new Error(`phase ${phase} transaction failed: ${JSON.stringify({ ...early, submitDiagnostics })}`);
+  }
+  const phaseTxId = early.result?.txId;
+  const submits = requests.filter(
+    (request) => request.normalizedPath === `/api/v1/${groupId}/assign/submit-tx`,
+  );
+  if (submits.length !== 1) {
+    throw new Error(`phase ${phase} expected one submit request before finality, got ${JSON.stringify(submits)}`);
+  }
+  assertPureTXCerSubmission(JSON.parse(submits[0].body));
+  const result = await evaluatePage(dappClient, `(() => ({
+    result: window.__panguTxResult,
+    error: window.__panguTxError,
+    events: window.__panguTxEvents || [],
+  }))()`);
+  dappClient.close();
+  popupClient.close();
+  return {
+    result,
+    requests,
+    milestone: {
+      txId: phaseTxId,
+      assignAcceptedAt: Date.now(),
+      assignAcceptMs: Date.now() - startedAt,
+    },
+  };
+}
+
+async function runRealBackendRestartPhase({
+  edgePath,
+  edgeProcess,
+  workerClient,
+  extensionId,
+  dappOrigin,
+  initialTransaction,
+  gqncBaseline,
+}) {
+  const backendQueueBeforeBob = await readCrossOrgQueue(bobAccountId);
+  const bobSession = buildExtensionSession(fixtureBob);
+  await installStorageIdentityDiagnostics(workerClient);
+  const identityBeforeSwitch = await readStorageIdentityDiagnostics(workerClient, 'before-bob-switch');
+  await evaluatePage(workerClient, `(async () => {
+    const writeIdentity = () => new Promise((resolve) => chrome.storage.local.set({
+      pangu_active_account: ${JSON.stringify(bobAccountId)},
+      pangu_session: ${JSON.stringify(bobSession)}
+    }, resolve));
+    if (navigator?.locks?.request) {
+      await navigator.locks.request('pangupay-session', { mode: 'exclusive' }, writeIdentity);
+    } else {
+      await writeIdentity();
+    }
+  })()`);
+  const identityAfterSwitch = await readStorageIdentityDiagnostics(workerClient, 'after-bob-switch');
+  if (
+    identityAfterSwitch.activeAccount !== bobAccountId
+    || identityAfterSwitch.sessionAccount !== bobAccountId
+  ) {
+    throw new Error(`Bob identity switch was not durable: ${JSON.stringify({
+      identityBeforeSwitch,
+      identityAfterSwitch,
+    })}`);
+  }
+
+  const popupUrl = `chrome-extension://${extensionId}/src/popup/index.html`;
+  const bobPopup = await openBrowserTarget(popupUrl);
+  await bobPopup.send('Runtime.enable');
+  await waitFor(bobPopup, `() => window.__currentPage === 'home'`, 'Bob account home before restart');
+  const identityAfterPopup = await readStorageIdentityDiagnostics(workerClient, 'after-bob-popup');
+  await evaluatePage(bobPopup, `(() => {
+    if (globalThis.__panguCrossOrgDiagnosticInstalled) return true;
+    const originalFetch = globalThis.fetch.bind(globalThis);
+    globalThis.__panguCrossOrgDiagnosticInstalled = true;
+    globalThis.__panguCrossOrgDiagnosticRequests = [];
+    globalThis.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input?.url || String(input);
+      const startedAt = Date.now();
+      try {
+        const response = await originalFetch(input, init);
+        const clone = response.clone();
+        let body = '';
+        try { body = await clone.text(); } catch { /* diagnostic only */ }
+        globalThis.__panguCrossOrgDiagnosticRequests.push({
+          url,
+          status: response.status,
+          body: body.slice(0, 4000),
+          elapsedMs: Date.now() - startedAt,
+        });
+        return response;
+      } catch (error) {
+        globalThis.__panguCrossOrgDiagnosticRequests.push({
+          url,
+          error: String(error?.stack || error),
+          elapsedMs: Date.now() - startedAt,
+        });
+        throw error;
+      }
+    };
+    return true;
+  })()`);
+  let beforeRestart;
+  try {
+    beforeRestart = await waitForEvidenceState(
+      workerClient,
+      bobAccountId,
+      'Verified',
+      'Bob verified FastEvidence before restart',
+    );
+  } catch (error) {
+    const popupRequests = await evaluatePage(
+      bobPopup,
+      `(() => globalThis.__panguCrossOrgDiagnosticRequests || [])()`,
+    );
+    const relevantRequests = popupRequests
+      .filter((request) => /txcer-issuance|certifiers|\/groups\/|poll-cross-org-txcers/.test(request.url))
+      .slice(-20)
+      .map((request) => ({
+        url: request.url,
+        status: request.status,
+        error: request.error,
+        body: request.body?.slice(0, 600),
+        elapsedMs: request.elapsedMs,
+      }));
+    const currentEvidence = await readAccountEvidence(workerClient, bobAccountId);
+    const bobStorage = await evaluatePage(workerClient, `(async () => new Promise((resolve) => chrome.storage.local.get(null, (storage) => {
+      const account = storage.pangu_accounts?.[${JSON.stringify(bobAccountId)}] || {};
+      resolve({
+        activeAccount: storage.pangu_active_account || '',
+        sessionAccount: storage.pangu_session?.accountId || '',
+        organization: storage.pangu_organization?.[${JSON.stringify(bobAccountId)}] || null,
+        addressKeys: Object.keys(account.addresses || {}),
+        txCerIDs: Object.keys(account.txCerStore || {}),
+        issuanceRecordIDs: Object.keys(account.txCerIssuanceRecords || {}),
+      });
+    })))()`);
+    throw new Error(`${error.message}; diagnostics=${JSON.stringify({
+      backendQueueBeforeBob,
+      identityBeforeSwitch,
+      identityAfterSwitch,
+      identityAfterPopup,
+      relevantRequests,
+      currentEvidence,
+      bobStorage,
+    })}`);
+  }
+  const sourceRecord = beforeRestart.record;
+  const fastEvidenceMilestone = {
+    txCerID: sourceRecord.txCerID,
+    verifiedAt: Date.now(),
+    elapsedFromAssignMs: initialTransaction?.assignAcceptedAt
+      ? Date.now() - initialTransaction.assignAcceptedAt
+      : null,
+  };
+  if (
+    sourceRecord.lifecycleStatus !== 'Active'
+    || !sourceRecord.issuanceRecordID
+    || !sourceRecord.hasAuthoritySnapshot
+    || !sourceRecord.hasFastEvidence
+    || !sourceRecord.hasAck
+    || !sourceRecord.hasReceipt
+    || !sourceRecord.txCer
+  ) {
+    throw new Error(`Bob TXCer evidence is incomplete before restart: ${JSON.stringify(sourceRecord)}`);
+  }
+  try { await bobPopup.send('Page.close'); } catch { /* best effort */ }
+  bobPopup.close();
+  workerClient.close();
+  stopEdgeProcess(edgeProcess);
+  await sleep(1500);
+
+  let restartedProcess;
+  let restartedWorker;
+  let restartPopup;
+  try {
+    restartedProcess = spawnEdgeProcess(edgePath);
+    const runtime = await findPanguExtensionRuntime();
+    if (runtime.info.id !== extensionId) {
+      throw new Error(`extension identity changed across same-profile restart: ${extensionId} -> ${runtime.info.id}`);
+    }
+    restartedWorker = await connect(runtime.target.webSocketDebuggerUrl);
+    await restartedWorker.send('Runtime.enable');
+    await evaluatePage(restartedWorker, installIssuanceBlockExpression());
+
+    restartPopup = await openBrowserTarget(popupUrl, { blockAuthority: true });
+    await waitFor(restartPopup, `() => window.__currentPage === 'home'`, 'Bob home with issuance blocked');
+    const blocked = await waitForEvidenceState(
+      restartedWorker,
+      bobAccountId,
+      'Pending',
+      'Bob cached evidence Pending while authority is blocked',
+    );
+
+    await restartPopup.send('Fetch.disable');
+    await evaluatePage(restartedWorker, restoreAuthorityFetchAndCaptureExpression());
+    await restartPopup.send('Page.reload', { ignoreCache: true });
+    await waitFor(restartPopup, `() => window.__currentPage === 'home'`, 'Bob home after authority restore');
+    const replayed = await waitForEvidenceState(
+      restartedWorker,
+      bobAccountId,
+      'Verified',
+      'Bob FastEvidence reverified from authority',
+    );
+    if (replayed.record.txCerID !== sourceRecord.txCerID) {
+      throw new Error(`reverified TXCer identity changed: ${sourceRecord.txCerID} -> ${replayed.record.txCerID}`);
+    }
+    assertEvidenceReplay([
+      sourceRecord.security,
+      blocked.record.security,
+      replayed.record.security,
+    ]);
+
+    try { await restartPopup.send('Page.close'); } catch { /* best effort */ }
+    restartPopup.close();
+    restartPopup = null;
+    const secondPhase = await approveDappPhase(
+      restartedWorker,
+      extensionId,
+      dappOrigin,
+      2,
+      walletAddress,
+    );
+    const submits = secondPhase.requests.filter(
+      (request) => request.normalizedPath === `/api/v1/${groupId}/assign/submit-tx`,
+    );
+    if (submits.length !== 1) {
+      throw new Error(`expected one Bob pure-TXCer submit, got ${JSON.stringify(submits)}`);
+    }
+    const secondSubmitBody = JSON.parse(submits[0].body);
+    const secondTX = assertPureTXCerSubmission(secondSubmitBody);
+    const consumedTXCerID = String(secondTX.TXInputsCertificate[0].TXCerID || '');
+    if (consumedTXCerID !== sourceRecord.txCerID) {
+      throw new Error(`Bob spent unexpected TXCer: expected=${sourceRecord.txCerID} actual=${consumedTXCerID}`);
+    }
+    const afterSpend = await evaluatePage(restartedWorker, `(async () => new Promise((resolve) => chrome.storage.local.get(null, (storage) => {
+      const account = storage.pangu_accounts?.[${JSON.stringify(bobAccountId)}] || {};
+      resolve({
+        status: account.txCerStatuses?.[${JSON.stringify(consumedTXCerID)}]?.status || '',
+        txCerID: ${JSON.stringify(consumedTXCerID)},
+      });
+    })))()`);
+    if (!['PendingUse', 'Consumed', 'AwaitingExchange'].includes(afterSpend.status)) {
+      throw new Error(`source TXCer did not enter a spent lifecycle state: ${JSON.stringify(afterSpend)}`);
+    }
+    const certification = await waitForGQNCCertifiedTransactions({
+      txIDs: [initialTransaction?.txId, secondTX.TXID],
+      baselineHeight: gqncBaseline?.certifiedHeight || 0,
+      baselineRejectedActionIDs: gqncBaseline?.rejectedActionIDs || [],
+    });
+
+    restartedWorker.close();
+    restartedWorker = null;
+    return {
+      edgeProcess: restartedProcess,
+      evidence: {
+        beforeRestart: sourceRecord.security,
+        blocked: blocked.record.security,
+        replayed: replayed.record.security,
+        txCerID: sourceRecord.txCerID,
+        cfaaAuditStatus: replayed.record.security?.cfaaAuditStatus,
+        fastEvidenceMilestone,
+      },
+      secondPayment: {
+        txId: secondTX.TXID,
+        txType: secondTX.TXType,
+        normalInputCount: secondTX.TXInputsNormal.length,
+        txCerInputCount: secondTX.TXInputsCertificate.length,
+        sourceStatus: afterSpend.status,
+        assignMilestone: secondPhase.milestone,
+      },
+      certification,
+    };
+  } catch (error) {
+    try { restartPopup?.close(); } catch { /* best effort */ }
+    try { restartedWorker?.close(); } catch { /* best effort */ }
+    stopEdgeProcess(restartedProcess);
+    throw error;
+  }
+}
+
+function cleanup(edgeProcess, server) {
+  try {
+    server?.close();
+  } catch {
+    // ignore server cleanup errors
+  }
+
+  stopEdgeProcess(edgeProcess);
 
   for (let i = 0; i < 20; i += 1) {
     try {
@@ -651,19 +1273,7 @@ async function run() {
   let workerClient;
   try {
     server = await createDappServer();
-    edgeProcess = spawn(edgePath, [
-      `--user-data-dir=${profileDir}`,
-      `--disable-extensions-except=${extensionDir}`,
-      `--load-extension=${extensionDir}`,
-      `--remote-debugging-port=${debugPort}`,
-      '--remote-allow-origins=*',
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--disable-popup-blocking',
-      '--window-position=-32000,-32000',
-      '--window-size=900,700',
-      'about:blank',
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    edgeProcess = spawnEdgeProcess(edgePath);
 
     await waitForDevTools();
     await sleep(4000);
@@ -707,6 +1317,8 @@ async function run() {
       `(async () => new Promise((resolve) => chrome.storage.local.set(${JSON.stringify(smokeStoragePayload(dappOrigin))}, resolve)))()`
     );
     await evaluatePage(workerClient, isRealBackendMode ? installFetchCaptureExpression() : installMockFetchExpression());
+    const gqncBaseline = isRealBackendMode ? await readGQNCCheckpoint() : null;
+    const initialSubmitStartedAt = Date.now();
 
     const dappUrl = `${dappOrigin}/`;
     const dappTargetResponse = await fetch(`http://127.0.0.1:${debugPort}/json/new?${dappUrl}`, { method: 'PUT' });
@@ -749,8 +1361,11 @@ async function run() {
     const popupTarget = await popupTargetResponse.json();
     const popupClient = await connect(popupTarget.webSocketDebuggerUrl);
     const popupErrors = [];
+    const popupSseRequests = new Map();
+    const popupSseDiagnostics = [];
     await popupClient.send('Runtime.enable');
     await popupClient.send('Page.enable');
+    await popupClient.send('Network.enable');
     const pushPopupEvent = popupClient.events.push.bind(popupClient.events);
     popupClient.events.push = (event) => {
       if (event.method === 'Runtime.consoleAPICalled' && event.params.type === 'error') {
@@ -761,6 +1376,39 @@ async function run() {
       }
       if (event.method === 'Runtime.exceptionThrown') {
         popupErrors.push({ type: 'exception', text: event.params.exceptionDetails?.text });
+      }
+      if (
+        event.method === 'Network.requestWillBeSent' &&
+        String(event.params.request?.url || '').includes('/assign/account-update-stream')
+      ) {
+        popupSseRequests.set(event.params.requestId, event.params.request.url);
+        popupSseDiagnostics.push({
+          type: 'request',
+          url: event.params.request.url,
+        });
+      }
+      if (
+        event.method === 'Network.responseReceived' &&
+        popupSseRequests.has(event.params.requestId)
+      ) {
+        popupSseDiagnostics.push({
+          type: 'response',
+          url: popupSseRequests.get(event.params.requestId),
+          status: event.params.response?.status,
+          mimeType: event.params.response?.mimeType,
+        });
+      }
+      if (
+        event.method === 'Network.loadingFailed' &&
+        popupSseRequests.has(event.params.requestId)
+      ) {
+        popupSseDiagnostics.push({
+          type: 'failed',
+          url: popupSseRequests.get(event.params.requestId),
+          errorText: event.params.errorText,
+          blockedReason: event.params.blockedReason,
+          canceled: event.params.canceled,
+        });
       }
       return pushPopupEvent(event);
     };
@@ -817,16 +1465,33 @@ async function run() {
       );
     }
     const observedTxId = earlyDappResult.result?.txId || txId;
+    const shouldRunRestartFlow = isRealBackendMode
+      && String(process.env.PANGUPAY_REAL_BROWSER_RESTART_FLOW || 'true').toLowerCase() !== 'false';
+    const initialCompletionStatus = getInitialBrowserCompletionStatus({
+      realBackend: isRealBackendMode,
+      restartFlow: shouldRunRestartFlow,
+    });
+    const initialHistoryStatus = getInitialBrowserHistoryStatus({
+      realBackend: isRealBackendMode,
+      restartFlow: shouldRunRestartFlow,
+    });
     await waitFor(
       dappClient,
       `() => (window.__panguTxEvents || []).some((event) => event && event.txId === '${observedTxId}' && event.status === 'submitted')`,
       'DApp submitted txStatus event'
     );
-    await waitFor(
-      dappClient,
-      `() => (window.__panguTxEvents || []).some((event) => event && event.txId === '${observedTxId}' && event.status === 'success')`,
-      'DApp final success txStatus event'
-    );
+    const initialAssignMilestone = {
+      txId: observedTxId,
+      submittedAt: Date.now(),
+      assignAcceptMs: Date.now() - initialSubmitStartedAt,
+    };
+    if (initialCompletionStatus === 'success') {
+      await waitFor(
+        dappClient,
+        `() => (window.__panguTxEvents || []).some((event) => event && event.txId === '${observedTxId}' && event.status === 'success')`,
+        'DApp final success txStatus event'
+      );
+    }
 
     const dappResult = await evaluatePage(
       dappClient,
@@ -850,17 +1515,17 @@ async function run() {
       `(async () => new Promise((resolve) => chrome.storage.local.get(null, resolve)))()`
     );
     const pendingTxs = storage.pangu_dapp_tx_pending?.[accountId] || {};
-    if (Object.keys(pendingTxs).length !== 0) {
+    if (initialCompletionStatus === 'success' && Object.keys(pendingTxs).length !== 0) {
       throw new Error(`DApp pending transaction was not cleared: ${JSON.stringify(pendingTxs)}`);
     }
     const watches = storage.pangu_dapp_tx_watches?.[accountId] || {};
-    if (Object.keys(watches).length !== 0) {
+    if (initialCompletionStatus === 'success' && Object.keys(watches).length !== 0) {
       throw new Error(`DApp tx watch should be consumed after success status: ${JSON.stringify(watches)}`);
     }
     const history = storage.pangu_tx_history?.[accountId] || [];
     const historyRecord = history.find((item) => item.txHash === observedTxId);
-    if (!historyRecord || historyRecord.status !== 'success') {
-      throw new Error(`Submitted transaction history was not marked success: ${JSON.stringify(history)}`);
+    if (!historyRecord || historyRecord.status !== initialHistoryStatus) {
+      throw new Error(`Submitted transaction history did not reach ${initialHistoryStatus}: ${JSON.stringify(history)}`);
     }
 
     const mockRequests = await evaluatePage(
@@ -901,13 +1566,41 @@ async function run() {
     }
 
     if (dappErrors.length || popupErrors.length) {
-      throw new Error(`Browser runtime errors: ${JSON.stringify({ dappErrors, popupErrors })}`);
+      throw new Error(
+        `Browser runtime errors: ${JSON.stringify({ dappErrors, popupErrors, popupSseDiagnostics })}`
+      );
     }
-
-    dappClient.close();
-    popupClient.close();
-    workerClient.close();
-    workerClient = null;
+    let restartSummary = null;
+    if (shouldRunRestartFlow) {
+      try { await dappClient.send('Page.close'); } catch { /* best effort */ }
+      try { await popupClient.send('Page.close'); } catch { /* best effort */ }
+      dappClient.close();
+      popupClient.close();
+      const restarted = await runRealBackendRestartPhase({
+        edgePath,
+        edgeProcess,
+        workerClient,
+        extensionId,
+        dappOrigin,
+        initialTransaction: {
+          txId: observedTxId,
+          assignAcceptedAt: initialAssignMilestone.submittedAt,
+        },
+        gqncBaseline,
+      });
+      edgeProcess = restarted.edgeProcess;
+      workerClient = null;
+      restartSummary = {
+        evidence: restarted.evidence,
+        secondPayment: restarted.secondPayment,
+        certification: restarted.certification,
+      };
+    } else {
+      dappClient.close();
+      popupClient.close();
+      workerClient.close();
+      workerClient = null;
+    }
 
     console.log(JSON.stringify({
       ok: true,
@@ -922,6 +1615,8 @@ async function run() {
         inputCount: submitBody.TX.TXInputsNormal.length,
         outputCount: submitBody.TX.TXOutputs.length,
       },
+      initialAssignMilestone,
+      restartSummary,
       mockRequestCount: mockRequests.length,
     }, null, 2));
   } finally {

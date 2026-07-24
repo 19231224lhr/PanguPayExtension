@@ -223,12 +223,19 @@ export function cacheTXCerUpdate(txCerId: string, status: number, utxo?: string)
     });
 }
 
-export function isTXCerLocked(txCerId: string): boolean {
+export function isTXCerLocked(txCerId: string, allowedDraftLockOwner?: string): boolean {
     const lock = lockedTXCers.get(txCerId);
     if (!lock) return false;
     const timeout = lock.mode === 'submitted' ? SUBMITTED_LOCK_TIMEOUT : DRAFT_LOCK_TIMEOUT;
     if (Date.now() - lock.lockTime > timeout) {
         unlockTXCers([txCerId], true);
+        return false;
+    }
+    if (
+        allowedDraftLockOwner &&
+        lock.mode === 'draft' &&
+        lock.relatedTXID === allowedDraftLockOwner
+    ) {
         return false;
     }
     return true;

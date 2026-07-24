@@ -1,4 +1,11 @@
-import type { PublicKeyEnvelope, TxCertificate, TXCerStatusView, UTXOData } from './blockchain';
+import type {
+    PublicKeyEnvelope,
+    TxCertificate,
+    TXCerIssuanceMetadata,
+    TXCerStatusView,
+    UTXOData,
+} from './blockchain';
+import type { AmountDecimal, AmountInput } from './amount';
 
 export interface WalletKeys {
     privHex: string;
@@ -7,15 +14,15 @@ export interface WalletKeys {
 }
 
 export interface AddressValue {
-    totalValue: number;
-    utxoValue: number;
-    txCerValue: number;
+    totalValue: AmountDecimal;
+    utxoValue: AmountDecimal;
+    txCerValue: AmountDecimal;
 }
 
 export interface AddressData {
     type: number;
     utxos: Record<string, UTXOData>;
-    txCers: Record<string, number>;
+    txCers: Record<string, AmountInput>;
     value: AddressValue;
     estInterest: number;
     gas?: number;
@@ -57,8 +64,9 @@ export interface Wallet {
     addressMsg: Record<string, AddressData>;
     totalTXCers: Record<string, TxCertificate>;
     txCerStatuses?: Record<string, TXCerStatusView>;
-    totalValue: number;
-    valueDivision: Record<number, number>;
+    txCerIssuanceRecords?: Record<string, TXCerIssuanceMetadata>;
+    totalValue: AmountDecimal;
+    valueDivision: Record<number, AmountDecimal>;
     updateTime: number;
     updateBlock: number;
 }
