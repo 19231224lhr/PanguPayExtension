@@ -1,8 +1,12 @@
-import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { spawnSync } from 'node:child_process';
 
-const webRoot = process.env.PANGU_WEB_REPO
-  ? path.resolve(process.env.PANGU_WEB_REPO)
-  : path.resolve(process.cwd(), '..', 'TransferAreaInterface');
+const result = spawnSync(process.execPath, ['--test', 'tests/apiEndpoint.node.test.js'], {
+  cwd: process.cwd(),
+  encoding: 'utf8',
+});
 
-await import(pathToFileURL(path.join(webRoot, 'scripts', 'check-api-routes.js')).href);
+if (result.stdout) process.stdout.write(result.stdout);
+if (result.stderr) process.stderr.write(result.stderr);
+if (result.status !== 0) process.exit(result.status ?? 1);
+
+console.log('[check:api] local extension API contract checks passed');

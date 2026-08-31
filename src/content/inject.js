@@ -1,151 +1,88 @@
-/**
- * Inject Script
- * 
- * 注入到页面中，提供 window.pangu API 给第三方网站使用
- */
+const RESPONSE_TYPE = 'PANGU_RESPONSE';
+const EVENT_TYPE = 'PANGU_EVENT';
+const REQUEST_TIMEOUT_MS = 120_000;
+const listeners = new Map([
+    ['accountChanged', new Set()],
+    ['disconnect', new Set()],
+    ['txStatus', new Set()],
+]);
+const pending = new Map();
 
-// 生成唯一请求 ID
-function generateRequestId() {
-    return `pangu_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-}
-
-// 发送消息并等待响应
-function sendMessage(type, payload) {
+function request(type, payload) {
+    const requestId = crypto.randomUUID();
     return new Promise((resolve, reject) => {
-        const requestId = generateRequestId();
-
-        const handler = (event) => {
-            if (event.source !== window) return;
-            if (!event.data || event.data.type !== 'PANGU_RESPONSE') return;
-            if (event.data.requestId !== requestId) return;
-
-            window.removeEventListener('message', handler);
-
-            if (event.data.success) {
-                resolve(event.data.data);
-            } else {
-                reject(new Error(event.data.error || '未知错误'));
-            }
-        };
-
-        window.addEventListener('message', handler);
-
-        window.postMessage({
-            type,
-            payload,
-            requestId,
-        }, '*');
-
-        // 超时处理
-        setTimeout(() => {
-            window.removeEventListener('message', handler);
-            reject(new Error('请求超时'));
-        }, 120000);
+        const timeoutId = window.setTimeout(() => {
+            pending.delete(requestId);
+            reject(new Error('PanguPay request timed out'));
+        }, REQUEST_TIMEOUT_MS);
+        pending.set(requestId, { resolve, reject, timeoutId });
+        window.postMessage({ type, requestId, payload }, window.location.origin);
     });
 }
 
-// 事件监听器
-const eventListeners = {
-    accountChanged: [],
-    disconnect: [],
-    txStatus: [],
-};
-
-// 创建 PanguPay 钱包对象
-const pangu = {
-    async connect() {
-        return sendMessage('PANGU_CONNECT');
-    },
-
-    async connectSigned(options) {
-        return sendMessage('PANGU_CONNECT_SIGN', options || {});
-    },
-
-    async disconnect() {
-        return sendMessage('PANGU_DISCONNECT');
-    },
-
-    async getAccount() {
-        try {
-            return await sendMessage('PANGU_GET_ACCOUNT');
-        } catch {
-            return null;
-        }
-    },
-
-    async sendTransaction(params) {
-        return sendMessage('PANGU_SEND_TRANSACTION', params);
-    },
-
-    async isConnected() {
-        try {
-            const account = await this.getAccount();
-            return !!account;
-        } catch {
-            return false;
-        }
-    },
-
-    on(event, callback) {
-        if (eventListeners[event]) {
-            eventListeners[event].push(callback);
-        }
-    },
-
-    off(event, callback) {
-        if (eventListeners[event]) {
-            const index = eventListeners[event].indexOf(callback);
-            if (index > -1) {
-                eventListeners[event].splice(index, 1);
-            }
-        }
-    },
-};
-
-function emitEvent(event, payload) {
-    if (!eventListeners[event]) return;
-    eventListeners[event].forEach((listener) => {
+function emit(event, payload) {
+    for (const listener of listeners.get(event) || []) {
         try {
             listener(payload);
-        } catch (err) {
-            console.warn('[PanguPay] Event handler error:', err);
+        } catch (error) {
+            console.error('[PanguPay] DApp listener failed:', error);
         }
-    });
+    }
 }
 
 window.addEventListener('message', (event) => {
-    if (event.source !== window) return;
-    if (!event.data || event.data.type !== 'PANGU_EVENT') return;
-    const evt = event.data.event;
-    if (!evt) return;
-    if (evt === 'disconnect') {
-        emitEvent('disconnect', {
-            origin: event.data.origin,
-        });
+    if (event.source !== window || event.origin !== window.location.origin) return;
+    const message = event.data;
+    if (!message || typeof message !== 'object') return;
+
+    if (message.type === RESPONSE_TYPE) {
+        const entry = pending.get(message.requestId);
+        if (!entry) return;
+        window.clearTimeout(entry.timeoutId);
+        pending.delete(message.requestId);
+        if (message.success) entry.resolve(message.data);
+        else entry.reject(new Error(message.error || 'PanguPay request failed'));
+        return;
     }
-    if (evt === 'accountChanged') {
-        emitEvent('accountChanged', event.data.address || '');
-    }
-    if (evt === 'txStatus') {
-        emitEvent('txStatus', {
-            txId: event.data.txId,
-            status: event.data.status,
-            mode: event.data.mode,
-            origin: event.data.origin,
-            error: event.data.error,
+
+    if (message.type !== EVENT_TYPE || !listeners.has(message.event)) return;
+    if (message.event === 'accountChanged') {
+        emit('accountChanged', message.account || null);
+    } else if (message.event === 'disconnect') {
+        emit('disconnect');
+    } else {
+        emit('txStatus', {
+            txId: message.txId,
+            mode: 'quick',
+            status: message.status,
+            ...(message.error ? { error: message.error } : {}),
         });
     }
 });
 
-// 注入到 window 对象
+const provider = Object.freeze({
+    connect: () => request('PANGU_CONNECT'),
+    getAccount: () => request('PANGU_GET_ACCOUNT'),
+    sendTransaction: (transaction) => request('PANGU_SEND_TRANSACTION', transaction),
+    isConnected: async () => Boolean(await request('PANGU_GET_ACCOUNT')),
+    disconnect: () => request('PANGU_DISCONNECT'),
+    on(event, listener) {
+        if (!listeners.has(event) || typeof listener !== 'function') {
+            throw new Error(`Unsupported PanguPay event: ${event}`);
+        }
+        listeners.get(event).add(listener);
+        return provider;
+    },
+    off(event, listener) {
+        listeners.get(event)?.delete(listener);
+        return provider;
+    },
+});
+
 Object.defineProperty(window, 'pangu', {
-    value: pangu,
-    writable: false,
-    enumerable: true,
+    value: provider,
     configurable: false,
+    enumerable: true,
+    writable: false,
 });
-
-// 触发 pangu ready 事件
 window.dispatchEvent(new Event('panguReady'));
-
-console.log('[PanguPay] 钱包已注入 window.pangu');

@@ -11,17 +11,8 @@ import type { TxCertificate } from './blockchain';
 // 环境配置
 // ========================================
 
-function getRuntimeDevFlag(): boolean {
-    if (typeof window === 'undefined') return false;
-    const runtime = (window as any).__PANGU_DEV__;
-    if (typeof runtime === 'boolean') return runtime;
-    if (typeof runtime === 'string') return runtime.toLowerCase() === 'true';
-    return false;
-}
-
-const DEV_MODE = getRuntimeDevFlag();
-const DEFAULT_DEV_BASE_URL = 'http://localhost:3001';
-const DEFAULT_PROD_BASE_URL = 'http://47.243.174.71:3001';
+const DEV_MODE = true;
+const DEFAULT_API_BASE_URL = 'http://127.0.0.1:3001';
 
 function normalizeBaseUrl(value: string): string {
     return value.trim().replace(/\/$/, '');
@@ -34,28 +25,8 @@ function getBuildTimeApiBaseUrl(): string {
 }
 
 function getApiBaseUrl(): string {
-    if (typeof window !== 'undefined') {
-        const override = (window as any).__API_BASE_URL__ || (window as any).__PANGU_API_BASE_URL__;
-        if (typeof override === 'string' && override.trim()) {
-            return normalizeBaseUrl(override);
-        }
-    }
-
     const buildTimeOverride = getBuildTimeApiBaseUrl();
-    if (buildTimeOverride) {
-        return buildTimeOverride;
-    }
-
-    if (DEV_MODE) {
-        return DEFAULT_DEV_BASE_URL;
-    }
-
-    if (typeof window !== 'undefined' && window.location && !window.location.protocol.includes('chrome-extension')) {
-        const { protocol, hostname } = window.location;
-        return `${protocol}//${hostname}:3001`;
-    }
-
-    return DEFAULT_PROD_BASE_URL;
+    return buildTimeOverride || DEFAULT_API_BASE_URL;
 }
 
 export const API_BASE_URL = getApiBaseUrl();

@@ -2,7 +2,7 @@
     "manifest_version": 3,
     "name": "PanguPay Wallet",
     "version": "1.0.0",
-    "description": "盘古系统 UTXO 钱包扩展 - 安全、快速、便捷",
+    "description": "PanguPay 本地快速交易实验钱包",
     "action": {
         "default_popup": "src/popup/index.html",
         "default_icon": {
@@ -18,7 +18,8 @@
     "content_scripts": [
         {
             "matches": [
-                "<all_urls>"
+                "http://localhost/*",
+                "http://127.0.0.1/*"
             ],
             "js": [
                 "src/content/index.ts"
@@ -28,12 +29,11 @@
     ],
     "permissions": [
         "storage",
-        "alarms",
-        "tabs"
+        "alarms"
     ],
     "host_permissions": [
-        "http://*/*",
-        "https://*/*"
+        "http://localhost/*",
+        "http://127.0.0.1/*"
     ],
     "icons": {
         "16": "public/icons/icon16.png",
@@ -46,7 +46,8 @@
                 "src/content/inject.js"
             ],
             "matches": [
-                "<all_urls>"
+                "http://localhost/*",
+                "http://127.0.0.1/*"
             ]
         }
     ]

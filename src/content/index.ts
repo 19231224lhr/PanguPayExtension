@@ -1,79 +1,45 @@
-/**
- * Content Script
- * 
- * 注入到网页中，提供 window.pangu API
- */
+import { isPublicPageMessage } from '../minimal/messages';
 
-// 注入 inject.js 脚本到页面
-function injectScript() {
+const PAGE_RESPONSE_TYPE = 'PANGU_RESPONSE';
+const PAGE_EVENT_TYPE = 'PANGU_EVENT';
+
+function injectProvider(): void {
     const script = document.createElement('script');
     script.src = chrome.runtime.getURL('src/content/inject.js');
     script.type = 'module';
     (document.head || document.documentElement).appendChild(script);
-    script.onload = () => script.remove();
+    script.addEventListener('load', () => script.remove(), { once: true });
 }
 
-// 在 document_start 时注入
-injectScript();
+injectProvider();
 
-// 监听来自页面的消息
-window.addEventListener('message', async (event) => {
-    if (event.source !== window) return;
-    if (!event.data || !event.data.type) return;
-    if (!event.data.type.startsWith('PANGU_')) return;
-    if (event.data.type === 'PANGU_EVENT' || event.data.type === 'PANGU_RESPONSE') return;
+window.addEventListener('message', (event: MessageEvent<unknown>) => {
+    if (event.source !== window || !isPublicPageMessage(event.data)) return;
+    const message = event.data;
 
-    const { type, payload, requestId } = event.data;
-    const iconEl = document.querySelector<HTMLLinkElement>("link[rel~='icon']");
-    const siteInfo = {
-        origin: window.location.origin,
-        href: window.location.href,
-        title: document.title || window.location.hostname,
-        icon: iconEl?.href || '',
-    };
-
-    try {
-        // 转发消息到 background
-        const response = await chrome.runtime.sendMessage({
-            type,
-            payload,
-            requestId,
-            site: siteInfo,
-        });
-
-        // 将响应发回页面
+    void chrome.runtime.sendMessage(message).then((response) => {
         window.postMessage({
-            type: 'PANGU_RESPONSE',
-            requestId,
-            ...response,
-        }, '*');
-    } catch (error) {
+            type: PAGE_RESPONSE_TYPE,
+            requestId: message.requestId,
+            ...(response || { success: false, error: 'PanguPay did not respond' }),
+        }, window.location.origin);
+    }).catch((error: unknown) => {
         window.postMessage({
-            type: 'PANGU_RESPONSE',
-            requestId,
+            type: PAGE_RESPONSE_TYPE,
+            requestId: message.requestId,
             success: false,
-            error: error instanceof Error ? error.message : '扩展通信失败',
-        }, '*');
-    }
+            error: error instanceof Error ? error.message : 'PanguPay communication failed',
+        }, window.location.origin);
+    });
 });
 
-chrome.runtime.onMessage.addListener((message) => {
-    if (message?.type !== 'PANGU_EVENT') return;
-    if (message.origin && message.origin !== window.location.origin) return;
-    window.postMessage(
-        {
-            type: 'PANGU_EVENT',
-            event: message.event,
-            origin: message.origin,
-            address: message.address || '',
-            txId: message.txId || '',
-            status: message.status || '',
-            mode: message.mode || '',
-            error: message.error || '',
-        },
-        '*'
-    );
+chrome.runtime.onMessage.addListener((message: unknown) => {
+    if (!message || typeof message !== 'object') return;
+    const event = message as Record<string, unknown>;
+    if (event.type !== PAGE_EVENT_TYPE) return;
+    if (typeof event.origin === 'string' && event.origin !== window.location.origin) return;
+    if (!['accountChanged', 'disconnect', 'txStatus'].includes(String(event.event))) return;
+    window.postMessage(event, window.location.origin);
 });
 
-// 导出空对象使其成为模块
-export { };
+export {};

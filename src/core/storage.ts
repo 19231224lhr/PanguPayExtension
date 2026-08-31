@@ -154,19 +154,19 @@ export interface TransactionRecord {
 // ========================================
 
 const STORAGE_KEYS = {
-    ACCOUNTS: 'pangu_accounts',
-    ACTIVE_ACCOUNT: 'pangu_active_account',
-    ENCRYPTED_KEYS: 'pangu_encrypted_keys',
-    ENCRYPTED_ADDRESS_KEYS: 'pangu_encrypted_address_keys',
-    SETTINGS: 'pangu_settings',
-    TX_HISTORY: 'pangu_tx_history',
-    ORGANIZATION: 'pangu_organization',
-    DAPP_CONNECTIONS: 'pangu_dapp_connections',
-    DAPP_PENDING: 'pangu_dapp_pending',
-    DAPP_SIGN_PENDING: 'pangu_dapp_sign_pending',
-    DAPP_TX_PENDING: 'pangu_dapp_tx_pending',
-    DAPP_TX_WATCHES: 'pangu_dapp_tx_watches',
-    SESSION: 'pangu_session',
+    ACCOUNTS: 'pangu_v2_accounts',
+    ACTIVE_ACCOUNT: 'pangu_v2_active_account',
+    ENCRYPTED_KEYS: 'pangu_v2_encrypted_keys',
+    ENCRYPTED_ADDRESS_KEYS: 'pangu_v2_encrypted_address_keys',
+    SETTINGS: 'pangu_v2_settings',
+    TX_HISTORY: 'pangu_v2_tx_history',
+    ORGANIZATION: 'pangu_v2_organization',
+    DAPP_CONNECTIONS: 'pangu_v2_dapp_connections',
+    DAPP_PENDING: 'pangu_v2_dapp_pending',
+    DAPP_SIGN_PENDING: 'pangu_v2_dapp_sign_pending',
+    DAPP_TX_PENDING: 'pangu_v2_dapp_tx_pending',
+    DAPP_TX_WATCHES: 'pangu_v2_dapp_tx_watches',
+    SESSION: 'pangu_v2_session',
 };
 
 function normalizeHexString(value: unknown): string {
@@ -500,7 +500,7 @@ export function normalizeAddressDataForStorage(
         gas: Number(current.gas ?? current.estInterest ?? current.EstInterest ?? current.Interest ?? 0) || 0,
         EstInterest: Number(current.EstInterest ?? current.estInterest ?? current.Interest ?? current.gas ?? 0) || 0,
         publicKeyNew: publicKeyNew || undefined,
-        locked: Boolean(current.locked) || Boolean(protocolState.readOnly),
+        locked: protocolState.readOnly,
         addressRootSeedHex: normalizeHexString(current.addressRootSeedHex) || undefined,
         signPublicKeyV2: signPublicKeyV2 || undefined,
         seedAnchor: protocolState.seedAnchor && protocolState.seedAnchor.length > 0 ? protocolState.seedAnchor : undefined,
@@ -509,8 +509,8 @@ export function normalizeAddressDataForStorage(
         registrationState,
         registrationError: registrationState === 'registered' ? undefined : (current.registrationError ? String(current.registrationError) : undefined),
         seedLocalState: protocolState.seedLocalState,
-        readOnly: Boolean(current.readOnly) || protocolState.readOnly,
-        seedRepairRequired: Boolean(current.seedRepairRequired) || protocolState.seedRepairRequired,
+        readOnly: protocolState.readOnly,
+        seedRepairRequired: protocolState.seedRepairRequired,
         pendingSeedStep: Number(current.pendingSeedStep || 0) || undefined,
         pendingNextSeedStep: Number(current.pendingNextSeedStep || 0) || undefined,
         pendingSeedTxId: current.pendingSeedTxId ? String(current.pendingSeedTxId) : undefined,
@@ -876,7 +876,7 @@ export async function hydrateSessionAddressKeys(
             sessionAddressKeys.set(normalizeSessionAddressKey(addr), key);
         }
     }
-    void refreshSessionExpiry();
+    void persistSession();
 }
 
 // ========================================
@@ -1471,7 +1471,7 @@ interface SessionRecord {
 let sessionPrivateKey: string | null = null;
 let sessionAccountId: string | null = null;
 let sessionExpiresAt: number | null = null;
-let sessionAutoLockMs = DEFAULT_SETTINGS.autoLockMinutes * 60 * 1000;
+const sessionAutoLockMs = 15 * 60 * 1000;
 const sessionAddressKeys = new Map<string, string>();
 
 function normalizeSessionAddressKey(address: string): string {
@@ -1479,9 +1479,14 @@ function normalizeSessionAddressKey(address: string): string {
 }
 
 export function setSessionKey(accountId: string, privKey: string): void {
+    const startsNewSession = sessionAccountId !== accountId
+        || sessionPrivateKey !== privKey
+        || !sessionExpiresAt
+        || isSessionExpired();
     sessionAccountId = accountId;
     sessionPrivateKey = privKey;
-    void refreshSessionExpiry();
+    if (startsNewSession) sessionExpiresAt = Date.now() + sessionAutoLockMs;
+    void persistSession();
 }
 
 export function getSessionKey(): { accountId: string; privKey: string } | null {
@@ -1490,16 +1495,19 @@ export function getSessionKey(): { accountId: string; privKey: string } | null {
         clearSession();
         return null;
     }
-    void refreshSessionExpiry();
     return { accountId: sessionAccountId, privKey: sessionPrivateKey };
 }
 
-export function clearSession(): void {
+function clearSessionMemory(): void {
     sessionAccountId = null;
     sessionPrivateKey = null;
     sessionExpiresAt = null;
     sessionAddressKeys.clear();
-    void removeStorageData(STORAGE_KEYS.SESSION);
+}
+
+export function clearSession(): void {
+    clearSessionMemory();
+    void chrome.storage.session.remove(STORAGE_KEYS.SESSION);
 }
 
 export function isUnlocked(): boolean {
@@ -1508,7 +1516,22 @@ export function isUnlocked(): boolean {
 
 export function setSessionAddressKey(address: string, privKey: string): void {
     sessionAddressKeys.set(normalizeSessionAddressKey(address), privKey);
-    void refreshSessionExpiry();
+    void persistSession();
+}
+
+export function setSessionSecretsInMemory(
+    accountId: string,
+    accountPrivateKey: string,
+    addressPrivateKeys: Record<string, string>
+): number {
+    sessionAccountId = accountId;
+    sessionPrivateKey = accountPrivateKey;
+    sessionExpiresAt = Date.now() + sessionAutoLockMs;
+    sessionAddressKeys.clear();
+    for (const [address, privateKey] of Object.entries(addressPrivateKeys)) {
+        if (privateKey) sessionAddressKeys.set(normalizeSessionAddressKey(address), privateKey);
+    }
+    return sessionExpiresAt;
 }
 
 export function hasSessionAddressKey(address: string): boolean {
@@ -1524,62 +1547,60 @@ export function getSessionAddressKey(address: string): string | null {
         clearSession();
         return null;
     }
-    void refreshSessionExpiry();
     return sessionAddressKeys.get(normalizeSessionAddressKey(address)) || null;
 }
 
 export function removeSessionAddressKey(address: string): void {
     sessionAddressKeys.delete(normalizeSessionAddressKey(address));
-    void refreshSessionExpiry();
+    void persistSession();
 }
 
 function isSessionExpired(): boolean {
     if (!sessionExpiresAt) return false;
-    return Date.now() > sessionExpiresAt;
+    return Date.now() >= sessionExpiresAt;
 }
 
-async function refreshSessionExpiry(): Promise<void> {
+async function persistSession(): Promise<void> {
     const accountId = sessionAccountId;
     const privateKey = sessionPrivateKey;
-    if (!accountId || !privateKey) return;
+    const expiresAt = sessionExpiresAt;
+    if (!accountId || !privateKey || !expiresAt || Date.now() >= expiresAt) return;
 
     await withSerializedLock('pangupay-session', async () => {
-        if (sessionAccountId !== accountId || sessionPrivateKey !== privateKey) return;
+        if (sessionAccountId !== accountId || sessionPrivateKey !== privateKey || sessionExpiresAt !== expiresAt) return;
         if ((await getActiveAccountId()) !== accountId) return;
-
-        try {
-            const settings = await getSettings();
-            sessionAutoLockMs = Math.max(1, settings.autoLockMinutes || DEFAULT_SETTINGS.autoLockMinutes) * 60 * 1000;
-        } catch {
-            sessionAutoLockMs = DEFAULT_SETTINGS.autoLockMinutes * 60 * 1000;
-        }
 
         // Recheck after asynchronous reads so a stale extension context cannot
         // overwrite the session selected by another popup/background context.
         if (
             sessionAccountId !== accountId
             || sessionPrivateKey !== privateKey
+            || sessionExpiresAt !== expiresAt
             || (await getActiveAccountId()) !== accountId
         ) {
             return;
         }
 
-        sessionExpiresAt = Date.now() + sessionAutoLockMs;
         const record: SessionRecord = {
             accountId,
             privKey: privateKey,
-            expiresAt: sessionExpiresAt,
+            expiresAt,
             addressKeys: Object.fromEntries(sessionAddressKeys),
         };
-        await setStorageData(STORAGE_KEYS.SESSION, record);
+        await chrome.storage.session.set({ [STORAGE_KEYS.SESSION]: record });
     });
 }
 
 export async function hydrateSession(): Promise<void> {
-    const record = await getStorageData<SessionRecord>(STORAGE_KEYS.SESSION);
-    if (!record || !record.accountId || !record.privKey) return;
-    if (!record.expiresAt || Date.now() > record.expiresAt) {
-        await removeStorageData(STORAGE_KEYS.SESSION);
+    const stored = await chrome.storage.session.get(STORAGE_KEYS.SESSION);
+    const record = stored[STORAGE_KEYS.SESSION] as SessionRecord | undefined;
+    if (!record || !record.accountId || !record.privKey) {
+        clearSessionMemory();
+        return;
+    }
+    if (!record.expiresAt || Date.now() >= record.expiresAt) {
+        clearSessionMemory();
+        await chrome.storage.session.remove(STORAGE_KEYS.SESSION);
         return;
     }
 
@@ -1593,20 +1614,19 @@ export async function hydrateSession(): Promise<void> {
         }
     }
 
-    try {
-        const settings = await getSettings();
-        sessionAutoLockMs = Math.max(1, settings.autoLockMinutes || DEFAULT_SETTINGS.autoLockMinutes) * 60 * 1000;
-    } catch {
-        sessionAutoLockMs = DEFAULT_SETTINGS.autoLockMinutes * 60 * 1000;
-    }
 }
 
 export async function hasActiveSession(accountId?: string): Promise<boolean> {
-    const record = await getStorageData<SessionRecord>(STORAGE_KEYS.SESSION);
-    if (!record || !record.accountId || !record.privKey) return false;
+    const stored = await chrome.storage.session.get(STORAGE_KEYS.SESSION);
+    const record = stored[STORAGE_KEYS.SESSION] as SessionRecord | undefined;
+    if (!record || !record.accountId || !record.privKey) {
+        clearSessionMemory();
+        return false;
+    }
     if (accountId && record.accountId !== accountId) return false;
-    if (!record.expiresAt || Date.now() > record.expiresAt) {
-        await removeStorageData(STORAGE_KEYS.SESSION);
+    if (!record.expiresAt || Date.now() >= record.expiresAt) {
+        clearSessionMemory();
+        await chrome.storage.session.remove(STORAGE_KEYS.SESSION);
         return false;
     }
     return true;

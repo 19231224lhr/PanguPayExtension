@@ -1,1240 +1,473 @@
-/**
- * Background Service Worker
- * 
- * Extension background script:
- * - message transport
- * - session and DApp state
- * - scheduled tasks
- */
-
+import { buildAssignNodeUrl } from '../core/api';
+import { queryAddressGroupInfo } from '../core/address';
 import {
     getActiveAccount,
-    clearSession,
-    getOrganization,
-    saveTransaction,
-    hydrateSession,
-    hasActiveSession,
     getDappConnection,
-    setDappConnection,
+    getOrganization,
+    hasActiveSession,
+    hydrateSession,
     removeDappConnection,
-    saveDappPendingConnection,
-    getDappPendingConnection,
-    getDappPendingConnectionById,
-    clearDappPendingConnection,
-    saveDappSignPendingConnection,
-    getDappSignPendingConnection,
-    getDappSignPendingConnectionById,
-    clearDappSignPendingConnection,
-    saveDappPendingTransaction,
-    getDappPendingTransaction,
-    getDappPendingTransactionById,
-    clearDappPendingTransaction,
-    saveDappTxWatch,
-    consumeDappTxWatches,
-    getDappTxWatches,
+    setDappConnection,
     updateTransactionStatus,
-    getOnboardingStep,
-    type DappPendingTransaction,
-    type DappTransactionRequest,
+    type UserAccount,
 } from '../core/storage';
-import type { PanguMessage, PanguResponse } from '../core/types';
-import { buildAndSubmitTransfer, type TransferMode, type TransferRecipient } from '../core/transfer';
-import { queryAddressGroupInfo } from '../core/address';
-import { buildAssignNodeUrl } from '../core/api';
-import { queryTXStatus, type TXStatusResponse } from '../core/txBuilder';
-import { unlockUTXOsByTxId } from '../core/utxoLock';
 import { getLockedTXCerIdsByTxId, unlockTXCers } from '../core/txCerLockManager';
-import { normalizeDappTxRequest } from '../core/dappTxRequest';
+import { queryTXStatus } from '../core/txBuilder';
+import { buildAndSubmitTransfer, type TransferRecipient } from '../core/transfer';
+import { unlockUTXOsByTxId } from '../core/utxoLock';
+import {
+    clearPendingRequest,
+    getPendingRequest,
+    savePendingRequest,
+    type PendingConnect,
+    type PendingRequest,
+    type PendingTransaction,
+} from '../minimal/approvalStore';
+import { APPROVAL_TIMEOUT_MS, remainingApprovalMs } from '../minimal/approvalPolicy';
+import {
+    isPublicPageMessage,
+    isTrustedUiSender,
+    normalizeQuickTransfer,
+    resolveSenderOrigin,
+    type PublicPageMessage,
+    type QuickTransferRequest,
+} from '../minimal/messages';
+import {
+    getWalletAccount,
+    hasWallet,
+    isWalletUnlocked,
+    lockWallet,
+    protectSessionStorage,
+} from '../minimal/walletStore';
 
-// ========================================
-// 娑堟伅澶勭悊
-// ========================================
+const STATUS_POLL_INTERVAL_MS = 2_000;
+const STATUS_MAX_WAIT_MS = 120_000;
+const SESSION_ALARM = 'pangu-v2-session-expiry';
 
-const CONNECT_TIMEOUT_MS = 120000;
-const DAPP_TX_STATUS_POLL_INTERVAL_MS = 2000;
-const DAPP_TX_STATUS_MAX_WAIT_MS = 60000;
-const DAPP_TX_STATUS_ALARM = 'dappTxStatus';
-let uiPort: chrome.runtime.Port | null = null;
+interface RuntimeResponse {
+    success: boolean;
+    data?: unknown;
+    error?: string;
+}
 
-type PendingConnect = {
+interface UiMessage {
+    type: string;
+    payload?: unknown;
+}
+
+interface PendingResolver {
+    resolve: (response: RuntimeResponse) => void;
+    timeoutId: ReturnType<typeof setTimeout>;
+}
+
+interface PanguAccount {
     accountId: string;
-    origin: string;
-    timeoutId: number;
-    resolve: (response: PanguResponse) => void;
-};
-
-const pendingConnects = new Map<string, PendingConnect>();
-const pendingSignConnects = new Map<string, PendingConnect>();
-const pendingTransactions = new Map<string, PendingConnect>();
-const backgroundDappTxWatchers = new Set<string>();
-
-type SiteInfo = {
-    origin: string;
-    title?: string;
-    icon?: string;
-};
-
-function normalizeOrigin(origin: string): string {
-    return String(origin || '').trim().toLowerCase();
+    address: string;
 }
 
-function resolveSiteInfo(message: PanguMessage, sender: chrome.runtime.MessageSender): SiteInfo {
-    let origin = message.site?.origin || '';
-    if (!origin && sender?.url) {
-        try {
-            origin = new URL(sender.url).origin;
-        } catch {
-            origin = '';
-        }
-    }
-    origin = normalizeOrigin(origin);
+const pendingResolvers = new Map<string, PendingResolver>();
+const processingApprovals = new Set<string>();
 
-    const title = message.site?.title || (origin ? new URL(origin).hostname : '');
-    const icon = message.site?.icon || '';
-
-    return { origin, title, icon };
+function ok(data?: unknown): RuntimeResponse {
+    return { success: true, data };
 }
 
-async function openPopupWindow(): Promise<void> {
+function fail(error: string): RuntimeResponse {
+    return { success: false, error };
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+    return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function accountView(account: UserAccount): PanguAccount {
+    return {
+        accountId: account.accountId,
+        address: account.defaultAddress || account.mainAddress,
+    };
+}
+
+function isAllowedLocalOrigin(origin: string): boolean {
     try {
-        if (chrome.action?.openPopup) {
-            await chrome.action.openPopup();
-            return;
-        }
+        const hostname = new URL(origin).hostname;
+        return hostname === 'localhost' || hostname === '127.0.0.1';
     } catch {
-        // ignore
+        return false;
     }
 }
 
-chrome.runtime.onConnect.addListener((port) => {
-    if (port.name !== 'pangu-ui') return;
-    uiPort = port;
-    port.onDisconnect.addListener(() => {
-        if (uiPort === port) uiPort = null;
-    });
-});
+function senderContext(sender: chrome.runtime.MessageSender): { origin: string; tabId: number } | null {
+    const origin = resolveSenderOrigin(sender.tab?.url) || resolveSenderOrigin(sender.url);
+    const tabId = sender.tab?.id;
+    if (!origin || !isAllowedLocalOrigin(origin) || typeof tabId !== 'number') return null;
+    return { origin, tabId };
+}
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message?.__pangu_ui) return false;
-    if (
-        (message?.type === 'PANGU_CONNECT' ||
-            message?.type === 'PANGU_CONNECT_SIGN' ||
-            message?.type === 'PANGU_SEND_TRANSACTION') &&
-        !uiPort
-    ) {
-        void openPopupWindow();
-    }
-    handleMessage(message, sender)
-        .then(sendResponse)
-        .catch((error) => {
-            sendResponse({ success: false, error: error.message });
+async function notifyTab(tabId: number, origin: string, event: Record<string, unknown>): Promise<void> {
+    try {
+        await chrome.tabs.sendMessage(tabId, {
+            type: 'PANGU_EVENT',
+            origin,
+            ...event,
         });
-    return true; // keep the async message channel open
-});
-
-async function handleMessage(
-    message: PanguMessage,
-    _sender: chrome.runtime.MessageSender
-): Promise<PanguResponse> {
-    await hydrateSession();
-    const requestId = message.requestId || Date.now().toString();
-
-    switch (message.type) {
-        case 'PANGU_CONNECT':
-            return handleConnect(requestId, message, _sender);
-
-        case 'PANGU_CONNECT_SIGN':
-            return handleConnectSign(requestId, message, _sender);
-
-        case 'PANGU_DISCONNECT':
-            return handleDisconnect(requestId, message, _sender);
-
-        case 'PANGU_GET_ACCOUNT':
-            return handleGetAccount(requestId, message, _sender);
-
-        case 'PANGU_SEND_TRANSACTION':
-            return handleSendTransaction(requestId, message, _sender);
-
-        case 'PANGU_DAPP_GET_PENDING':
-            return handleGetPending(requestId);
-
-        case 'PANGU_DAPP_APPROVE':
-            return handleApprove(requestId, message.payload);
-
-        case 'PANGU_DAPP_REJECT':
-            return handleReject(requestId, message.payload);
-
-        case 'PANGU_DAPP_SIGN_GET_PENDING':
-            return handleSignGetPending(requestId);
-
-        case 'PANGU_DAPP_SIGN_APPROVE':
-            return handleSignApprove(requestId, message.payload);
-
-        case 'PANGU_DAPP_SIGN_REJECT':
-            return handleSignReject(requestId, message.payload);
-
-        case 'PANGU_DAPP_TX_GET_PENDING':
-            return handleTxGetPending(requestId);
-
-        case 'PANGU_DAPP_TX_APPROVE':
-            return handleTxApprove(requestId, message.payload);
-
-        case 'PANGU_DAPP_TX_REJECT':
-            return handleTxReject(requestId, message.payload);
-
-        case 'PANGU_DAPP_NOTIFY':
-            return handleNotify(requestId, message.payload);
-
-        default:
-            return {
-                type: 'PANGU_RESPONSE',
-                requestId,
-                success: false,
-                error: '未知的消息类型',
-            };
+    } catch {
+        // The requesting tab may have closed or navigated after submission.
     }
+}
+
+async function openApprovalPopup(): Promise<void> {
+    try {
+        await chrome.action.openPopup();
+    } catch {
+        // Chrome may require the user to open the action manually in some contexts.
+    }
+}
+
+async function expirePending(requestId: string): Promise<void> {
+    const resolver = pendingResolvers.get(requestId);
+    pendingResolvers.delete(requestId);
+    processingApprovals.delete(requestId);
+    await clearPendingRequest(requestId);
+    resolver?.resolve(fail('Approval request timed out'));
+}
+
+async function waitForApproval(request: PendingRequest): Promise<RuntimeResponse> {
+    const existing = await getPendingRequest();
+    if (existing) return fail('Another approval request is already pending');
+    await savePendingRequest(request);
+
+    return new Promise((resolve) => {
+        const timeoutId = setTimeout(() => {
+            void expirePending(request.requestId);
+        }, APPROVAL_TIMEOUT_MS);
+        pendingResolvers.set(request.requestId, { resolve, timeoutId });
+        void openApprovalPopup();
+    });
+}
+
+function stopApprovalTimer(requestId: string): void {
+    const resolver = pendingResolvers.get(requestId);
+    if (resolver) clearTimeout(resolver.timeoutId);
+}
+
+async function finishPending(requestId: string, response: RuntimeResponse): Promise<void> {
+    const resolver = pendingResolvers.get(requestId);
+    if (resolver) clearTimeout(resolver.timeoutId);
+    pendingResolvers.delete(requestId);
+    processingApprovals.delete(requestId);
+    await clearPendingRequest(requestId);
+    resolver?.resolve(response);
+}
+
+async function requireActiveAccount(): Promise<UserAccount> {
+    await hydrateSession();
+    const account = await getActiveAccount();
+    if (!account) throw new Error('Import a wallet first');
+    return account;
 }
 
 async function handleConnect(
-    requestId: string,
-    message: PanguMessage,
-    sender: chrome.runtime.MessageSender
-): Promise<PanguResponse> {
-    const account = await getActiveAccount();
-
-    if (!account) {
-        // Open popup and let the user log in.
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '请先登录钱包',
-        };
-    }
-
-    const step = await getOnboardingStep(account.accountId);
-    if (step !== 'complete') {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '请先完成钱包初始化',
-        };
-    }
-
-    const site = resolveSiteInfo(message, sender);
-    if (!site.origin) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '无法识别来源站点',
-        };
-    }
-
-    const existing = await getDappConnection(account.accountId, site.origin);
-    if (existing?.address) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: true,
-            data: {
-                address: existing.address,
-                accountId: account.accountId,
-                origin: site.origin,
-            },
-        };
-    }
-
-    await saveDappPendingConnection({
-        requestId,
-        accountId: account.accountId,
-        origin: site.origin,
-        createdAt: Date.now(),
-        title: site.title,
-        icon: site.icon,
-    });
-
-    try {
-        if (uiPort) {
-            uiPort.postMessage({ type: 'PANGU_UI_PENDING', accountId: account.accountId });
-        } else {
-            void chrome.runtime
-                .sendMessage({
-                    __pangu_ui: true,
-                    type: 'PANGU_UI_PENDING',
-                    accountId: account.accountId,
-                })
-                .catch(() => {});
-        }
-    } catch {
-        // ignore
-    }
-
-    return new Promise((resolve) => {
-        const timeoutId = setTimeout(async () => {
-            pendingConnects.delete(requestId);
-            await clearDappPendingConnection(account.accountId, requestId);
-            resolve({
-                type: 'PANGU_RESPONSE',
-                requestId,
-                success: false,
-                error: '用户未响应连接请求',
-            });
-        }, CONNECT_TIMEOUT_MS);
-
-        pendingConnects.set(requestId, {
-            accountId: account.accountId,
-            origin: site.origin,
-            timeoutId: timeoutId as unknown as number,
-            resolve,
-        });
-    });
-}
-
-function buildDefaultSignMessage(origin: string, nonce: string): string {
-    const issuedAt = new Date().toISOString();
-    return [
-        'PanguPay Sign-In',
-        `Origin: ${origin}`,
-        `Nonce: ${nonce}`,
-        `Issued At: ${issuedAt}`,
-    ].join('\n');
-}
-
-async function handleConnectSign(
-    requestId: string,
-    message: PanguMessage,
-    sender: chrome.runtime.MessageSender
-): Promise<PanguResponse> {
-    const account = await getActiveAccount();
-    if (!account) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '请先登录钱包',
-        };
-    }
-
-    const step = await getOnboardingStep(account.accountId);
-    if (step !== 'complete') {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '请先完成钱包初始化',
-        };
-    }
-
-    const site = resolveSiteInfo(message, sender);
-    if (!site.origin) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '无法识别来源站点',
-        };
-    }
-
-    const payload = message.payload as { message?: string; nonce?: string } | null;
-    const nonce = payload?.nonce || Math.random().toString(36).slice(2);
-    const signMessage = payload?.message || buildDefaultSignMessage(site.origin, nonce);
-
-    await saveDappSignPendingConnection({
-        requestId,
-        accountId: account.accountId,
-        origin: site.origin,
-        createdAt: Date.now(),
-        title: site.title,
-        icon: site.icon,
-        message: signMessage,
-    });
-
-    try {
-        if (uiPort) {
-            uiPort.postMessage({ type: 'PANGU_UI_SIGN_PENDING', accountId: account.accountId });
-        } else {
-            void chrome.runtime
-                .sendMessage({
-                    __pangu_ui: true,
-                    type: 'PANGU_UI_SIGN_PENDING',
-                    accountId: account.accountId,
-                })
-                .catch(() => {});
-        }
-    } catch {
-        // ignore
-    }
-
-    return new Promise((resolve) => {
-        const timeoutId = setTimeout(async () => {
-            pendingSignConnects.delete(requestId);
-            await clearDappSignPendingConnection(account.accountId, requestId);
-            resolve({
-                type: 'PANGU_RESPONSE',
-                requestId,
-                success: false,
-                error: '用户未响应签名请求',
-            });
-        }, CONNECT_TIMEOUT_MS);
-
-        pendingSignConnects.set(requestId, {
-            accountId: account.accountId,
-            origin: site.origin,
-            timeoutId: timeoutId as unknown as number,
-            resolve,
-        });
-    });
-}
-
-async function handleDisconnect(
-    requestId: string,
-    message: PanguMessage,
-    sender: chrome.runtime.MessageSender
-): Promise<PanguResponse> {
-    const account = await getActiveAccount();
-    const site = resolveSiteInfo(message, sender);
-
-    if (account && site.origin) {
-        await removeDappConnection(account.accountId, site.origin);
-        await broadcastDappEvent(site.origin, {
-            event: 'disconnect',
-            origin: site.origin,
-        });
-    }
-    return {
-        type: 'PANGU_RESPONSE',
-        requestId,
-        success: true,
-    };
-}
-
-async function handleGetAccount(
-    requestId: string,
-    message: PanguMessage,
-    sender: chrome.runtime.MessageSender
-): Promise<PanguResponse> {
-    const account = await getActiveAccount();
-
-    if (!account || !(await hasActiveSession(account.accountId))) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '未登录或未解锁',
-        };
-    }
-
-    const site = resolveSiteInfo(message, sender);
-    if (!site.origin) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '无法识别来源站点',
-        };
-    }
-
-    const connection = await getDappConnection(account.accountId, site.origin);
-    if (!connection?.address) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '站点未授权，请先连接钱包',
-        };
-    }
-
-    const org = await getOrganization(account.accountId);
-
-    return {
-        type: 'PANGU_RESPONSE',
-        requestId,
-        success: true,
-        data: {
-            address: connection.address,
-            accountId: account.accountId,
-            balance: account.totalBalance,
-            organization: org?.groupName || null,
-            origin: site.origin,
-        },
-    };
-}
-
-async function handleGetPending(requestId: string): Promise<PanguResponse> {
-    const account = await getActiveAccount();
-    if (!account) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '未登录钱包',
-        };
-    }
-    const pending = await getDappPendingConnection(account.accountId);
-    return {
-        type: 'PANGU_RESPONSE',
-        requestId,
-        success: true,
-        data: pending,
-    };
-}
-
-async function handleSignGetPending(requestId: string): Promise<PanguResponse> {
-    const account = await getActiveAccount();
-    if (!account) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '未登录钱包',
-        };
-    }
-    const pending = await getDappSignPendingConnection(account.accountId);
-    return {
-        type: 'PANGU_RESPONSE',
-        requestId,
-        success: true,
-        data: pending,
-    };
-}
-
-async function handleApprove(requestId: string, payload: unknown): Promise<PanguResponse> {
-    const account = await getActiveAccount();
-    if (!account) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '未登录钱包',
-        };
-    }
-
-    const data = payload as { requestId?: string; address?: string; origin?: string } | null;
-    if (!data?.requestId) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '连接请求已失效',
-        };
-    }
-    const pending = await getDappPendingConnectionById(account.accountId, data.requestId);
-    if (!pending) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '连接请求已失效',
-        };
-    }
-
-    const normalizedAddress = String(data.address || '').trim().toLowerCase();
-    const addressInfo =
-        account.addresses?.[normalizedAddress] ||
-        (account.mainAddress && account.mainAddress.toLowerCase() === normalizedAddress
-            ? account.addresses?.[account.mainAddress] || null
-            : null);
-
-    if (!normalizedAddress || !addressInfo) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '请选择有效的钱包地址',
-        };
-    }
-
-    await setDappConnection(account.accountId, pending.origin, {
-        address: normalizedAddress,
-        title: pending.title,
-        icon: pending.icon,
-    });
-    await clearDappPendingConnection(account.accountId, pending.requestId);
-
-    const pendingResolver = pendingConnects.get(pending.requestId);
-    if (pendingResolver) {
-        clearTimeout(pendingResolver.timeoutId);
-        pendingConnects.delete(pending.requestId);
-        pendingResolver.resolve({
-            type: 'PANGU_RESPONSE',
-            requestId: pending.requestId,
-            success: true,
-            data: {
-                address: normalizedAddress,
-                accountId: account.accountId,
-                origin: pending.origin,
-            },
-        });
-    }
-
-    return {
-        type: 'PANGU_RESPONSE',
-        requestId,
-        success: true,
-        data: {
-            address: normalizedAddress,
-            origin: pending.origin,
-        },
-    };
-}
-
-async function handleReject(requestId: string, payload: unknown): Promise<PanguResponse> {
-    const account = await getActiveAccount();
-    if (!account) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '未登录钱包',
-        };
-    }
-
-    const data = payload as { requestId?: string } | null;
-    if (!data?.requestId) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '连接请求已失效',
-        };
-    }
-    const pending = await getDappPendingConnectionById(account.accountId, data.requestId);
-    if (!pending) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '连接请求已失效',
-        };
-    }
-
-    await clearDappPendingConnection(account.accountId, pending.requestId);
-
-    const pendingResolver = pendingConnects.get(pending.requestId);
-    if (pendingResolver) {
-        clearTimeout(pendingResolver.timeoutId);
-        pendingConnects.delete(pending.requestId);
-        pendingResolver.resolve({
-            type: 'PANGU_RESPONSE',
-            requestId: pending.requestId,
-            success: false,
-            error: '用户拒绝连接',
-        });
-    }
-
-    return {
-        type: 'PANGU_RESPONSE',
-        requestId,
-        success: true,
-    };
-}
-
-async function handleSignApprove(requestId: string, payload: unknown): Promise<PanguResponse> {
-    const account = await getActiveAccount();
-    if (!account) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '未登录钱包',
-        };
-    }
-
-    const data = payload as {
-        requestId?: string;
-        address?: string;
-        signature?: { R: string; S: string };
-        publicKey?: { x: string; y: string };
-    } | null;
-    if (!data?.requestId) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '签名请求已失效',
-        };
-    }
-    const pending = await getDappSignPendingConnectionById(account.accountId, data.requestId);
-    if (!pending) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '签名请求已失效',
-        };
-    }
-
-    const normalizedAddress = String(data.address || '').trim().toLowerCase();
-    if (!normalizedAddress) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '请选择有效的钱包地址',
-        };
-    }
-
-    await setDappConnection(account.accountId, pending.origin, {
-        address: normalizedAddress,
-        title: pending.title,
-        icon: pending.icon,
-    });
-    await clearDappSignPendingConnection(account.accountId, pending.requestId);
-
-    const pendingResolver = pendingSignConnects.get(pending.requestId);
-    if (pendingResolver) {
-        clearTimeout(pendingResolver.timeoutId);
-        pendingSignConnects.delete(pending.requestId);
-        pendingResolver.resolve({
-            type: 'PANGU_RESPONSE',
-            requestId: pending.requestId,
-            success: true,
-            data: {
-                address: normalizedAddress,
-                accountId: account.accountId,
-                origin: pending.origin,
-                message: pending.message,
-                signature: data.signature,
-                publicKey: data.publicKey,
-            },
-        });
-    }
-
-    return {
-        type: 'PANGU_RESPONSE',
-        requestId,
-        success: true,
-        data: {
-            address: normalizedAddress,
-            origin: pending.origin,
-        },
-    };
-}
-
-async function handleSignReject(requestId: string, payload: unknown): Promise<PanguResponse> {
-    const account = await getActiveAccount();
-    if (!account) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '未登录钱包',
-        };
-    }
-
-    const data = payload as { requestId?: string } | null;
-    if (!data?.requestId) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '签名请求已失效',
-        };
-    }
-    const pending = await getDappSignPendingConnectionById(account.accountId, data.requestId);
-    if (!pending) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '签名请求已失效',
-        };
-    }
-
-    await clearDappSignPendingConnection(account.accountId, pending.requestId);
-
-    const pendingResolver = pendingSignConnects.get(pending.requestId);
-    if (pendingResolver) {
-        clearTimeout(pendingResolver.timeoutId);
-        pendingSignConnects.delete(pending.requestId);
-        pendingResolver.resolve({
-            type: 'PANGU_RESPONSE',
-            requestId: pending.requestId,
-            success: false,
-            error: '用户拒绝签名',
-        });
-    }
-
-    return {
-        type: 'PANGU_RESPONSE',
-        requestId,
-        success: true,
-    };
-}
-
-async function handleTxGetPending(requestId: string): Promise<PanguResponse> {
-    const account = await getActiveAccount();
-    if (!account) {
-        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Wallet is not logged in' };
-    }
-    const pending = await getDappPendingTransaction(account.accountId);
-    return { type: 'PANGU_RESPONSE', requestId, success: true, data: pending };
-}
-
-async function enrichDappRecipients(request: DappTransactionRequest): Promise<TransferRecipient[]> {
-    const recipients = request.recipients || [];
-    const useRequestWideMeta = recipients.length === 1;
-    const out: TransferRecipient[] = [];
-    for (const recipient of recipients) {
-        const query = await queryAddressGroupInfo(recipient.to);
-        const meta = query.success ? query.data : undefined;
-        const publicKey =
-            recipient.publicKey ||
-            (useRequestWideMeta ? request.publicKey : '') ||
-            (meta?.publicKey ? `${meta.publicKey.x},${meta.publicKey.y}` : '');
-        out.push({
-            address: recipient.to,
-            amount: recipient.amount ?? '0',
-            coinType: Number(recipient.coinType ?? request.coinType ?? meta?.type ?? 0),
-            publicKey,
-            orgId: recipient.orgId || (useRequestWideMeta ? request.orgId : '') || meta?.groupId || '',
-            transferGas: recipient.transferGas ?? (useRequestWideMeta ? request.transferGas : undefined),
-            seedAnchor: recipient.seedAnchor ?? (useRequestWideMeta ? request.seedAnchor : undefined) ?? meta?.seedAnchor,
-            seedChainStep:
-                recipient.seedChainStep ?? (useRequestWideMeta ? request.seedChainStep : undefined) ?? meta?.seedChainStep,
-            defaultSpendAlgorithm:
-                recipient.defaultSpendAlgorithm ??
-                (useRequestWideMeta ? request.defaultSpendAlgorithm : undefined) ??
-                meta?.defaultSpendAlgorithm,
-        });
-    }
-    return out;
-}
-
-async function failPendingDappTransaction(
-    accountId: string,
-    pending: DappPendingTransaction,
-    error: string
-): Promise<void> {
-    await clearDappPendingTransaction(accountId, pending.requestId);
-    const pendingResolver = pendingTransactions.get(pending.requestId);
-    if (pendingResolver) {
-        clearTimeout(pendingResolver.timeoutId);
-        pendingTransactions.delete(pending.requestId);
-        pendingResolver.resolve({
-            type: 'PANGU_RESPONSE',
-            requestId: pending.requestId,
-            success: false,
-            error,
-        });
-    }
-    await broadcastDappEvent(pending.origin, {
-        event: 'txStatus',
-        origin: pending.origin,
-        status: 'failed',
-        mode: pending.request.mode || 'normal',
-        error,
-    });
-}
-
-async function handleTxApprove(requestId: string, payload: unknown): Promise<PanguResponse> {
-    const account = await getActiveAccount();
-    if (!account) {
-        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Wallet is not logged in' };
-    }
-
-    const data = payload as { requestId?: string } | null;
-    if (!data?.requestId) {
-        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Transaction request expired' };
-    }
-
-    const pending = await getDappPendingTransactionById(account.accountId, data.requestId);
-    if (!pending) {
-        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Transaction request expired' };
-    }
-
-    const connection = await getDappConnection(account.accountId, pending.origin);
-    if (!connection?.address) {
-        const error = 'Site is not connected';
-        await failPendingDappTransaction(account.accountId, pending, error);
-        return { type: 'PANGU_RESPONSE', requestId, success: false, error };
-    }
-
-    const mode = (pending.request.mode || 'normal') as TransferMode;
-    let recipients: TransferRecipient[] = [];
-    try {
-        recipients = await enrichDappRecipients(pending.request);
-    } catch (error) {
-        const message = error instanceof Error ? error.message : 'Transaction recipient lookup failed';
-        await failPendingDappTransaction(account.accountId, pending, message);
-        return { type: 'PANGU_RESPONSE', requestId, success: false, error: message };
-    }
-    const coinTypes = new Set(recipients.map((item) => Number(item.coinType || 0)));
-    const changeAddresses: Record<number, string> = {};
-    for (const coinType of coinTypes) {
-        changeAddresses[coinType] = connection.address;
-    }
-
-    let submitResult: Awaited<ReturnType<typeof buildAndSubmitTransfer>>;
-    try {
-        submitResult = await buildAndSubmitTransfer({
-            account,
-            fromAddresses: [connection.address],
-            toAddress: recipients[0]?.address || '',
-            amount: recipients[0]?.amount || 0,
-            coinType: recipients[0]?.coinType || 0,
-            transferMode: mode,
-            recipients,
-            gas: pending.request.gas ?? '0',
-            extraGas: pending.request.extraGas ?? '0',
-            changeAddresses,
-        });
-    } catch (error) {
-        const message = error instanceof Error ? error.message : 'Transaction submit failed';
-        await failPendingDappTransaction(account.accountId, pending, message);
-        return { type: 'PANGU_RESPONSE', requestId, success: false, error: message };
-    }
-
-    if (!submitResult.success) {
-        const error = submitResult.error || 'Transaction submit failed';
-        await failPendingDappTransaction(account.accountId, pending, error);
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error,
-        };
-    }
-
-    await clearDappPendingTransaction(account.accountId, pending.requestId);
-    const responseData = { txId: submitResult.txId, mode, status: 'submitted' };
-    const org = await getOrganization(account.accountId);
-    if (submitResult.txId) {
-        await saveDappTxWatch({
-            accountId: account.accountId,
-            txId: submitResult.txId,
-            origin: pending.origin,
-            mode,
-            createdAt: Date.now(),
-            requestId: pending.requestId,
-        });
-        if (org?.groupId) {
-            scheduleBackgroundDappTxStatusWatch(account.accountId, submitResult.txId);
-        }
-    }
-
-    const pendingResolver = pendingTransactions.get(pending.requestId);
-    if (pendingResolver) {
-        clearTimeout(pendingResolver.timeoutId);
-        pendingTransactions.delete(pending.requestId);
-        pendingResolver.resolve({
-            type: 'PANGU_RESPONSE',
-            requestId: pending.requestId,
-            success: true,
-            data: responseData,
-        });
-    }
-
-    await broadcastDappEvent(pending.origin, {
-        event: 'txStatus',
-        origin: pending.origin,
-        txId: submitResult.txId,
-        status: 'submitted',
-        mode,
-    });
-
-    return { type: 'PANGU_RESPONSE', requestId, success: true, data: responseData };
-}
-
-async function handleTxReject(requestId: string, payload: unknown): Promise<PanguResponse> {
-    const account = await getActiveAccount();
-    if (!account) {
-        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Wallet is not logged in' };
-    }
-
-    const data = payload as { requestId?: string } | null;
-    if (!data?.requestId) {
-        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Transaction request expired' };
-    }
-    const pending = await getDappPendingTransactionById(account.accountId, data.requestId);
-    if (!pending) {
-        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Transaction request expired' };
-    }
-
-    await clearDappPendingTransaction(account.accountId, pending.requestId);
-    const pendingResolver = pendingTransactions.get(pending.requestId);
-    if (pendingResolver) {
-        clearTimeout(pendingResolver.timeoutId);
-        pendingTransactions.delete(pending.requestId);
-        pendingResolver.resolve({
-            type: 'PANGU_RESPONSE',
-            requestId: pending.requestId,
-            success: false,
-            error: 'User rejected transaction',
-        });
-    }
-
-    return { type: 'PANGU_RESPONSE', requestId, success: true };
-}
-
-async function handleNotify(requestId: string, payload: unknown): Promise<PanguResponse> {
-    const data = payload as {
-        origin?: string;
-        event?: string;
-        address?: string;
-        txId?: string;
-        status?: string;
-        mode?: string;
-        error?: string;
-    } | null;
-    const origin = normalizeOrigin(data?.origin || '');
-    if (!origin || !data?.event) {
-        return {
-            type: 'PANGU_RESPONSE',
-            requestId,
-            success: false,
-            error: '缂哄皯绔欑偣淇℃伅',
-        };
-    }
-    await broadcastDappEvent(origin, {
-        event: data.event,
-        origin,
-        address: data.address || '',
-        txId: data.txId || '',
-        status: data.status || '',
-        mode: data.mode || '',
-        error: data.error || '',
-    });
-    return {
-        type: 'PANGU_RESPONSE',
-        requestId,
-        success: true,
-    };
-}
-
-async function broadcastDappEvent(
+    message: PublicPageMessage,
     origin: string,
-    payload: { event: string; origin: string; address?: string; txId?: string; status?: string; mode?: string; error?: string }
-): Promise<void> {
-    if (!origin) return;
-    const normalized = normalizeOrigin(origin);
-    try {
-        const tabs = await chrome.tabs.query({});
-        for (const tab of tabs) {
-            if (!tab.id) continue;
-            try {
-                await chrome.tabs.sendMessage(tab.id, {
-                    type: 'PANGU_EVENT',
-                    ...payload,
-                    origin: normalized,
-                });
-            } catch {
-                // ignore
-            }
-        }
-    } catch {
-        // ignore
-    }
-}
+    tabId: number
+): Promise<RuntimeResponse> {
+    const account = await getWalletAccount();
+    if (!account) return fail('Import a wallet first');
 
-function buildDappTxWatchKey(accountId: string, txId: string): string {
-    return `${accountId}:${String(txId || '').trim().toLowerCase()}`;
-}
+    await hydrateSession();
+    const connected = await getDappConnection(account.accountId, origin);
+    if (connected && await hasActiveSession(account.accountId)) return ok(accountView(account));
 
-async function notifyDappTxWatchesInBackground(
-    accountId: string,
-    txId: string,
-    status: 'success' | 'failed',
-    options: { error?: string } = {}
-): Promise<void> {
-    const watches = await consumeDappTxWatches(accountId, txId);
-    for (const watch of watches) {
-        await broadcastDappEvent(watch.origin, {
-            event: 'txStatus',
-            origin: watch.origin,
-            txId,
-            status,
-            mode: watch.mode || 'normal',
-            error: options.error || '',
-        });
-    }
-}
-
-async function unlockFailedTransactionInputs(txId: string): Promise<void> {
-    try {
-        await unlockUTXOsByTxId(txId);
-    } catch (error) {
-        console.warn('[PanguPay] Failed to unlock UTXOs after DApp tx failure:', error);
-    }
-    try {
-        const lockedTxCers = getLockedTXCerIdsByTxId(txId);
-        if (lockedTxCers.length > 0) {
-            unlockTXCers(lockedTxCers, false);
-        }
-    } catch (error) {
-        console.warn('[PanguPay] Failed to unlock TXCers after DApp tx failure:', error);
-    }
-}
-
-async function handleBackgroundDappTxStatus(
-    accountId: string,
-    txId: string,
-    response: TXStatusResponse
-): Promise<boolean> {
-    if (response.status !== 'success' && response.status !== 'failed') return false;
-
-    const finalStatus = response.status;
-    const error = finalStatus === 'failed' ? response.error_reason || '' : '';
-    await updateTransactionStatus(accountId, txId, finalStatus, {
-        blockNumber: response.block_height || 0,
-        failureReason: error || undefined,
-    });
-    await notifyDappTxWatchesInBackground(accountId, txId, finalStatus, { error });
-    if (finalStatus === 'failed') {
-        await unlockFailedTransactionInputs(txId);
-    }
-    return true;
-}
-
-function scheduleBackgroundDappTxStatusWatch(accountId: string, txId: string): void {
-    if (!accountId || !txId) return;
-    const watchKey = buildDappTxWatchKey(accountId, txId);
-    if (backgroundDappTxWatchers.has(watchKey)) return;
-    backgroundDappTxWatchers.add(watchKey);
-
-    const startedAt = Date.now();
-    const poll = async () => {
-        try {
-            const org = await getOrganization(accountId);
-            if (!org?.groupId) {
-                backgroundDappTxWatchers.delete(watchKey);
-                return;
-            }
-            const endpoint = org.assignAPIEndpoint || org.assignNodeUrl || '';
-            const assignUrl = endpoint ? buildAssignNodeUrl(endpoint) : undefined;
-            const status = await queryTXStatus(txId, org.groupId, assignUrl);
-            if (await handleBackgroundDappTxStatus(accountId, txId, status)) {
-                backgroundDappTxWatchers.delete(watchKey);
-                return;
-            }
-        } catch (error) {
-            console.warn('[PanguPay] DApp tx status poll failed:', error);
-        }
-
-        if (Date.now() - startedAt >= DAPP_TX_STATUS_MAX_WAIT_MS) {
-            backgroundDappTxWatchers.delete(watchKey);
-            return;
-        }
-        setTimeout(poll, DAPP_TX_STATUS_POLL_INTERVAL_MS);
+    const pending: PendingConnect = {
+        kind: 'connect',
+        requestId: message.requestId,
+        accountId: account.accountId,
+        origin,
+        tabId,
+        createdAt: Date.now(),
     };
-
-    void poll();
+    return waitForApproval(pending);
 }
 
-async function pollSavedDappTxWatches(): Promise<void> {
-    const watchesByAccount = await getDappTxWatches();
-    for (const [accountId, watches] of Object.entries(watchesByAccount)) {
-        const org = await getOrganization(accountId);
-        if (!org?.groupId) continue;
-        const endpoint = org.assignAPIEndpoint || org.assignNodeUrl || '';
-        const assignUrl = endpoint ? buildAssignNodeUrl(endpoint) : undefined;
+async function handleGetAccount(origin: string): Promise<RuntimeResponse> {
+    const account = await getWalletAccount();
+    if (!account) return ok(null);
+    await hydrateSession();
+    if (!await hasActiveSession(account.accountId)) return ok(null);
+    const connected = await getDappConnection(account.accountId, origin);
+    return ok(connected ? accountView(account) : null);
+}
 
-        for (const watch of watches) {
-            const watchKey = buildDappTxWatchKey(accountId, watch.txId);
-            if (backgroundDappTxWatchers.has(watchKey)) continue;
-            try {
-                const status = await queryTXStatus(watch.txId, org.groupId, assignUrl);
-                await handleBackgroundDappTxStatus(accountId, watch.txId, status);
-            } catch (error) {
-                console.warn('[PanguPay] Saved DApp tx status poll failed:', error);
-            }
-        }
-    }
+async function handleDisconnect(origin: string, tabId: number): Promise<RuntimeResponse> {
+    const account = await getWalletAccount();
+    if (account) await removeDappConnection(account.accountId, origin);
+    await notifyTab(tabId, origin, { event: 'disconnect' });
+    return ok(true);
 }
 
 async function handleSendTransaction(
-    requestId: string,
-    message: PanguMessage,
-    sender: chrome.runtime.MessageSender
-): Promise<PanguResponse> {
-    const account = await getActiveAccount();
-    if (!account || !(await hasActiveSession(account.accountId))) {
-        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Wallet is locked' };
-    }
+    message: PublicPageMessage,
+    origin: string,
+    tabId: number
+): Promise<RuntimeResponse> {
+    const account = await getWalletAccount();
+    if (!account) return fail('Import a wallet first');
+    const connected = await getDappConnection(account.accountId, origin);
+    if (!connected) return fail('Connect this site before sending a transaction');
 
-    const site = resolveSiteInfo(message, sender);
-    if (!site.origin) {
-        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Cannot resolve site origin' };
-    }
-
-    const connection = await getDappConnection(account.accountId, site.origin);
-    if (!connection?.address) {
-        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Site is not connected' };
-    }
-
-    const request = normalizeDappTxRequest(message.payload);
-    if (!request.recipients || request.recipients.length === 0) {
-        return { type: 'PANGU_RESPONSE', requestId, success: false, error: 'Transaction recipient is missing' };
-    }
-
-    await saveDappPendingTransaction({
-        requestId,
-        accountId: account.accountId,
-        origin: site.origin,
-        createdAt: Date.now(),
-        title: site.title,
-        icon: site.icon,
-        request,
-    });
-
+    let request: QuickTransferRequest;
     try {
-        if (uiPort) {
-            uiPort.postMessage({ type: 'PANGU_UI_TX_PENDING', accountId: account.accountId });
-        } else {
-            void chrome.runtime
-                .sendMessage({ __pangu_ui: true, type: 'PANGU_UI_TX_PENDING', accountId: account.accountId })
-                .catch(() => {});
-        }
-    } catch {
-        // ignore
+        request = normalizeQuickTransfer(message.payload);
+    } catch (error) {
+        return fail(errorMessage(error, 'Invalid quick transfer request'));
     }
 
-    return new Promise((resolve) => {
-        const timeoutId = setTimeout(async () => {
-            pendingTransactions.delete(requestId);
-            await clearDappPendingTransaction(account.accountId, requestId);
-            resolve({ type: 'PANGU_RESPONSE', requestId, success: false, error: 'User did not confirm transaction' });
-        }, CONNECT_TIMEOUT_MS);
+    const pending: PendingTransaction = {
+        kind: 'transaction',
+        requestId: message.requestId,
+        accountId: account.accountId,
+        origin,
+        tabId,
+        createdAt: Date.now(),
+        request,
+    };
+    return waitForApproval(pending);
+}
 
-        pendingTransactions.set(requestId, {
-            accountId: account.accountId,
-            origin: site.origin,
-            timeoutId: timeoutId as unknown as number,
-            resolve,
-        });
+async function handlePublicMessage(
+    message: PublicPageMessage,
+    sender: chrome.runtime.MessageSender
+): Promise<RuntimeResponse> {
+    const context = senderContext(sender);
+    if (!context) return fail('PanguPay is available only to local test sites');
+
+    switch (message.type) {
+        case 'PANGU_CONNECT':
+            return handleConnect(message, context.origin, context.tabId);
+        case 'PANGU_GET_ACCOUNT':
+            return handleGetAccount(context.origin);
+        case 'PANGU_SEND_TRANSACTION':
+            return handleSendTransaction(message, context.origin, context.tabId);
+        case 'PANGU_DISCONNECT':
+            return handleDisconnect(context.origin, context.tabId);
+    }
+}
+
+async function currentUiState(): Promise<RuntimeResponse> {
+    await hydrateSession();
+    const account = await getWalletAccount();
+    const pending = await getPendingRequest();
+    return ok({
+        hasWallet: await hasWallet(),
+        unlocked: account ? await hasActiveSession(account.accountId) : false,
+        account: account ? accountView(account) : null,
+        pending,
     });
 }
-// ========================================
-// 鑷姩閿佸畾
-// ========================================
 
-chrome.alarms.create('autoLock', { periodInMinutes: 1 });
-chrome.alarms.create(DAPP_TX_STATUS_ALARM, { periodInMinutes: 1 });
+function requestedPendingId(message: UiMessage): string {
+    if (!message.payload || typeof message.payload !== 'object') return '';
+    return String((message.payload as Record<string, unknown>).requestId || '');
+}
+
+async function loadMatchingPending(message: UiMessage): Promise<PendingRequest> {
+    const requestId = requestedPendingId(message);
+    const pending = await getPendingRequest();
+    if (!requestId || !pending || pending.requestId !== requestId) {
+        throw new Error('Approval request expired');
+    }
+    return pending;
+}
+
+async function approveConnect(pending: PendingConnect): Promise<RuntimeResponse> {
+    const account = await requireActiveAccount();
+    if (account.accountId !== pending.accountId) throw new Error('The active wallet changed');
+    if (!await hasActiveSession(account.accountId)) throw new Error('Unlock the wallet before approving');
+
+    stopApprovalTimer(pending.requestId);
+    await setDappConnection(account.accountId, pending.origin, {
+        address: account.defaultAddress || account.mainAddress,
+    });
+    const result = accountView(account);
+    await finishPending(pending.requestId, ok(result));
+    await notifyTab(pending.tabId, pending.origin, { event: 'accountChanged', account: result });
+    return ok(result);
+}
+
+async function recipientMetadata(request: QuickTransferRequest): Promise<TransferRecipient> {
+    const response = await queryAddressGroupInfo(request.toAddress);
+    if (!response.success || !response.data) {
+        throw new Error(response.error || 'Unable to query recipient metadata');
+    }
+    const publicKey = response.data.publicKey
+        ? `${response.data.publicKey.x},${response.data.publicKey.y}`
+        : '';
+    if (!publicKey) throw new Error('Recipient public key is unavailable');
+    return {
+        address: request.toAddress,
+        amount: request.amount,
+        coinType: 0,
+        publicKey,
+        orgId: response.data.groupId,
+        transferGas: '0',
+        seedAnchor: response.data.seedAnchor,
+        seedChainStep: response.data.seedChainStep,
+        defaultSpendAlgorithm: response.data.defaultSpendAlgorithm,
+    };
+}
+
+async function unlockFailedInputs(txId: string): Promise<void> {
+    await unlockUTXOsByTxId(txId);
+    const txCerIds = getLockedTXCerIdsByTxId(txId);
+    if (txCerIds.length) unlockTXCers(txCerIds);
+}
+
+async function watchTransaction(pending: PendingTransaction, txId: string): Promise<void> {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < STATUS_MAX_WAIT_MS) {
+        await new Promise((resolve) => setTimeout(resolve, STATUS_POLL_INTERVAL_MS));
+        try {
+            const organization = await getOrganization(pending.accountId);
+            if (!organization?.groupId) throw new Error('Wallet organization is unavailable');
+            const endpoint = organization.assignAPIEndpoint || organization.assignNodeUrl;
+            const status = await queryTXStatus(
+                txId,
+                organization.groupId,
+                endpoint ? buildAssignNodeUrl(endpoint) : undefined
+            );
+            if (status.status !== 'success' && status.status !== 'failed') continue;
+
+            const error = status.status === 'failed' ? status.error_reason || 'Transaction failed' : '';
+            await updateTransactionStatus(pending.accountId, txId, status.status, {
+                blockNumber: status.block_height || 0,
+                failureReason: error || undefined,
+            });
+            if (status.status === 'failed') await unlockFailedInputs(txId);
+            await notifyTab(pending.tabId, pending.origin, {
+                event: 'txStatus',
+                txId,
+                mode: 'quick',
+                status: status.status,
+                ...(error ? { error } : {}),
+            });
+            return;
+        } catch (error) {
+            console.warn('[PanguPay] Final transaction status check failed:', error);
+        }
+    }
+}
+
+async function approveTransaction(pending: PendingTransaction): Promise<RuntimeResponse> {
+    const account = await requireActiveAccount();
+    if (account.accountId !== pending.accountId) throw new Error('The active wallet changed');
+    if (!await hasActiveSession(account.accountId)) throw new Error('Unlock the wallet before approving');
+    const connection = await getDappConnection(account.accountId, pending.origin);
+    if (!connection?.address) throw new Error('The requesting site is no longer connected');
+
+    stopApprovalTimer(pending.requestId);
+    const recipient = await recipientMetadata(pending.request);
+    const submit = await buildAndSubmitTransfer({
+        account,
+        fromAddresses: [connection.address],
+        toAddress: recipient.address,
+        amount: recipient.amount,
+        coinType: 0,
+        transferMode: 'quick',
+        recipients: [recipient],
+        gas: '0',
+        extraGas: '0',
+        changeAddresses: { 0: connection.address },
+    });
+    if (!submit.success || !submit.txId) throw new Error(submit.error || 'Transaction submission failed');
+
+    const result = { txId: submit.txId, mode: 'quick', status: 'submitted' } as const;
+    await finishPending(pending.requestId, ok(result));
+    await notifyTab(pending.tabId, pending.origin, {
+        event: 'txStatus',
+        ...result,
+    });
+    void watchTransaction(pending, submit.txId);
+    return ok(result);
+}
+
+async function approvePending(message: UiMessage): Promise<RuntimeResponse> {
+    const pending = await loadMatchingPending(message);
+    if (processingApprovals.has(pending.requestId)) return fail('Approval is already being processed');
+    processingApprovals.add(pending.requestId);
+    try {
+        return pending.kind === 'connect' ? await approveConnect(pending) : await approveTransaction(pending);
+    } catch (error) {
+        processingApprovals.delete(pending.requestId);
+        const messageText = errorMessage(error, 'Approval failed');
+        if (!messageText.toLowerCase().includes('unlock')) {
+            await finishPending(pending.requestId, fail(messageText));
+        }
+        return fail(messageText);
+    }
+}
+
+async function rejectPending(message: UiMessage): Promise<RuntimeResponse> {
+    const pending = await loadMatchingPending(message);
+    await finishPending(pending.requestId, fail('User rejected the request'));
+    return ok(true);
+}
+
+async function handleUiMessage(message: UiMessage): Promise<RuntimeResponse> {
+    switch (message.type) {
+        case 'PANGU_UI_GET_STATE':
+            return currentUiState();
+        case 'PANGU_UI_APPROVE':
+            return approvePending(message);
+        case 'PANGU_UI_REJECT':
+            return rejectPending(message);
+        case 'PANGU_UI_LOCK':
+            await lockWallet();
+            return currentUiState();
+        default:
+            return fail('Unsupported extension UI message');
+    }
+}
+
+chrome.runtime.onMessage.addListener((
+    message: unknown,
+    sender: chrome.runtime.MessageSender,
+    sendResponse: (response: RuntimeResponse) => void
+) => {
+    let task: Promise<RuntimeResponse> | null = null;
+    const extensionBase = chrome.runtime.getURL('');
+    if (isTrustedUiSender(sender, extensionBase) && message && typeof message === 'object') {
+        task = handleUiMessage(message as UiMessage);
+    } else if (isPublicPageMessage(message)) {
+        task = handlePublicMessage(message, sender);
+    }
+    if (!task) return false;
+
+    void task.then(sendResponse).catch((error: unknown) => {
+        sendResponse(fail(errorMessage(error, 'PanguPay request failed')));
+    });
+    return true;
+});
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === 'autoLock') {
-        // 妫€鏌ユ槸鍚﹂渶瑕佽嚜鍔ㄩ攣瀹?
-        // 鍙互鏍规嵁璁剧疆鐨勮嚜鍔ㄩ攣瀹氭椂闂存潵鍐冲畾
-    }
-    if (alarm.name === DAPP_TX_STATUS_ALARM) {
-        void pollSavedDappTxWatches();
-    }
+    if (alarm.name !== SESSION_ALARM) return;
+    void (async () => {
+        const account = await getActiveAccount();
+        if (account) await hasActiveSession(account.accountId);
+    })();
 });
 
-// ========================================
-// Install/update events
-// ========================================
-
-chrome.runtime.onInstalled.addListener((details) => {
-    if (details.reason === 'install') {
-        console.log('[PanguPay] 扩展已安装');
-    } else if (details.reason === 'update') {
-        console.log('[PanguPay] 扩展已更新到版本', chrome.runtime.getManifest().version);
+async function initialize(): Promise<void> {
+    await protectSessionStorage();
+    await hydrateSession();
+    chrome.alarms.create(SESSION_ALARM, { periodInMinutes: 1 });
+    const pending = await getPendingRequest();
+    if (pending) {
+        const remaining = remainingApprovalMs(pending.createdAt);
+        if (remaining <= 0) await clearPendingRequest(pending.requestId);
+        else setTimeout(() => void expirePending(pending.requestId), remaining);
     }
+}
+
+void initialize().catch((error) => {
+    console.error('[PanguPay] Background initialization failed:', error);
 });
-
-// 瀵煎嚭绌哄璞′娇鍏舵垚涓烘ā鍧?
-export { };
-

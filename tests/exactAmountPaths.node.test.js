@@ -6,10 +6,6 @@ import path from 'node:path';
 const root = process.cwd();
 const read = (relative) => fs.readFileSync(path.join(root, relative), 'utf8');
 
-function findInputTag(source, marker) {
-  return source.match(new RegExp(`<input\\b[^>]*${marker}[^>]*>`, 's'))?.[0] || '';
-}
-
 test('extension keeps CFAA asynchronous and quarantines failed fast evidence', () => {
   const txCerStatus = read('src/core/txCerStatus.ts');
   assert.match(txCerStatus, /fastEvidenceStatus\s*===\s*['\"]Failed['\"]/);
@@ -17,43 +13,36 @@ test('extension keeps CFAA asynchronous and quarantines failed fast evidence', (
   assert.doesNotMatch(txCerStatus, /cfaaAuditStatus\s*===\s*['\"]Failed['\"]/);
 });
 
-test('extension TXCer details expose exact identity and independent safety states', () => {
-  const home = read('src/popup/pages/home.ts');
-  for (const marker of ['txcer-full-id', 'FastEvidence', 'CFAA', 'ExposureShares']) {
-    assert.match(home, new RegExp(marker));
-  }
+test('extension TXCer core preserves exact identity and independent safety state', () => {
+  const blockchain = read('src/core/blockchain.ts');
+  const txCerStatus = read('src/core/txCerStatus.ts');
+
+  assert.match(blockchain, /TXCerID:\s*string/);
+  assert.match(blockchain, /ExposureShares\?:\s*ExposureShareV2\[\]/);
+  assert.match(txCerStatus, /fastEvidenceStatus\s*===\s*['\"]Failed['\"]/);
+  assert.doesNotMatch(txCerStatus, /cfaaAuditStatus\s*===\s*['\"]Failed['\"]/);
 });
 
 test('extension login and TXCer caches keep protocol amounts exact', () => {
   const auth = read('src/core/auth.ts');
   const storage = read('src/core/storage.ts');
   const blockchain = read('src/core/blockchain.ts');
-  const history = read('src/popup/pages/history.ts');
   const polling = read('src/core/accountPolling.ts');
   const status = read('src/core/txCerStatus.ts');
   const transfer = read('src/core/transfer.ts');
   const utxoLock = read('src/core/utxoLock.ts');
-  const home = read('src/popup/pages/home.ts');
 
   assert.match(auth, /txCers:\s*Record<string,\s*AmountDecimal>/);
   assert.doesNotMatch(auth, /Number\(txCer\.Value/);
   assert.doesNotMatch(auth, /numericValue\s*=\s*Number/);
   assert.match(storage, /txCers\?:\s*Record<string,\s*AmountDecimal>/);
   assert.match(blockchain, /value:\s*ProtocolAmount/);
-  assert.match(history, /formatAmount\(parseAmount\(amount\)\)/);
-  assert.doesNotMatch(history, /toAmountNumber\(amount\)/);
   assert.match(status, /value:\s*formatAmount\(parseAmount\(value\)\)/);
   assert.doesNotMatch(polling, /Math\.abs\([^\n]*amount/);
   assert.match(polling, /amount:\s*normalizeStoredAmount\(utxo\.Value/);
   assert.doesNotMatch(transfer, /const value = Number\(utxoData\?\.Value/);
   assert.match(utxoLock, /value:\s*AmountDecimal/);
   assert.match(utxoLock, /value:\s*formatAmount\(parseAmount\(utxo\.value\)\)/);
-  const homeTotals = home.slice(home.indexOf('function getAvailableTotals'), home.indexOf('function attachAccountUpdateListener'));
-  const homeSnapshot = home.slice(home.indexOf('function getAddressBalanceSnapshot'), home.indexOf('function copyAddress'));
-  for (const source of [homeTotals, homeSnapshot]) {
-    assert.match(source, /parseAmount\(/);
-    assert.doesNotMatch(source, /Number\([^\n]*(raw|\.Value|\.value|balance|txCer)|parseFloat\(|\.toFixed\(/i);
-  }
 });
 
 test('extension storage, polling, login and wallet sync keep aggregate amounts exact', () => {
@@ -67,8 +56,8 @@ test('extension storage, polling, login and wallet sync keep aggregate amounts e
   assert.match(storage, /totalBalance:\s*Record<number,\s*AmountDecimal>/);
   assert.match(txUser, /interface AddressValue[\s\S]*totalValue:\s*AmountDecimal[\s\S]*utxoValue:\s*AmountDecimal[\s\S]*txCerValue:\s*AmountDecimal/);
 
-  const recalcAddress = polling.match(/function recalcAddressBalance[\s\S]*?\n}\n/)?.[0] || '';
-  const recalcTotal = polling.match(/function recalcTotals[\s\S]*?\n}\n/)?.[0] || '';
+  const recalcAddress = polling.match(/function recalcAddressBalance[\s\S]*?\r?\n}\r?\n/)?.[0] || '';
+  const recalcTotal = polling.match(/function recalcTotals[\s\S]*?\r?\n}\r?\n/)?.[0] || '';
   for (const source of [recalcAddress, recalcTotal]) {
     assert.match(source, /parseAmount\(/);
     assert.match(source, /formatAmount\(/);
@@ -82,7 +71,8 @@ test('extension storage, polling, login and wallet sync keep aggregate amounts e
 test('extension startup preserves TXCer evidence and forces cached verification replay', () => {
   const storage = read('src/core/storage.ts');
   const main = read('src/popup/main.ts');
-  assert.doesNotMatch(main, /clearStaleTxCerData/);
+  const app = read('src/popup/App.vue');
+  assert.doesNotMatch(`${main}\n${app}`, /clearStaleTxCerData/);
   assert.doesNotMatch(storage, /export async function clearStaleTxCerData/);
   assert.match(storage, /markTXCerEvidenceForReverification/);
   assert.match(storage, /fastEvidenceStatus:[^\n]*'Failed'[^\n]*'Pending'/);
@@ -131,18 +121,11 @@ test('extension cross-org TXCer delivery keeps polling while account SSE is acti
 });
 
 test('extension monetary inputs preserve decimal text for exact bigint parsing', () => {
-  const send = read('src/popup/pages/send.ts');
-  const tags = [
-    findInputTag(send, 'id="extraGasPGC"'),
-    findInputTag(send, 'id="txGasInput"'),
-    findInputTag(send, 'data-recipient-field="amount"'),
-    findInputTag(send, 'data-recipient-field="transferGas"'),
-  ];
+  const messages = read('src/minimal/messages.ts');
+  const inject = read('src/content/inject.js');
 
-  for (const tag of tags) {
-    assert.ok(tag, 'expected monetary input to exist');
-    assert.match(tag, /type="text"/);
-    assert.match(tag, /inputmode="decimal"/);
-    assert.doesNotMatch(tag, /type="number"/);
-  }
+  assert.match(messages, /const amount = String\(raw\.amount \?\? ''\)\.trim\(\)/);
+  assert.match(messages, /isPositiveDecimal\(amount\)/);
+  assert.doesNotMatch(messages, /Number\(raw\.amount|parseFloat\(/);
+  assert.match(inject, /sendTransaction:\s*\(transaction\)\s*=>\s*request\(['\"]PANGU_SEND_TRANSACTION['\"],\s*transaction\)/);
 });
